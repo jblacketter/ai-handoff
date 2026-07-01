@@ -245,7 +245,7 @@ def create_session(project_dir: str, launch: bool = False) -> bool:
         write_text_to_session(ids[0], lead_cmd)
         write_text_to_session(ids[2], reviewer_cmd)
         # Start watcher last — agents need a moment to initialize
-        watcher_cmd = "python -m tagteam watch --mode iterm2"
+        watcher_cmd = "tagteam watch --mode iterm2"
         write_text_to_session(ids[1], watcher_cmd)
         # Auto-prime agents after they boot
         print("  Waiting for agents to start before priming...")

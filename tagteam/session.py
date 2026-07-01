@@ -165,7 +165,7 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                     "send-keys",
                     "-t",
                     f"{SESSION_NAME}:0.1",
-                    "python -m tagteam watch --mode tmux",
+                    "tagteam watch --mode tmux",
                     "Enter",
                 )
                 _tmux("send-keys", "-t", f"{SESSION_NAME}:0.2", reviewer_cmd, "Enter")
@@ -179,7 +179,7 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                     "send-keys",
                     "-t",
                     f"{SESSION_NAME}:0.1",
-                    "python -m tagteam watch --mode tmux",
+                    "tagteam watch --mode tmux",
                     "",
                 )
         else:
@@ -187,7 +187,7 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                 "send-keys",
                 "-t",
                 f"{SESSION_NAME}:0.1",
-                "python -m tagteam watch --mode tmux",
+                "tagteam watch --mode tmux",
                 "",
             )
 
@@ -233,14 +233,14 @@ def create_manual_session(project_dir: str | None = None, launch: bool = False) 
     if cmds:
         lead_cmd, reviewer_cmd = cmds
         print(f"  Lead terminal:     {lead_cmd}")
-        print("  Watcher terminal:  python -m tagteam watch --mode notify")
+        print("  Watcher terminal:  tagteam watch --mode notify")
         print(f"  Reviewer terminal: {reviewer_cmd}")
         print()
         print("Then send both agents this priming message:")
         print(f'  "{PRIME_MESSAGE}"')
     else:
         print("  Lead terminal:     start your lead agent")
-        print("  Watcher terminal:  python -m tagteam watch --mode notify")
+        print("  Watcher terminal:  tagteam watch --mode notify")
         print("  Reviewer terminal: start your reviewer agent")
 
     print()
