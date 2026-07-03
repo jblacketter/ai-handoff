@@ -333,6 +333,8 @@ class TestFallbackParserCommand:
         )
         result = read_config(config_file)
         assert result is not None
+        assert result["agents"]["lead"]["name"] == "Claude"
+        assert result["agents"]["reviewer"]["name"] == "Codex"
         assert result["agents"]["lead"]["command"] == "claude --model opus"
         assert result["agents"]["reviewer"]["command"] == "codex --full-auto"
 
@@ -350,5 +352,7 @@ class TestFallbackParserCommand:
         )
         result = read_config(config_file)
         assert result is not None
+        assert result["agents"]["lead"]["name"] == "Claude"
+        assert result["agents"]["reviewer"]["name"] == "Codex"
         assert "command" not in result["agents"]["lead"]
         assert "command" not in result["agents"]["reviewer"]

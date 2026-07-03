@@ -222,6 +222,61 @@ class TestEnsureSession:
         assert result == "error"
 
 
+class TestTagteamInvocation:
+    def _write_posix_tagteam_env(self, env_dir):
+        bin_dir = env_dir / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "python").write_text("")
+        (bin_dir / "tagteam").write_text("")
+
+    def test_watcher_command_prefers_dotvenv(self, tmp_path, monkeypatch):
+        from tagteam import session
+
+        monkeypatch.setattr(session.sys, "platform", "darwin")
+        self._write_posix_tagteam_env(tmp_path / ".venv")
+
+        assert session._watcher_command(str(tmp_path), "iterm2") == (
+            f"{tmp_path}/.venv/bin/python -m tagteam watch --mode iterm2"
+        )
+
+    def test_watcher_command_supports_plain_venv(self, tmp_path, monkeypatch):
+        from tagteam import session
+
+        monkeypatch.setattr(session.sys, "platform", "darwin")
+        self._write_posix_tagteam_env(tmp_path / "venv")
+
+        assert session._watcher_command(str(tmp_path), "notify") == (
+            f"{tmp_path}/venv/bin/python -m tagteam watch --mode notify"
+        )
+
+    def test_watcher_command_falls_back_to_current_interpreter(
+        self, tmp_path, monkeypatch
+    ):
+        from tagteam import session
+
+        monkeypatch.setattr(session.sys, "platform", "darwin")
+        monkeypatch.setattr(session.sys, "executable", "/opt/tagteam/bin/python")
+
+        assert session._watcher_command(str(tmp_path), "tmux") == (
+            "/opt/tagteam/bin/python -m tagteam watch --mode tmux"
+        )
+
+    def test_manual_session_prints_resolved_watcher_command(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from tagteam import session
+
+        monkeypatch.setattr(session.sys, "platform", "darwin")
+        self._write_posix_tagteam_env(tmp_path / ".venv")
+
+        assert session.create_manual_session(str(tmp_path), launch=False) is True
+        out = capsys.readouterr().out
+        assert (
+            f"{tmp_path}/.venv/bin/python -m tagteam watch --mode notify"
+            in out
+        )
+
+
 class TestSessionBackendDetection:
     @patch("tagteam.session.sys.platform", "win32")
     @patch("tagteam.session.shutil.which", return_value=None)

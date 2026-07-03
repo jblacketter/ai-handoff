@@ -239,13 +239,13 @@ def create_session(project_dir: str, launch: bool = False) -> bool:
     # can find .handoff-session.json on startup.
     # Pass raw commands — write_text_to_session() handles escaping internally.
     if launch:
-        from tagteam.session import PRIME_MESSAGE
+        from tagteam.session import PRIME_MESSAGE, _watcher_command
         import time
 
         write_text_to_session(ids[0], lead_cmd)
         write_text_to_session(ids[2], reviewer_cmd)
         # Start watcher last — agents need a moment to initialize
-        watcher_cmd = "tagteam watch --mode iterm2"
+        watcher_cmd = _watcher_command(project_dir, "iterm2")
         write_text_to_session(ids[1], watcher_cmd)
         # Auto-prime agents after they boot
         print("  Waiting for agents to start before priming...")

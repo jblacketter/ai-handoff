@@ -10,6 +10,7 @@ Supports three backends:
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -131,6 +132,56 @@ def _read_launch_commands(project_dir: str | None) -> tuple[str, str] | None:
     return get_launch_commands(config)
 
 
+def _quote_shell_arg(value: str) -> str:
+    """Quote one command argument for the user's shell."""
+    if sys.platform.startswith("win"):
+        return subprocess.list2cmdline([value])
+    return shlex.quote(value)
+
+
+def _project_tagteam_python(project_dir: str | None) -> Path | None:
+    """Find a project-local Python that has the tagteam console script.
+
+    New terminal tabs do not inherit an activated virtualenv, so bare
+    ``python -m tagteam`` can hit pyenv/system Python even when TagTeam is
+    installed into the project. Prefer the local env when it clearly contains
+    TagTeam, then fall back to the interpreter running this process.
+    """
+    project = Path(project_dir or ".").resolve()
+    if sys.platform.startswith("win"):
+        candidates = [
+            (project / ".venv" / "Scripts" / "python.exe",
+             project / ".venv" / "Scripts" / "tagteam.exe"),
+            (project / "venv" / "Scripts" / "python.exe",
+             project / "venv" / "Scripts" / "tagteam.exe"),
+        ]
+    else:
+        candidates = [
+            (project / ".venv" / "bin" / "python",
+             project / ".venv" / "bin" / "tagteam"),
+            (project / "venv" / "bin" / "python",
+             project / "venv" / "bin" / "tagteam"),
+        ]
+
+    for python_path, tagteam_script in candidates:
+        if python_path.exists() and tagteam_script.exists():
+            return python_path
+    return None
+
+
+def _tagteam_module_command(project_dir: str | None) -> str:
+    """Return a stable shell command prefix for invoking TagTeam."""
+    executable = _project_tagteam_python(project_dir)
+    if executable is None:
+        executable = Path(sys.executable or shutil.which("python3") or "python")
+    return f"{_quote_shell_arg(str(executable))} -m tagteam"
+
+
+def _watcher_command(project_dir: str | None, mode: str) -> str:
+    """Return the watcher command for a project and backend mode."""
+    return f"{_tagteam_module_command(project_dir)} watch --mode {mode}"
+
+
 def create_tmux_session(project_dir: str | None = None, launch: bool = False) -> bool:
     """Create a tmux session with lead, watcher, and reviewer panes."""
     if session_exists():
@@ -165,7 +216,7 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                     "send-keys",
                     "-t",
                     f"{SESSION_NAME}:0.1",
-                    "tagteam watch --mode tmux",
+                    _watcher_command(project_dir, "tmux"),
                     "Enter",
                 )
                 _tmux("send-keys", "-t", f"{SESSION_NAME}:0.2", reviewer_cmd, "Enter")
@@ -179,7 +230,7 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                     "send-keys",
                     "-t",
                     f"{SESSION_NAME}:0.1",
-                    "tagteam watch --mode tmux",
+                    _watcher_command(project_dir, "tmux"),
                     "",
                 )
         else:
@@ -187,7 +238,7 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                 "send-keys",
                 "-t",
                 f"{SESSION_NAME}:0.1",
-                "tagteam watch --mode tmux",
+                _watcher_command(project_dir, "tmux"),
                 "",
             )
 
@@ -233,14 +284,14 @@ def create_manual_session(project_dir: str | None = None, launch: bool = False) 
     if cmds:
         lead_cmd, reviewer_cmd = cmds
         print(f"  Lead terminal:     {lead_cmd}")
-        print("  Watcher terminal:  tagteam watch --mode notify")
+        print(f"  Watcher terminal:  {_watcher_command(project_dir, 'notify')}")
         print(f"  Reviewer terminal: {reviewer_cmd}")
         print()
         print("Then send both agents this priming message:")
         print(f'  "{PRIME_MESSAGE}"')
     else:
         print("  Lead terminal:     start your lead agent")
-        print("  Watcher terminal:  tagteam watch --mode notify")
+        print(f"  Watcher terminal:  {_watcher_command(project_dir, 'notify')}")
         print("  Reviewer terminal: start your reviewer agent")
 
     print()

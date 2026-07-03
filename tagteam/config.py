@@ -15,6 +15,110 @@ except ImportError:
     HAS_YAML = False
 
 
+def _indent(line: str) -> int:
+    """Return leading whitespace width for fallback YAML parsing."""
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _parse_simple_value(raw: str) -> str:
+    """Parse a simple scalar value from the fallback YAML parser."""
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _read_config_fallback(content: str) -> dict | None:
+    """Parse the simple tagteam.yaml shape without PyYAML.
+
+    This intentionally supports only the configuration shape TagTeam writes:
+    ``agents -> lead/reviewer -> name/command/model_patterns``.
+    """
+    if content.strip() == "{}":
+        return {}
+
+    lines = content.splitlines()
+    agents_index = None
+    agents_indent = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "agents:":
+            agents_index = i
+            agents_indent = _indent(line)
+            break
+        return None
+
+    if agents_index is None:
+        return None
+
+    agents: dict[str, dict] = {}
+    i = agents_index + 1
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        line_indent = _indent(line)
+        if line_indent <= agents_indent:
+            break
+
+        role = stripped[:-1] if stripped.endswith(":") else None
+        if role not in {"lead", "reviewer"}:
+            i += 1
+            continue
+
+        role_indent = line_indent
+        role_data: dict[str, str | list[str]] = {}
+        i += 1
+        while i < len(lines):
+            sub_line = lines[i]
+            sub = sub_line.strip()
+            if not sub or sub.startswith("#"):
+                i += 1
+                continue
+
+            sub_indent = _indent(sub_line)
+            if sub_indent <= role_indent:
+                break
+
+            if sub.startswith("name:"):
+                role_data["name"] = _parse_simple_value(sub.split(":", 1)[1])
+                i += 1
+                continue
+            if sub.startswith("command:"):
+                role_data["command"] = _parse_simple_value(sub.split(":", 1)[1])
+                i += 1
+                continue
+            if sub == "model_patterns:":
+                patterns: list[str] = []
+                pattern_indent = sub_indent
+                i += 1
+                while i < len(lines):
+                    item_line = lines[i]
+                    item = item_line.strip()
+                    if not item or item.startswith("#"):
+                        i += 1
+                        continue
+                    item_indent = _indent(item_line)
+                    if item_indent <= pattern_indent:
+                        break
+                    if item.startswith("- "):
+                        patterns.append(_parse_simple_value(item[2:]))
+                    i += 1
+                role_data["model_patterns"] = patterns
+                continue
+
+            i += 1
+
+        agents[role] = role_data
+
+    return {"agents": agents} if agents else None
+
+
 def read_config(config_path: Path | str) -> dict | None:
     """Read and parse tagteam.yaml.
 
@@ -35,41 +139,7 @@ def read_config(config_path: Path | str) -> dict | None:
             # Only return if it's a dict (not [], "foo", or other valid YAML)
             return result if isinstance(result, dict) else None
 
-        # Fallback parsing without PyYAML
-        lead_name = None
-        reviewer_name = None
-        lead_command = None
-        reviewer_command = None
-        lines = content.split('\n')
-        for i, line in enumerate(lines):
-            if 'lead:' in line:
-                for j in range(i + 1, min(i + 4, len(lines))):
-                    sub = lines[j]
-                    if 'name:' in sub:
-                        lead_name = sub.split('name:')[1].strip()
-                    elif 'command:' in sub:
-                        lead_command = sub.split('command:')[1].strip()
-                    elif not sub.startswith(' ') and not sub.startswith('\t'):
-                        break
-            elif 'reviewer:' in line:
-                for j in range(i + 1, min(i + 4, len(lines))):
-                    sub = lines[j]
-                    if 'name:' in sub:
-                        reviewer_name = sub.split('name:')[1].strip()
-                    elif 'command:' in sub:
-                        reviewer_command = sub.split('command:')[1].strip()
-                    elif not sub.startswith(' ') and not sub.startswith('\t'):
-                        break
-        if lead_name and reviewer_name:
-            result = {'agents': {
-                'lead': {'name': lead_name},
-                'reviewer': {'name': reviewer_name},
-            }}
-            if lead_command:
-                result['agents']['lead']['command'] = lead_command
-            if reviewer_command:
-                result['agents']['reviewer']['command'] = reviewer_command
-            return result
+        return _read_config_fallback(content)
     except Exception:
         pass
     return None

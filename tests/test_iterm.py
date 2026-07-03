@@ -170,9 +170,8 @@ class TestCreateSessionLaunch:
         # Reviewer gets raw command with quotes intact
         assert calls[1] == call("reviewer-id", 'codex --approval-mode "full-auto"')
         # Watcher
-        assert calls[2] == call(
-            "watcher-id", "python -m tagteam watch --mode iterm2"
-        )
+        from tagteam.session import _watcher_command
+        assert calls[2] == call("watcher-id", _watcher_command(str(tmp_path), "iterm2"))
         # Auto-prime messages sent to lead and reviewer
         from tagteam.session import PRIME_MESSAGE
         assert calls[3] == call("lead-id", PRIME_MESSAGE)
