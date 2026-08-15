@@ -798,7 +798,10 @@ class TestEngineE2E:
         seen = {}
 
         def interrupting_wait(self_, timeout=None):
-            if "pid" in seen:  # later calls (kill-tree cleanup) behave normally
+            args0 = str((getattr(self_, "args", None) or [""])[0])
+            if "pid" in seen or not args0.startswith(str(fake_path)):
+                # later calls (kill-tree cleanup) and unrelated subprocesses
+                # (e.g. `ps` inside procs.identity) behave normally
                 return real_wait(self_, timeout=timeout)
             # let the fake start its grandchild, then simulate Ctrl-C
             deadline = time.monotonic() + 20
@@ -883,8 +886,7 @@ class TestWatcherIntegration:
         # Simulate the resend window elapsing on the same seq
         p.last_ready_send_time = time.time() - 10_000
         p.tick(self._state(1))
-        assert eng.run_owed_turn.call_count == 1
-        eng.log_paused.assert_called()  # informs instead of re-dispatching
+        assert eng.run_owed_turn.call_count == 1  # no watchdog re-send in headless
         # New seq → dispatch again
         p.tick(self._state(2))
         assert eng.run_owed_turn.call_count == 2

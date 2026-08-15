@@ -477,6 +477,27 @@ class _StateProcessor:
         self.last_processed_at: str | None = None
         self.idle_since: float = time.time()
         self.last_ready_send_time: float | None = None
+        # Phase 32: pause marker honored in every mode. `_paused_seq` is the
+        # seq we declined to dispatch while paused; when the marker clears
+        # and that seq is still ready, tick() re-dispatches it exactly once.
+        self._paused_seq: int | None = None
+        self._last_pause_log: float = 0.0
+
+    # -- pause (Phase 32) --------------------------------------------------
+
+    def _pause_info(self) -> dict | None:
+        from tagteam.headless import read_pause
+        try:
+            return read_pause(self.project_dir)
+        except Exception:
+            return None
+
+    def _log_paused(self, info: dict, force: bool = False) -> None:
+        now = time.time()
+        if force or now - self._last_pause_log > 60:
+            self._last_pause_log = now
+            _log(f"!! PAUSED: {info.get('reason')}")
+            _log("   resume with: tagteam resume")
 
     def try_repair(self) -> None:
         """Opportunistic shadow-DB repair, bounded by repair's own backoff."""
@@ -516,6 +537,18 @@ class _StateProcessor:
 
         # Seq dedup with stuck-agent + watchdog re-send logic
         if current_seq == self.last_processed_seq:
+            # Phase 32: resume re-dispatch — we declined this seq while
+            # paused; if the marker is now gone and the state is still
+            # ready, dispatch it exactly once.
+            if (self._paused_seq == current_seq
+                    and state.get("status") == "ready"):
+                if self._pause_info() is None:
+                    self._paused_seq = None
+                    _log("Resumed — dispatching the still-owed turn")
+                    self._dispatch(state)
+                    return
+                self._log_paused(self._pause_info() or {})
+                return
             elapsed = time.time() - self.idle_since
             if (elapsed > self.timeout_minutes * 60
                     and state.get("status") == "working"):
@@ -529,8 +562,10 @@ class _StateProcessor:
                 # A headless turn is a synchronous spawn; re-sending would
                 # start a duplicate agent process. If dispatch is paused
                 # (failed turn), keep the operator informed instead.
-                if state.get("status") == "ready" and self.engine is not None:
-                    self.engine.log_paused()
+                if state.get("status") == "ready":
+                    info = self._pause_info()
+                    if info is not None:
+                        self._log_paused(info)
                 return
 
             if (state.get("status") == "ready"
@@ -581,6 +616,15 @@ class _StateProcessor:
                       command, phase, round_num, state=None):
         _log(f">> {agent_name}'s turn"
              f" (phase: {phase}, round: {round_num})")
+        # Phase 32: the pause marker holds dispatch in EVERY mode. Do not
+        # arm the watchdog re-send while paused; remember the seq so resume
+        # can re-dispatch it once.
+        info = self._pause_info()
+        if info is not None:
+            self._paused_seq = (state or {}).get("seq")
+            self._log_paused(info, force=True)
+            return
+        self._paused_seq = None
         send_success = False
 
         if self.mode == "iterm2":
@@ -703,6 +747,7 @@ def _build_processor(
     pre_send_delay: float,
     turn_timeout_minutes: int | None = None,
     tail_rounds: int | None = None,
+    turn_retries: int = 0,
 ) -> _StateProcessor | None:
     """Resolve config + iTerm session IDs into a ready processor.
 
@@ -745,6 +790,7 @@ def _build_processor(
             tail_rounds=(tail_rounds if tail_rounds is not None
                          else DEFAULT_TAIL_ROUNDS),
             confirm=confirm, log=_log, notify=notify_macos,
+            retries=turn_retries,
         )
         errors = engine.validate()
         if errors:
@@ -800,8 +846,11 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
             if spec:
                 _log(f"  {role}: {spec.provider} via {spec.executable}")
         _log(f"  turn timeout: {eng.timeout_s / 60:.0f} min |"
-             f" round tail: {eng.tail_n} | logs: {eng.project_root}/.tagteam/turns/")
-        eng.log_paused(force=True)
+             f" round tail: {eng.tail_n} | retries: {eng.retries} |"
+             f" logs: {eng.project_root}/.tagteam/turns/")
+    info = processor._pause_info()
+    if info is not None:
+        processor._log_paused(info, force=True)
     if processor.confirm:
         _log("Confirm mode: will pause before sending commands")
     print(flush=True)
@@ -821,6 +870,7 @@ def watch(
     force_poll: bool = False,
     turn_timeout_minutes: int | None = None,
     tail_rounds: int | None = None,
+    turn_retries: int = 0,
 ) -> bool:
     """Main watch loop. Blocks until interrupted with Ctrl-C.
 
@@ -843,6 +893,7 @@ def watch(
         pre_send_delay=pre_send_delay,
         turn_timeout_minutes=turn_timeout_minutes,
         tail_rounds=tail_rounds,
+        turn_retries=turn_retries,
     )
     if processor is None:
         return False
@@ -976,6 +1027,7 @@ def watch_command(args: list[str]) -> int:
     force_poll = False
     turn_timeout_minutes = None
     tail_rounds = None
+    turn_retries = 0
 
     i = 0
     while i < len(args):
@@ -1020,6 +1072,12 @@ def watch_command(args: list[str]) -> int:
         elif arg == "--tail-rounds" and i + 1 < len(args):
             tail_rounds = int(args[i + 1])
             i += 2
+        elif arg == "--turn-retries" and i + 1 < len(args):
+            turn_retries = int(args[i + 1])
+            if turn_retries < 0:
+                print("--turn-retries must be >= 0")
+                return 1
+            i += 2
         elif arg in ("-h", "--help"):
             print("Usage: python -m tagteam watch [options]")
             print()
@@ -1040,7 +1098,10 @@ def watch_command(args: list[str]) -> int:
             print("Headless mode (opt-in, --mode headless):")
             print("  --turn-timeout N   Kill a spawned turn after N minutes (default: 60)")
             print("  --tail-rounds N    Rounds of history in each turn's context (default: 3)")
+            print("  --turn-retries N   Retry a failed turn up to N times, only when the")
+            print("                     repo and handoff fingerprints are unchanged (default: 0)")
             print("  Follow the in-flight turn with: tagteam tail")
+            print("  Controls (any mode): tagteam pause / resume / cancel-turn / interject")
             return 0
         else:
             print(f"Unknown argument: {arg}")
@@ -1063,5 +1124,6 @@ def watch_command(args: list[str]) -> int:
         force_poll=force_poll,
         turn_timeout_minutes=turn_timeout_minutes,
         tail_rounds=tail_rounds,
+        turn_retries=turn_retries,
     )
     return 0 if started else 1
