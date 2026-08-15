@@ -391,6 +391,7 @@ class TestRunner:
         assert b.brief_command(["--generate"], project_root=project) == 0
         assert _briefs(project)[0]["attempt"] == 2
 
+    @needs_proc_inspection
     def test_live_manual_runner_not_misclassified(self, project, fake_path):
         _enable(project)
         _escalate(project)
@@ -432,6 +433,7 @@ class TestRunner:
             conn.close()
         assert b.sweep_abandoned(project, 60) == [2]
 
+    @needs_proc_inspection
     def test_inflight_lifecycle_and_tail(self, project, fake_path, monkeypatch, capsys):
         _enable(project)
         _escalate(project)
@@ -460,6 +462,7 @@ class TestRunner:
         assert "briefer" in seen.get("tail", "") or res.stem in seen.get("tail", "")
         assert h.read_inflight(project) is None
 
+    @needs_proc_inspection
     def test_busy_inflight_refuses_claim(self, project, fake_path, monkeypatch):
         _enable(project)
         _escalate(project)
@@ -476,6 +479,82 @@ class TestRunner:
                                                         "watcher_ident": "999999:x", "pid": None}))
         monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
         assert _run(project).status == "ok"
+
+    def test_event_resolved_inside_lock_race(self, project, fake_path, monkeypatch):
+        """A concurrent rule that closes the cycle right before the claim
+        critical section must not be briefed (event resolved under the lock)."""
+        _enable(project)
+        _escalate(project)
+        from tagteam import dualwrite
+        real_lock = dualwrite.writer_lock
+        state = {"done": False}
+        from contextlib import contextmanager
+
+        @contextmanager
+        def racing_lock(root):
+            with real_lock(root):
+                if not state["done"]:
+                    state["done"] = True
+                    # arbiter approves while we hold the lock (simulates a
+                    # rule that won the lock first)
+                    cycle_mod.add_ruling("feat-x", "plan", "APPROVE", "closing", "jack", str(project))
+                yield
+        monkeypatch.setattr(dualwrite, "writer_lock", racing_lock)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        res = _run(project)
+        assert res.status == "skipped" and "not escalated" in res.reason
+        assert _briefs(project) == []
+
+    @pytest.mark.parametrize("stage", ["setup", "compose", "finalize"])
+    def test_fault_injection_never_strands_claim(self, project, fake_path, monkeypatch, stage):
+        _enable(project)
+        _escalate(project)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        if stage == "setup":
+            monkeypatch.setattr(db, "set_brief_stem", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom-setup")))
+        elif stage == "compose":
+            monkeypatch.setattr(b, "compose_brief_prompt", lambda **k: (_ for _ in ()).throw(RuntimeError("boom-compose")))
+        else:
+            monkeypatch.setattr(b, "verify_brief_file", lambda p: (_ for _ in ()).throw(RuntimeError("boom-final")))
+        res = _run(project)
+        assert res.status == "failed" and "boom" in res.reason
+        rows = _briefs(project)
+        assert len(rows) == 1 and rows[0]["status"] == "failed" and "boom" in rows[0]["reason"]
+        assert h.read_inflight(project) is None
+        assert "briefer_failed" in _diag_kinds(project)
+        # not stranded: a manual retry can proceed
+        monkeypatch.undo()
+        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        assert b.brief_command(["--generate"], project_root=project) == 0
+
+    def test_alias_failure_does_not_change_status(self, project, fake_path, monkeypatch):
+        _enable(project)
+        _escalate(project)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        monkeypatch.setattr(b, "_write_alias", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+        res = _run(project)
+        assert res.status == "ok" and _briefs(project)[0]["status"] == "ok"
+
+    def test_brief_sweep_uses_configured_timeout(self, project, fake_path, monkeypatch, capsys):
+        _enable(project, "  timeout_minutes: 120\n")
+        _escalate(project)
+        ev, _ = b.current_event(project)
+        started = (b.datetime.now(b.timezone.utc) - b.timedelta(minutes=30)).isoformat()
+        conn = db.connect(project_dir=str(project))
+        try:
+            db.claim_brief(conn, ts=started, phase="feat-x", cycle_type="plan", round_=1,
+                           cycle_state="escalated", event_key=ev.event_key, kind="manual",
+                           runner_pid=os.getpid(), runner_ident=procs.identity(os.getpid()) or "me")
+        finally:
+            conn.close()
+        # 30 min old, configured timeout 120 → still running (a 15-min default would abandon it)
+        assert b.brief_command([], project_root=project) == 1
+        assert _briefs(project)[0]["status"] == "running"
+        assert "a1 running" in capsys.readouterr().out
+        # shorter configured timeout → abandoned
+        _enable(project, "  timeout_minutes: 1\n")
+        assert b.brief_command([], project_root=project) == 1
+        assert _briefs(project)[0]["status"] == "abandoned"
 
     def test_db_invalid_skips(self, project, fake_path, monkeypatch):
         from tagteam import dualwrite
@@ -589,6 +668,19 @@ class TestRepairAndSchema:
             db.claim_brief(c, ts="t", phase="p", cycle_type="plan", round_=1, cycle_state="approved",
                            event_key="k", kind="auto", runner_pid=1, runner_ident="x")
         c.close()
+
+    def test_repair_aborts_if_snapshot_fails(self, project, fake_path, monkeypatch):
+        _enable(project)
+        _escalate(project)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        assert _run(project).status == "ok"
+        before = _briefs(project)
+        monkeypatch.setattr(db, "snapshot_non_file_backed",
+                            lambda conn: (_ for _ in ()).throw(RuntimeError("cannot read")))
+        res = repair.rebuild_db_from_files_and_verify(project)
+        assert not res["success"] and "snapshot" in res["reason"]
+        assert (project / ".tagteam" / "tagteam.db").exists()
+        assert _briefs(project) == before             # original DB + audit rows intact
 
     def test_repair_preserves_non_file_backed_tables(self, project, fake_path, monkeypatch):
         _enable(project)

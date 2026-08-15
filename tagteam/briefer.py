@@ -467,7 +467,14 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
                 log: Callable[[str], None] | None = None,
                 notify: Callable[[str, str], None] | None = None,
                 skill_unused: None = None) -> BriefResult:
-    """Claim → inflight → spawn → verify → finish for the current event."""
+    """Claim → inflight → spawn → verify → finish for the current event.
+
+    The event is resolved and re-validated INSIDE the writer-lock critical
+    section that performs the claim ("latest entry at claim time"). Every
+    exception after the claim finalizes the claim row as failed and removes
+    the inflight pointer; only a hard runner crash leaves them behind for
+    `sweep_abandoned`.
+    """
     from tagteam import db, dualwrite
     log = log or (lambda m: None)
     notify = notify or (lambda t, m: None)
@@ -478,15 +485,16 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
     if dualwrite.is_db_invalid(root):
         log("   briefer skipped: DB invalid — run `tagteam state repair-db`")
         return BriefResult("skipped", "db_invalid")
-    ev, why = current_event(root)
-    if ev is None:
-        return BriefResult("skipped", why)
-
-    sweep_abandoned(root, spec.timeout_s, log)
 
     runner_pid = os.getpid()
     runner_ident = procs.identity(runner_pid)
     with dualwrite.writer_lock(root):
+        # Resolve the escalation event under the lock: a concurrent `rule`
+        # / rearm cannot change it between resolution and claim.
+        ev, why = current_event(root)
+        if ev is None:
+            return BriefResult("skipped", why)
+        sweep_abandoned(root, spec.timeout_s, log)
         inflight = h.read_inflight(root)
         if inflight is not None:
             if _inflight_live(inflight):
@@ -515,58 +523,73 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
             if prior is not None:
                 return BriefResult("skipped", f"event already briefed (#{prior['id']} {prior['path']})",
                                    brief_id=prior["id"], path=prior["path"], event_key=ev.event_key)
-            # refused: running attempt exists, or a failed/abandoned auto attempt
-            alias = alias_path(root, ev.phase, ev.type)
-            if not (alias.exists() and ev.event_key in alias.read_text(encoding="utf-8", errors="replace")):
-                write_alias_stub(root, ev, history_prev[0]["path"] if history_prev else None)
+            try:
+                alias = alias_path(root, ev.phase, ev.type)
+                if not (alias.exists() and ev.event_key in alias.read_text(encoding="utf-8", errors="replace")):
+                    write_alias_stub(root, ev, history_prev[0]["path"] if history_prev else None)
+            except OSError as e:
+                log(f"   briefer: alias stub failed: {e}")
             return BriefResult("refused", "an attempt is running or the automatic attempt "
                                "already ran for this event — `tagteam brief --generate` to retry",
                                event_key=ev.event_key)
         brief_id, attempt = claim
         stem = f"{ev.phase}_{ev.type}_r{ev.round}_briefer_{_stamp()}_a{attempt}"
-        conn = db.connect(project_dir=root)
-        try:
-            db.set_brief_stem(conn, brief_id, stem)
-        finally:
-            conn.close()
-        out_path = brief_path(root, ev, attempt)
-        d = h.turns_dir(root); d.mkdir(parents=True, exist_ok=True)
-        log_path, events_path = d / f"{stem}.log", d / f"{stem}.events.jsonl"
-        started_at = _now_iso()
-        inflight = {
-            "phase": ev.phase, "type": ev.type, "round": ev.round, "role": "briefer",
-            "agent": "briefer", "provider": spec.provider, "stem": stem,
-            "log_path": str(log_path), "events_path": str(events_path),
-            "started_at": started_at, "pid": None, "child_ident": None,
-            "watcher_pid": runner_pid, "watcher_ident": runner_ident,
-            "brief_id": brief_id, "event_key": ev.event_key, "kind": kind, "attempt": attempt,
-        }
         inflight_file = h.inflight_path(root)
-        inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
-
-    # ---- compose (outside the lock)
-    from tagteam.cycle import tail_rounds
-    from tagteam.state import read_state
-    try:
-        rounds = tail_rounds(ev.phase, ev.type, None, root)
-    except Exception:
-        rounds = []
-    plan_file = Path(root) / "docs" / "phases" / f"{ev.phase}.md"
-    plan_text = plan_file.read_text(encoding="utf-8", errors="replace") if plan_file.exists() else None
-    inter: list[dict] = []
-    try:
-        conn = db.connect(project_dir=root)
+        # From here on, every failure must finalize the claim.
         try:
-            inter = [r for r in db.get_interjections(conn, phase=ev.phase, cycle_type=ev.type,
-                                                     undelivered_only=True, include_retired=False)]
-        finally:
-            conn.close()
-    except Exception:
-        inter = []
-    prompt, notices = compose_brief_prompt(event=ev, rounds=rounds, plan_text=plan_text,
-                                           interjections=inter, state=read_state(root) or {},
-                                           output_path=str(out_path), attempt=attempt, kind=kind)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = db.connect(project_dir=root)
+            try:
+                db.set_brief_stem(conn, brief_id, stem)
+            finally:
+                conn.close()
+            out_path = brief_path(root, ev, attempt)
+            d = h.turns_dir(root); d.mkdir(parents=True, exist_ok=True)
+            log_path, events_path = d / f"{stem}.log", d / f"{stem}.events.jsonl"
+            started_at = _now_iso()
+            inflight = {
+                "phase": ev.phase, "type": ev.type, "round": ev.round, "role": "briefer",
+                "agent": "briefer", "provider": spec.provider, "stem": stem,
+                "log_path": str(log_path), "events_path": str(events_path),
+                "started_at": started_at, "pid": None, "child_ident": None,
+                "watcher_pid": runner_pid, "watcher_ident": runner_ident,
+                "brief_id": brief_id, "event_key": ev.event_key, "kind": kind, "attempt": attempt,
+            }
+            inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
+        except Exception as e:
+            _finalize_failed(root, brief_id, stem, f"setup failed: {type(e).__name__}: {e}",
+                             ev, kind, attempt, log)
+            return BriefResult("failed", f"setup failed: {e}", brief_id=brief_id, attempt=attempt,
+                               stem=stem, event_key=ev.event_key)
+
+    # ---- compose (outside the lock) — still finalize on any error
+    try:
+        from tagteam.cycle import tail_rounds
+        from tagteam.state import read_state
+        try:
+            rounds = tail_rounds(ev.phase, ev.type, None, root)
+        except Exception:
+            rounds = []
+        plan_file = Path(root) / "docs" / "phases" / f"{ev.phase}.md"
+        plan_text = plan_file.read_text(encoding="utf-8", errors="replace") if plan_file.exists() else None
+        inter: list[dict] = []
+        try:
+            conn = db.connect(project_dir=root)
+            try:
+                inter = list(db.get_interjections(conn, phase=ev.phase, cycle_type=ev.type,
+                                                  undelivered_only=True, include_retired=False))
+            finally:
+                conn.close()
+        except Exception:
+            inter = []
+        prompt, notices = compose_brief_prompt(event=ev, rounds=rounds, plan_text=plan_text,
+                                               interjections=inter, state=read_state(root) or {},
+                                               output_path=str(out_path), attempt=attempt, kind=kind)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        _finalize_failed(root, brief_id, stem, f"compose failed: {type(e).__name__}: {e}",
+                         ev, kind, attempt, log)
+        return BriefResult("failed", f"compose failed: {e}", brief_id=brief_id, attempt=attempt,
+                           stem=stem, event_key=ev.event_key)
 
     def _on_spawn(pid: int) -> None:
         inflight["pid"] = pid
@@ -589,89 +612,136 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
     except h.SpawnError as e:
         spawn_error = str(e)
         out = h.RunOutput(exit_code=None, timed_out=False, duration_ms=0)
+    except BaseException as e:   # KeyboardInterrupt / unexpected: finalize, re-raise
+        try:
+            inflight_file.unlink()
+        except OSError:
+            pass
+        _finalize_failed(root, brief_id, stem, f"runner interrupted: {type(e).__name__}",
+                         ev, kind, attempt, log)
+        raise
     finally:
         try:
             inflight_file.unlink()
         except OSError:
             pass
 
-    cancel = h.read_cancel(root)
-    cancelled_by = None
-    if cancel is not None and cancel.get("stem") == stem:
-        h.clear_cancel(root)
-        cancelled_by = cancel.get("by") or "arbiter"
-
-    if cancelled_by:
-        status, reason, usage_status = "failed", f"cancelled by {cancelled_by}", "cancelled"
-    elif spawn_error:
-        status, reason, usage_status = "failed", f"could not start {spec.provider}: {spawn_error}", "spawn_failed"
-    elif out.timed_out:
-        status, reason, usage_status = "failed", f"briefer exceeded {spec.timeout_s/60:.0f} min timeout", "timeout"
-    elif out.exit_code != 0:
-        status, reason, usage_status = "failed", f"{spec.provider} exited {out.exit_code}", "nonzero_exit"
-    else:
-        status, reason = verify_brief_file(out_path)
-        usage_status = "ok" if status in ("ok", "partial") else "no_round"
-
-    # usage row (role briefer)
+    # ---- finalize (any exception here → failed row, never a stranded claim)
     try:
-        lines = events_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        lines = []
-    usage = h.parse_usage(spec.provider, lines) or {}
-    usage_row_id = None
-    conn = db.connect(project_dir=root)
-    try:
+        cancel = h.read_cancel(root)
+        cancelled_by = None
+        if cancel is not None and cancel.get("stem") == stem:
+            h.clear_cancel(root)
+            cancelled_by = cancel.get("by") or "arbiter"
+        if cancelled_by:
+            status, reason, usage_status = "failed", f"cancelled by {cancelled_by}", "cancelled"
+        elif spawn_error:
+            status, reason, usage_status = "failed", f"could not start {spec.provider}: {spawn_error}", "spawn_failed"
+        elif out.timed_out:
+            status, reason, usage_status = "failed", f"briefer exceeded {spec.timeout_s/60:.0f} min timeout", "timeout"
+        elif out.exit_code != 0:
+            status, reason, usage_status = "failed", f"{spec.provider} exited {out.exit_code}", "nonzero_exit"
+        else:
+            status, reason = verify_brief_file(out_path)
+            usage_status = "ok" if status in ("ok", "partial") else "no_round"
         try:
-            usage_row_id = db.add_usage(conn, ts=_now_iso(), phase=ev.phase, type=ev.type,
-                                        round=ev.round, role="briefer", agent="briefer",
-                                        provider=spec.provider, status=usage_status,
-                                        exit_code=out.exit_code, duration_ms=out.duration_ms,
-                                        log_path=str(log_path),
-                                        **{k: usage.get(k) for k in ("model", "input_tokens",
-                                           "output_tokens", "cache_read_tokens",
-                                           "cache_write_tokens", "cost_usd", "num_turns",
-                                           "session_id")})
-        except Exception as e:
-            log(f"   briefer: usage row failed: {e}")
+            lines = events_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        usage = h.parse_usage(spec.provider, lines) or {}
+        usage_row_id = None
         content = None
-        if status in ("ok", "partial") and out_path.exists():
-            content = out_path.read_text(encoding="utf-8", errors="replace")
-        db.finish_brief(conn, brief_id, status=status, ts=_now_iso(), stem=stem,
-                        path=str(out_path) if out_path.exists() else None, content=content,
-                        model=usage.get("model"), usage_row_id=usage_row_id,
-                        duration_ms=out.duration_ms, reason=reason)
-        if status == "failed":
-            db.add_diagnostic(conn, "briefer_failed", {
-                "brief_id": brief_id, "event_key": ev.event_key, "phase": ev.phase,
-                "type": ev.type, "round": ev.round, "kind": kind, "attempt": attempt,
-                "reason": reason, "log_path": str(log_path)}, _now_iso())
-            conn.commit()
-    finally:
-        conn.close()
-
-    with open(log_path, "ab") as f:
-        f.write(f"[tagteam] brief {status}: {reason}\n".encode("utf-8", "replace"))
-
-    if status in ("ok", "partial") and content:
-        _write_alias(root, ev, content)
-        log(f"   briefer: brief {status} — {out_path}" + (f" ({reason})" if status == "partial" else ""))
-        notify("Tagteam", f"Escalation brief ready: {out_path.name}")
-    else:
-        prev = None
         conn = db.connect(project_dir=root)
         try:
-            hist = [r for r in db.brief_history(conn, ev.phase, ev.type)
-                    if r["status"] in ("ok", "partial") and r["event_key"] != ev.event_key]
-            prev = hist[0]["path"] if hist else None
+            try:
+                usage_row_id = db.add_usage(conn, ts=_now_iso(), phase=ev.phase, type=ev.type,
+                                            round=ev.round, role="briefer", agent="briefer",
+                                            provider=spec.provider, status=usage_status,
+                                            exit_code=out.exit_code, duration_ms=out.duration_ms,
+                                            log_path=str(log_path),
+                                            **{k: usage.get(k) for k in ("model", "input_tokens",
+                                               "output_tokens", "cache_read_tokens",
+                                               "cache_write_tokens", "cost_usd", "num_turns",
+                                               "session_id")})
+            except Exception as e:
+                log(f"   briefer: usage row failed: {e}")
+            if status in ("ok", "partial") and out_path.exists():
+                content = out_path.read_text(encoding="utf-8", errors="replace")
+            db.finish_brief(conn, brief_id, status=status, ts=_now_iso(), stem=stem,
+                            path=str(out_path) if out_path.exists() else None, content=content,
+                            model=usage.get("model"), usage_row_id=usage_row_id,
+                            duration_ms=out.duration_ms, reason=reason)
+            if status == "failed":
+                db.add_diagnostic(conn, "briefer_failed", {
+                    "brief_id": brief_id, "event_key": ev.event_key, "phase": ev.phase,
+                    "type": ev.type, "round": ev.round, "kind": kind, "attempt": attempt,
+                    "reason": reason, "log_path": str(log_path)}, _now_iso())
+                conn.commit()
         finally:
             conn.close()
-        write_alias_stub(root, ev, prev)
-        log(f"   briefer: brief failed — {reason}; run `tagteam brief --generate` to retry")
-        notify("Tagteam", f"Escalation brief failed: {reason}")
+    except Exception as e:
+        _finalize_failed(root, brief_id, stem, f"finalize failed: {type(e).__name__}: {e}",
+                         ev, kind, attempt, log)
+        return BriefResult("failed", f"finalize failed: {e}", brief_id=brief_id, attempt=attempt,
+                           stem=stem, event_key=ev.event_key)
+
+    # ---- alias + notify (best-effort; never changes the recorded status)
+    try:
+        with open(log_path, "ab") as f:
+            f.write(f"[tagteam] brief {status}: {reason}\n".encode("utf-8", "replace"))
+        if status in ("ok", "partial") and content:
+            _write_alias(root, ev, content)
+            log(f"   briefer: brief {status} — {out_path}" + (f" ({reason})" if status == "partial" else ""))
+            notify("Tagteam", f"Escalation brief ready: {out_path.name}")
+        else:
+            prev = None
+            conn = db.connect(project_dir=root)
+            try:
+                hist = [r for r in db.brief_history(conn, ev.phase, ev.type)
+                        if r["status"] in ("ok", "partial") and r["event_key"] != ev.event_key]
+                prev = hist[0]["path"] if hist else None
+            finally:
+                conn.close()
+            write_alias_stub(root, ev, prev)
+            log(f"   briefer: brief failed — {reason}; run `tagteam brief --generate` to retry")
+            notify("Tagteam", f"Escalation brief failed: {reason}")
+    except Exception as e:
+        log(f"   briefer: post-processing (alias/notify) failed: {e}")
     return BriefResult(status, reason, brief_id=brief_id, attempt=attempt,
                        path=str(out_path) if out_path.exists() else None, stem=stem,
                        duration_ms=out.duration_ms, event_key=ev.event_key)
+
+
+def _finalize_failed(root: str, brief_id: int, stem: str, reason: str, ev: Event,
+                     kind: str, attempt: int, log: Callable[[str], None]) -> None:
+    """Best-effort: mark the claim failed, write a diagnostic, drop the pointer."""
+    from tagteam import db
+    try:
+        p = h.inflight_path(root)
+        if p.exists():
+            try:
+                cur = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                cur = {}
+            if cur.get("stem") in (None, stem):
+                p.unlink()
+    except OSError:
+        pass
+    try:
+        conn = db.connect(project_dir=root)
+        try:
+            db.finish_brief(conn, brief_id, status="failed", ts=_now_iso(), stem=stem,
+                            reason=reason)
+            db.add_diagnostic(conn, "briefer_failed", {
+                "brief_id": brief_id, "event_key": ev.event_key, "phase": ev.phase,
+                "type": ev.type, "round": ev.round, "kind": kind, "attempt": attempt,
+                "reason": reason}, _now_iso())
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log(f"   briefer: could not finalize failed claim #{brief_id}: {e}")
+    log(f"   briefer: attempt #{brief_id} failed — {reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +824,8 @@ def brief_command(args: list[str], project_root: str | Path | None = None, out=N
                 print(f"No current escalation: {why}", file=out); return 1
             row = db.successful_brief_for_event(conn, ev.event_key)
             if row is None:
-                sweep_abandoned(root, BRIEFER_DEFAULT_TIMEOUT_MINUTES * 60)
+                cfg = read_config(Path(root) / "tagteam.yaml") or {}
+                sweep_abandoned(root, float(get_briefer_spec(cfg)["timeout_minutes"]) * 60)
                 rows = db.briefs_for_event(conn, ev.event_key)
                 state_txt = ", ".join(f"a{r['attempt']} {r['status']}" for r in rows) or "no attempt yet"
                 print(f"No brief yet for the current event {ev.event_key} ({state_txt}). "

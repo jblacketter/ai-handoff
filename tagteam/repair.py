@@ -231,8 +231,11 @@ def rebuild_db_from_files_and_verify(project_dir: str | Path) -> dict[str, Any]:
                     snapshot = db.snapshot_non_file_backed(old)
                 finally:
                     old.close()
-            except Exception:
-                snapshot = {}
+            except Exception as e:
+                # Never delete a DB whose audit tables we could not copy.
+                return {"success": False,
+                        "reason": f"could not snapshot non-file-backed tables before rebuild: {e}",
+                        "conn": None}
         _remove_sqlite_db_files(db_path)
         conn = db.connect(db_path=db_path)
         db.import_from_files(project_path, conn)
