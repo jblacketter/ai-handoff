@@ -1,6 +1,9 @@
 """Tests for quickstart command and onboarding helpers."""
 
 import os
+import sys
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from tagteam.setup import needs_setup, run_setup
@@ -222,6 +225,12 @@ class TestEnsureSession:
         assert result == "error"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="simulates a POSIX venv layout + shell quoting by patching "
+           "sys.platform='darwin'; WindowsPath rendering makes the expected "
+           "strings unreachable on a Windows host (code path is Windows-aware).",
+)
 class TestTagteamInvocation:
     def _write_posix_tagteam_env(self, env_dir):
         bin_dir = env_dir / "bin"

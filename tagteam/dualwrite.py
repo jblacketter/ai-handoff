@@ -53,12 +53,18 @@ _lock_depth = threading.local()
 if sys.platform == "win32":  # pragma: no cover - exercised on Windows CI
     import msvcrt
 
+    # Lock one byte far past any content the lock file will ever hold, so
+    # the holder-info stamp written at offset 0 never touches the locked
+    # region (Windows byte-range locks block writes to the region even
+    # from the locking process's own handle in some paths).
+    _WIN_LOCK_OFFSET = 1 << 30
+
     def _os_lock(fd: int) -> None:
         # LK_NBLCK is non-blocking; poll until acquired so we behave like
         # a blocking LOCK_EX without msvcrt's 10-second LK_LOCK give-up.
         while True:
             try:
-                os.lseek(fd, 0, os.SEEK_SET)
+                os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 return
             except OSError:
@@ -66,7 +72,7 @@ if sys.platform == "win32":  # pragma: no cover - exercised on Windows CI
 
     def _os_unlock(fd: int) -> None:
         try:
-            os.lseek(fd, 0, os.SEEK_SET)
+            os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
@@ -165,8 +171,7 @@ def writer_lock(project_dir: str | Path) -> Iterator[None]:
                     # it. Failure is benign.
                     try:
                         os.lseek(fd, 0, os.SEEK_SET)
-                        if sys.platform != "win32":
-                            os.ftruncate(fd, 0)
+                        os.ftruncate(fd, 0)
                         os.write(
                             fd,
                             f"{os.getpid()} "

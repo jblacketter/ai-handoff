@@ -29,6 +29,9 @@ Thumbs.db
 handoff-state.json
 .handoff-state.tmp
 .handoff-session.json
+# ...except the recorded parity corpus, which the determinism test compares
+# byte-for-byte on a fresh checkout (CI).
+!tests/fixtures/recorded/**/handoff-state.json
 
 # User project artifacts (created by setup command or TUI, not part of this repo)
 projects/
