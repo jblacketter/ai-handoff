@@ -17,15 +17,12 @@ from tagteam.state import read_state, update_state, get_state_path, normalize_ph
 
 
 def notify_macos(title: str, message: str) -> None:
-    """Send macOS desktop notification."""
-    try:
-        subprocess.run(
-            ["osascript", "-e",
-             f'display notification "{message}" with title "{title}"'],
-            capture_output=True, timeout=5,
-        )
-    except Exception:
-        pass
+    """Desktop notification. Name kept for backward compatibility (tests
+    and callers patch `tagteam.watcher.notify_macos`); since Phase 32 it
+    dispatches to `tagteam.notify.notify`, which is cross-platform (macOS
+    osascript, Windows toast/msg, Linux notify-send) and best-effort."""
+    from tagteam.notify import notify
+    notify(title, message)
 
 
 def pane_exists(pane_target: str) -> bool:
