@@ -186,27 +186,24 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
      already-modified tracked file, or changing the bytes of an already-
      present untracked file, changes the fingerprint; ordering is git's own,
      deterministic; the temp index file is deleted afterwards) ‖ **for every
-     submodule, recursively** (paths from `git submodule --quiet foreach
-     --recursive 'echo "$displaypath"'`, in that order), the same triple
-     computed inside the submodule (its HEAD ‖ index tree ‖ temp-index tree)
-     — so a pre-existing dirty submodule that is edited again changes the
-     fingerprint. **Embedded repositories that are not registered
-     submodules** (reviewer r4): `git add -A` stages such a directory as a
-     mode-160000 gitlink at its HEAD (warning, exit 0), so edits inside it
-     would be invisible. Rule (reviewer r4/r5), applied **at every
-     repository level the recursion visits**: after building that level's
-     temp index, `GIT_INDEX_FILE=<tmp> git ls-files --stage` is scanned for
-     `160000` entries; the *only* accepted gitlink paths are those that the
-     recursive submodule traversal (`git submodule --quiet foreach
-     --recursive 'echo "$displaypath"'`, exit 0 with empty output when there
-     are no submodules — treated as the empty set) **actually visited and
-     fingerprinted at that level**. Any other gitlink — an unregistered
-     embedded repo, *or a path merely declared in `.gitmodules` without a
-     real submodule checkout in the traversal* — makes the fingerprint
-     `UNSUPPORTED` (fail closed); `.gitmodules` is never consulted as a
-     whitelist. The retry log names the offending path so the operator can
-     register/initialise it as a submodule or remove it. **Fail closed**
-     generally (reviewer r3): if *any* git command in the fingerprint fails
+     gitlink, recursively** (reviewer r4–r6, final form — no `foreach`, no
+     whitelist): at each repository level, `GIT_INDEX_FILE=<tmp> git
+     ls-files --stage -z` (NUL-framed, lossless for any path bytes) is
+     parsed into `(mode, sha, stage, path)` records; every mode-`160000`
+     entry is recursed into *by construction* — the same triple (HEAD ‖
+     index tree ‖ temp-index tree) is computed with cwd = that gitlink
+     directory, whether it is a registered submodule, an uninitialised one,
+     an unregistered embedded repository, or a `.gitmodules`-declared path
+     with a nested repo — because the temp-index tree only records the
+     gitlink's HEAD, the recursion is what makes edits *inside* it visible.
+     A gitlink directory with no `.git` (uninitialised submodule, no working
+     tree) contributes its recorded SHA only — there is nothing on disk to
+     edit. The digest is a length-prefixed, NUL-framed record stream —
+     `level-path\0kind\0value\0` for each of HEAD / index-tree / temp-tree
+     / gitlink-path — so the (level, path) association is *inside* the
+     hash, not inferred from line splitting; nested gitlinks are matched at
+     their own level by recursion, never by string comparison against a
+     root-relative list. **Fail closed**     generally (reviewer r3): if *any* git command in the fingerprint fails
      or times out (unmerged/conflicted index, missing submodule checkout,
      corrupt repo, git not on PATH), or the recomputed fingerprint cannot be
      produced, `repo_fingerprint()` returns the sentinel `UNSUPPORTED` and
@@ -387,8 +384,9 @@ ready state as new (re-dispatch once). Tested for notify + headless.
 ```
 repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ write-tree(index) ‖ write-tree(tmp index after add -A) ‖ same triple per submodule, recursive)
                                       # None = not a git repo; UNSUPPORTED = any git failure / unmerged index /
-                                      #   any 160000 gitlink (at any level) not actually visited by the recursive
-                                      #   submodule traversal — fail closed (.gitmodules is not a whitelist)
+                                      #   any parse/recursion failure — fail closed. Every 160000 gitlink at every
+                                      #   level (from `ls-files --stage -z`) is recursed into; NUL-framed (level,path)
+                                      #   records are part of the digest.
 handoff_pre = handoff_fingerprint()   # (state.seq, target cycle entry count, cycle state/ready_for/round)
 for attempt in 0..N:
     run turn → outcome
@@ -411,10 +409,14 @@ then nonzero → no retry; **change the contents of an already-present
 untracked file** then nonzero → no retry; `git add` (stage only) then
 nonzero → no retry; **edit inside a pre-existing dirty submodule** then
 nonzero → no retry; **an already-present untracked embedded repository
-(not a submodule) dirtied again** → `UNSUPPORTED` → no retry; **a path
-declared in `.gitmodules` but with no submodule checkout in the traversal,
-holding an untracked nested repo that is dirtied again** → `UNSUPPORTED`
-→ no retry; **unmerged
+(not a submodule) dirtied again** → fingerprint changes (it is recursed
+into) → no retry; **a `.gitmodules`-declared path with no checkout,
+holding an untracked nested repo dirtied again** → changes → no retry;
+**a submodule whose path contains a newline plus a separate embedded repo
+whose path equals the newline-delimited suffix** → each fingerprinted at
+its own (level, path) record → the embedded repo's edit changes the
+digest; **nested submodule** (sub-submodule) edited → changes at its own
+level; **unmerged
 index** (or git failure) → `UNSUPPORTED` → no retry even for a clean
 nonzero; clean nonzero → retried; `no_round` / `cancelled` → never
 retried.
@@ -536,13 +538,18 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   (f) a content change to an *already-present untracked* file, (g) a
   stage-only `git add`, or (h) an edit inside a *pre-existing dirty
   submodule*, pauses immediately with no retry; a repo whose fingerprint is
-  `UNSUPPORTED` — (i) an already-present untracked *embedded repository that
-  is not a registered submodule* dirtied again (real nested `git init`),
-  (j) a *declared-only* `.gitmodules` path (committed entry, no gitlink in
-  HEAD/index, no checkout in the traversal) holding a nested repo dirtied
-  again, or an unmerged index / git error (mocked) — never retries anything,
-  and the log names the reason/path; a repo with no submodules at all
-  (foreach empty) still retries clean turns normally;
+  `UNSUPPORTED` (unmerged index / mocked git failure / a mocked parse or
+  recursion failure) never retries anything and the log names the reason;
+  gitlink cases are *covered by recursion*, each asserted to change the
+  fingerprint and therefore suppress retry: (i) an already-present untracked
+  embedded repository (real nested `git init`, not a submodule) dirtied
+  again, (j) a declared-only `.gitmodules` path (committed entry, no gitlink
+  in HEAD/index) holding a nested repo dirtied again, (k) a submodule whose
+  path contains a newline **plus** a separate embedded repository whose
+  path equals the newline-delimited suffix (the embedded repo's edit is
+  detected at its own record; the newline path is framed losslessly), and
+  (l) a nested sub-submodule edited (matched at its own level); a repo with
+  no gitlinks at all still retries clean turns normally;
   `no_round` and `cancelled` are never retried; a non-git project retries
   only `spawn_failed`.
 - [ ] `agents.<role>.headless.timeout_minutes` overrides `--turn-timeout`
@@ -590,15 +597,15 @@ a note targeted at the other role is not even rendered). `usage`/DB show
    and the parent pid is the recorded watcher; otherwise report + clean
    stale metadata (Scope 3, Cancel flow). *(r2)*
 7. **Repo fingerprint is content-sensitive and recursive** — final form:
-   HEAD ‖ write-tree(index) ‖ write-tree(temp index after `add -A`), the
-   same triple per submodule the recursive traversal actually visits; at
-   every level, any 160000 gitlink **not visited and fingerprinted by that
-   traversal** (unregistered embedded repo, or a `.gitmodules`-declared path
-   without a real checkout — `.gitmodules` is never a whitelist), any git
-   failure, or an unmerged index ⇒ `UNSUPPORTED` ⇒ non-retryable (fail
-   closed); a repo with no submodules (foreach exit 0, empty) is the normal
-   case; only ignored paths are outside a successful fingerprint (Scope 7,
-   Retries rule). *(r2–r5)*
+   at every level, HEAD ‖ write-tree(index) ‖ write-tree(temp index after
+   `add -A`), and **every 160000 gitlink from `ls-files --stage -z`
+   (NUL-framed) is recursed into with the same triple** — registered,
+   uninitialised (SHA only, no worktree), embedded, or `.gitmodules`-declared
+   alike — with `(level-path, kind, value)` records framed inside the digest
+   so association is never inferred from line splitting; no `foreach`, no
+   whitelist. Any git failure, unmerged index, or parse/recursion failure ⇒
+   `UNSUPPORTED` ⇒ non-retryable (fail closed); only ignored paths are
+   outside a successful fingerprint (Scope 7, Retries rule). *(r2–r6)*
 8. **Interjections are cycle-scoped** — eligibility requires the receiving
    turn's cycle, or NULL phase (written with nothing owed: `phase/type/
    round/turn` all NULL + `observed_state` provenance) which lands on the
@@ -624,11 +631,12 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   `write-tree`), so pre-existing modifications/untracked files/dirty
   submodules do not mask agent edits; only ignored paths (build outputs,
   `.tagteam/`, venvs) can change without changing it, and the handoff
-  fingerprint independently guards `.tagteam/` state. Any git failure,
-  unmerged index, or *gitlink not actually visited by the recursive
-  submodule traversal* (unregistered embedded repo, or a `.gitmodules`
-  declaration without a real checkout) fails closed (`UNSUPPORTED` →
-  non-retryable, path named in the log). Documented in README.
+  fingerprint independently guards `.tagteam/` state. Every gitlink at
+  every level is recursed into (registered or not; NUL-framed paths; the
+  (level, path) binding is inside the digest), so no embedded repository
+  can hide edits; any git failure, unmerged index, or parse/recursion
+  failure fails closed (`UNSUPPORTED` → non-retryable, reason named in the
+  log). Documented in README.
 - **Interjection delivered but ignored by the agent.** The prompt marks
   them as arbiter instructions and SKILL.md says so; the audit trail shows
   delivery; enforcement is a Phase 34 cockpit concern (show
