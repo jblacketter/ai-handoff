@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "orchestration-controls-usage-surfacing-30-arc",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-15",
+  "baseline": {
+    "sha": "514cbc804ee1f800662bd53831342fbbd323d23f",
+    "dirty_paths": [],
+    "captured_at": "2026-08-15T06:55:17.088019+00:00",
+    "source": "copied-from-plan"
+  }
+}
