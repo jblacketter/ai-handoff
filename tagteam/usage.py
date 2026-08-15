@@ -17,7 +17,8 @@ _TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_writ
 def _empty_bucket() -> dict:
     return {"turns": 0, "ok": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
             "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd": 0.0,
-            "cost_known_turns": 0, "duration_ms_total": 0, "mean_duration_ms": None}
+            "cost_known_turns": 0, "duration_ms_total": 0, "duration_known_turns": 0,
+            "mean_duration_ms": None}
 
 
 def _add(bucket: dict, row: dict) -> None:
@@ -37,11 +38,12 @@ def _add(bucket: dict, row: dict) -> None:
     d = row.get("duration_ms")
     if isinstance(d, (int, float)):
         bucket["duration_ms_total"] += int(d)
+        bucket["duration_known_turns"] += 1
 
 
 def _finish(bucket: dict) -> dict:
-    if bucket["turns"]:
-        bucket["mean_duration_ms"] = int(bucket["duration_ms_total"] / bucket["turns"])
+    if bucket["duration_known_turns"]:
+        bucket["mean_duration_ms"] = int(bucket["duration_ms_total"] / bucket["duration_known_turns"])
     bucket["cost_usd"] = round(bucket["cost_usd"], 6)
     return bucket
 
@@ -95,11 +97,12 @@ def render_text(agg: dict) -> str:
                   else f" ({b['cost_known_turns']}/{b['turns']} priced)")
         mean = (f"{b['mean_duration_ms']/1000:.0f}s"
                 if b["mean_duration_ms"] is not None else "-")
+        cost = _fmt_cost(b["cost_usd"]) if b["cost_known_turns"] else "-"
         return (f"turns={b['turns']} (ok {b['ok']}, failed {b['failed']})  "
                 f"in={_fmt_int(b['input_tokens'])} out={_fmt_int(b['output_tokens'])} "
                 f"cache_r={_fmt_int(b['cache_read_tokens'])} "
                 f"cache_w={_fmt_int(b['cache_write_tokens'])} "
-                f"cost={_fmt_cost(b['cost_usd'])}{priced} mean={mean}")
+                f"cost={cost}{priced} mean={mean}")
 
     def block(title: str, buckets: dict):
         lines.append("")

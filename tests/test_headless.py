@@ -861,14 +861,14 @@ class TestEngineE2E:
 # ---------------------------------------------------------------------------
 
 class TestWatcherIntegration:
-    def _proc(self, engine, **kw):
+    def _proc(self, engine, project_dir=None, **kw):
         from tagteam.watcher import _StateProcessor
         return _StateProcessor(
             mode="headless", lead_name="Claude", reviewer_name="Codex",
             lead_pane="x", reviewer_pane="y", lead_session_id=None,
             reviewer_session_id=None, confirm=False, timeout_minutes=30,
-            project_dir=".", max_retries=1, retry_delay=0, pre_send_delay=0,
-            engine=engine, **kw)
+            project_dir=str(project_dir or "."), max_retries=1, retry_delay=0,
+            pre_send_delay=0, engine=engine, **kw)
 
     def _state(self, seq, **extra):
         s = {"seq": seq, "status": "ready", "turn": "reviewer", "command": STD_CMD,
@@ -876,11 +876,13 @@ class TestWatcherIntegration:
         s.update(extra)
         return s
 
-    def test_ready_dispatches_to_engine_and_watchdog_never_resends(self, monkeypatch):
+    def test_ready_dispatches_to_engine_and_watchdog_never_resends(self, tmp_path):
+        # Isolated project dir: a real pause marker in the repo (e.g. an
+        # operator hold during dogfood) must not leak into this test.
         from unittest.mock import MagicMock
         eng = MagicMock()
         eng.paused.return_value = None
-        p = self._proc(eng)
+        p = self._proc(eng, project_dir=tmp_path)
         p.tick(self._state(1))
         assert eng.run_owed_turn.call_count == 1
         # Simulate the resend window elapsing on the same seq
@@ -891,10 +893,10 @@ class TestWatcherIntegration:
         p.tick(self._state(2))
         assert eng.run_owed_turn.call_count == 2
 
-    def test_done_in_headless_does_not_send(self):
+    def test_done_in_headless_does_not_send(self, tmp_path):
         from unittest.mock import MagicMock, patch
         eng = MagicMock()
-        p = self._proc(eng)
+        p = self._proc(eng, project_dir=tmp_path)
         with patch("tagteam.watcher.send_iterm_command") as si, \
              patch("tagteam.watcher.send_tmux_keys") as stk, \
              patch("tagteam.watcher.notify_macos"):

@@ -1,0 +1,24 @@
+"""Shared pytest configuration.
+
+Phase 32 made every watcher mode honor `.tagteam/headless-paused.json`.
+Older watcher tests construct `_StateProcessor(project_dir=".")`, i.e. the
+checkout itself — so an operator hold on *this* repository (routine during
+headless dogfood, or in a reviewer's sandbox) would leak into the suite.
+Isolate: a processor rooted at "." ignores the real repo's marker under
+test; tests that exercise pause/resume use an explicit fixture project.
+"""
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd_pause_marker(monkeypatch):
+    from tagteam import watcher
+
+    real = watcher._StateProcessor._pause_info
+
+    def isolated(self):
+        if self.project_dir in (".", ""):
+            return None
+        return real(self)
+
+    monkeypatch.setattr(watcher._StateProcessor, "_pause_info", isolated)

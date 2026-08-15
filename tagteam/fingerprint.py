@@ -57,13 +57,27 @@ def _git(cwd: Path, *args: str, env: dict | None = None,
     return r
 
 
-def is_git_repo(root: str | Path) -> bool:
+def probe_repo(root: str | Path) -> str:
+    """Classify `root`: "repo" (inside a git work tree), "not-repo" (git
+    confirmed there is no repository here), or "unknown" (git missing,
+    timed out, dubious ownership, corrupt repo, any other failure). Only a
+    *confirmed* non-repository is allowed to take the non-git path; anything
+    else must fail closed (UNSUPPORTED)."""
     try:
         r = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
                            cwd=str(root), capture_output=True, timeout=_GIT_TIMEOUT)
     except Exception:
-        return False
-    return r.returncode == 0 and r.stdout.strip() == b"true"
+        return "unknown"
+    if r.returncode == 0 and r.stdout.strip() == b"true":
+        return "repo"
+    err = r.stderr.decode("utf-8", "replace").lower()
+    if r.returncode == 128 and "not a git repository" in err:
+        return "not-repo"
+    return "unknown"
+
+
+def is_git_repo(root: str | Path) -> bool:
+    return probe_repo(root) == "repo"
 
 
 def _head(cwd: Path) -> str:
@@ -123,8 +137,11 @@ def _level(cwd: Path, level: str, records: list[tuple[str, str, str]],
 
 def repo_fingerprint(root: str | Path) -> str | None:
     root = Path(root)
-    if not is_git_repo(root):
+    kind = probe_repo(root)
+    if kind == "not-repo":
         return None
+    if kind != "repo":
+        return UNSUPPORTED   # probe failure is not "non-git" — fail closed
     records: list[tuple[str, str, str]] = []
     try:
         _level(root, "", records, 0)

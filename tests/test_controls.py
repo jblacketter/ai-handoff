@@ -28,6 +28,20 @@ from tests.test_headless import (  # noqa: F401
 )
 
 
+def _injected_block(prompt: str) -> str:
+    """The composed prompt's interjection block only — excludes the copy of
+    the handoff contract (SKILL.md), which itself mentions the header."""
+    return prompt.split("=== COMMAND ===", 1)[0]
+
+
+# Real process inspection (`ps`, /proc, Win32_Process) may be denied in
+# sandboxed review environments; the identity-binding unit tests are
+# hermetic (helpers patched) and the real-process checks are gated.
+_PROC_INSPECTION = procs.identity(os.getpid()) is not None and procs.parent_pid(os.getpid()) is not None
+needs_proc_inspection = pytest.mark.skipif(
+    not _PROC_INSPECTION, reason="process inspection (ps/proc/CIM) unavailable in this sandbox")
+
+
 def _sleeper() -> subprocess.Popen:
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
 
@@ -148,6 +162,7 @@ class TestCancelTurn:
         assert controls.cancel_turn_command([], project_root=project) == 1
         assert "Nothing in flight" in capsys.readouterr().out
 
+    @needs_proc_inspection
     def test_unrelated_sleeper_not_killed(self, project, capsys):
         sleeper = _sleeper()
         fake_watcher = _sleeper()
@@ -177,20 +192,53 @@ class TestCancelTurn:
         (lambda d, s, w: d.update(child_ident="999:bogus"), "identity mismatch"),
         (lambda d, s, w: d.update(watcher_ident="999:bogus"), "identity mismatch"),
     ])
-    def test_bind_rejections(self, mutate, needle):
-        sleeper = _sleeper()
-        try:
-            time.sleep(0.2)
-            me = os.getpid()
-            d = {"stem": "s", "pid": sleeper.pid, "watcher_pid": me,
-                 "watcher_ident": procs.identity(me), "child_ident": procs.identity(sleeper.pid)}
-            mutate(d, sleeper.pid, me)
-            ok, why = controls.bind_inflight(d, self_pid=me)
-            assert not ok and needle in why, why
-        finally:
-            sleeper.kill()
+    def test_bind_rejections(self, mutate, needle, monkeypatch):
+        """Hermetic: process helpers are stubbed so this runs in sandboxes
+        that deny ps/proc/CIM. child pid 200 is alive with parent 100
+        (the watcher); identities are stable strings."""
+        idents = {200: "200:c-start", 100: "100:w-start"}
+        monkeypatch.setattr(procs, "pid_alive", lambda pid: pid in idents)
+        monkeypatch.setattr(procs, "identity", lambda pid: idents.get(pid))
+        monkeypatch.setattr(procs, "parent_pid", lambda pid: 100 if pid == 200 else None)
+        me = 100
+        d = {"stem": "s", "pid": 200, "watcher_pid": me,
+             "watcher_ident": "100:w-start", "child_ident": "200:c-start"}
+        mutate(d, 200, me)
+        ok, why = controls.bind_inflight(d, self_pid=me)
+        assert not ok and needle in why, why
 
-    def test_bind_accepts_own_child_and_unverifiable_identity_rejects(self, monkeypatch):
+    def test_bind_accepts_and_rejects_hermetic(self, monkeypatch):
+        idents = {200: "200:c-start", 100: "100:w-start"}
+        monkeypatch.setattr(procs, "pid_alive", lambda pid: pid in idents)
+        monkeypatch.setattr(procs, "identity", lambda pid: idents.get(pid))
+        monkeypatch.setattr(procs, "parent_pid", lambda pid: 100 if pid == 200 else None)
+        d = {"stem": "s", "pid": 200, "watcher_pid": 100,
+             "watcher_ident": "100:w-start", "child_ident": "200:c-start"}
+        assert controls.bind_inflight(d, self_pid=-1) == (True, "bound")
+        # numeric pids match but a recorded creation identity differs → no kill
+        for key in ("child_ident", "watcher_ident"):
+            bad = dict(d, **{key: "reused:other-start"})
+            ok, why = controls.bind_inflight(bad, self_pid=-1)
+            assert not ok and "identity mismatch" in why
+        # unverifiable identity / parent → reject
+        monkeypatch.setattr(procs, "identity", lambda pid: None)
+        ok, why = controls.bind_inflight(d, self_pid=-1)
+        assert not ok and "unverifiable" in why
+        monkeypatch.setattr(procs, "identity", lambda pid: idents.get(pid))
+        monkeypatch.setattr(procs, "parent_pid", lambda pid: None)
+        ok, why = controls.bind_inflight(d, self_pid=-1)
+        assert not ok and "unverifiable" in why
+        # wrong parent → reject
+        monkeypatch.setattr(procs, "parent_pid", lambda pid: 999)
+        ok, why = controls.bind_inflight(d, self_pid=-1)
+        assert not ok and "not the recorded watcher" in why
+        # dead pid → reject
+        monkeypatch.setattr(procs, "pid_alive", lambda pid: False)
+        ok, why = controls.bind_inflight(d, self_pid=-1)
+        assert not ok and "not alive" in why
+
+    @needs_proc_inspection
+    def test_bind_accepts_own_child_real(self):
         sleeper = _sleeper()
         try:
             time.sleep(0.2)
@@ -199,19 +247,10 @@ class TestCancelTurn:
                  "watcher_ident": procs.identity(me), "child_ident": procs.identity(sleeper.pid)}
             ok, why = controls.bind_inflight(d, self_pid=-1)
             assert ok, why
-            monkeypatch.setattr(procs, "identity", lambda pid: None)
-            ok, why = controls.bind_inflight(d, self_pid=-1)
-            assert not ok and "unverifiable" in why
         finally:
             sleeper.kill()
 
-    def test_dead_pid_rejected(self):
-        sleeper = _sleeper(); sleeper.kill(); sleeper.wait()
-        d = {"stem": "s", "pid": sleeper.pid, "watcher_pid": os.getpid(),
-             "watcher_ident": "x", "child_ident": "y"}
-        ok, why = controls.bind_inflight(d, self_pid=-1)
-        assert not ok and "not alive" in why
-
+    @needs_proc_inspection
     def test_live_turn_cancelled_end_to_end(self, project, fake_path, monkeypatch, tmp_path):
         monkeypatch.setenv("FAKE_AGENT_MODE", "grandchild_hang")
         pidfile = tmp_path / "gc.pid"
@@ -275,8 +314,9 @@ class TestInterject:
         res = eng.run_owed_turn(st)
         assert res.outcome == "ok"
         prompt = json.loads(cap.read_text())["prompt"]
-        assert h.INTERJECTIONS_HEADER in prompt and "prefer the smaller diff" in prompt
-        assert "jack (→ next turn)" in prompt
+        block = _injected_block(prompt)
+        assert h.INTERJECTIONS_HEADER in block and "prefer the smaller diff" in block
+        assert "jack (→ next turn)" in block
         conn = db.connect(project_dir=str(project))
         row = db.get_interjections(conn)[0]; conn.close()
         assert row["delivered_role"] == "reviewer" and row["delivered_round"] == 1
@@ -285,7 +325,7 @@ class TestInterject:
         st2 = state_mod.read_state(str(project))
         eng.run_owed_turn(st2)
         prompt2 = json.loads(cap.read_text())["prompt"]
-        assert h.INTERJECTIONS_HEADER not in prompt2
+        assert h.INTERJECTIONS_HEADER not in _injected_block(prompt2)
 
     def test_targeted_note_waits_for_its_role(self, project, fake_path, monkeypatch, tmp_path):
         st = _init_cycle(project)  # reviewer owed
@@ -369,13 +409,13 @@ class TestInterject:
         cap = tmp_path / "cap.json"; monkeypatch.setenv("FAKE_AGENT_CAPTURE", str(cap))
         eng = _engine(project)
         assert eng.run_owed_turn(st).outcome == "ok"
-        prompt = json.loads(cap.read_text())["prompt"]
-        assert "seen interactively" in prompt and "may already have been addressed" in prompt
+        block = _injected_block(json.loads(cap.read_text())["prompt"])
+        assert "seen interactively" in block and "may already have been addressed" in block
         st2 = state_mod.read_state(str(project))
         eng.run_owed_turn(st2)
         prompt2 = json.loads(cap.read_text())["prompt"]
-        assert h.INTERJECTIONS_HEADER not in prompt2          # not re-injected …
-        assert '"delivered_role": "reviewer"' in prompt2      # … but visible as history
+        assert h.INTERJECTIONS_HEADER not in _injected_block(prompt2)   # not re-injected …
+        assert '"delivered_role": "reviewer"' in prompt2                # … but visible as history
 
     def test_list_retire_and_validation(self, project, capsys):
         _init_cycle(project)
@@ -446,7 +486,9 @@ class TestUsage:
         t = agg["totals"]
         assert t["turns"] == 3 and t["ok"] == 2 and t["failed"] == 1
         assert t["input_tokens"] == 11 and t["cost_usd"] == 0.75 and t["cost_known_turns"] == 2
-        assert t["mean_duration_ms"] == int(4000 / 3)
+        assert t["mean_duration_ms"] == 2000                     # over the 2 known durations only
+        assert t["duration_known_turns"] == 2
+        assert agg["by_cycle"]["q/impl"]["mean_duration_ms"] is None
         assert agg["by_role"]["lead"]["turns"] == 2 and agg["by_role"]["reviewer"]["failed"] == 1
         assert set(agg["by_cycle"]) == {"p/plan", "q/impl"}
         text = usage_mod.render_text(agg)
@@ -552,6 +594,44 @@ class TestFingerprint:
             return real(cwd, *args, **kw)
         monkeypatch.setattr(fpm, "_git", boom)
         assert fpm.repo_fingerprint(repo2) == fpm.UNSUPPORTED
+
+    def test_probe_failure_is_unsupported_not_non_git(self, tmp_path):
+        repo = tmp_path / "r"; repo.mkdir(); _git_init(repo)
+        with patch("tagteam.fingerprint.subprocess.run", side_effect=OSError("git missing")):
+            assert fpm.repo_fingerprint(repo) == fpm.UNSUPPORTED
+            assert fpm.repo_fingerprint(tmp_path) == fpm.UNSUPPORTED   # even for a non-repo dir
+        with patch("tagteam.fingerprint.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("git", 1)):
+            assert fpm.repo_fingerprint(repo) == fpm.UNSUPPORTED
+        # git present but refusing (e.g. dubious ownership) → unknown → UNSUPPORTED
+        m = MagicMock(); m.returncode = 128; m.stdout = b""; m.stderr = b"fatal: detected dubious ownership"
+        with patch("tagteam.fingerprint.subprocess.run", return_value=m):
+            assert fpm.repo_fingerprint(repo) == fpm.UNSUPPORTED
+        assert fpm.probe_repo(tmp_path) == "not-repo"
+
+    def test_probe_failure_suppresses_retries_engine_level(self, project, fake_path, monkeypatch, tmp_path):
+        st = _init_cycle(project)   # non-git project on disk …
+        monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
+        eng = _engine(project, retries=2)
+        real_run = fpm.subprocess.run
+
+        def broken_git(argv, **kw):   # … but git itself is broken → UNSUPPORTED, not "non-git"
+            if argv and argv[0] == "git":
+                raise OSError("git missing")
+            return real_run(argv, **kw)
+        monkeypatch.setattr(fpm.subprocess, "run", broken_git)
+        # even a spawn failure (which a real non-git project may retry) is not retried
+        real_popen = h.subprocess.Popen
+
+        def fail_spawn(*a, **k):
+            if a and str(a[0][0]).startswith(str(fake_path)):
+                raise PermissionError(13, "denied", a[0][0])
+            return real_popen(*a, **k)
+        monkeypatch.setattr(h.subprocess, "Popen", fail_spawn)
+        res = eng.run_owed_turn(st)
+        assert res.outcome == "spawn_failed"
+        assert len(_usage_rows(project)) == 1
+        assert any("UNSUPPORTED" in l for l in eng._test_logs)
 
     def test_handoff_fingerprint_changes_on_transition(self, project):
         st = _init_cycle(project)
@@ -695,6 +775,7 @@ class TestPerRoleTimeoutAndRollback:
             m = MagicMock(); m.returncode = 2; return m
         assert controls.rollback_command(["0.8.0", "--yes"], runner=bad) == 1
 
+    @needs_proc_inspection
     def test_procs_helpers(self):
         me = os.getpid()
         assert procs.pid_alive(me)
