@@ -92,8 +92,9 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
      uniqueness cannot be trusted: `_maybe_brief` and `--generate` **do not
      spawn** and log "briefer skipped: DB invalid — run `tagteam state
      repair-db`". Tests: repair after auto ok / auto failed / running→
-     abandoned / manual ok / manual failed, then restart: dedupe and
-     `latest_brief` semantics unchanged; `db_invalid` set → no spawn. A second watcher, a racing
+     abandoned / manual ok / manual failed, then restart: dedupe unchanged
+     and `successful_brief_for_event(current event_key)` returns the same
+     row (or none) as before the repair; `db_invalid` set → no spawn. A second watcher, a racing
      `--generate`, a re-tick, or a restart therefore cannot create a second
      automatic attempt or a concurrent one: the insert fails → no spawn.
      Guarantee stated precisely: **at most one automatic briefer attempt
@@ -108,13 +109,21 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    now including "brief: `<path>`" (or "brief failed: <reason> — `tagteam
    brief --generate` to retry"). Works in **every watcher mode** — it is its
    own subprocess — and on Windows.
-   **Abandoned claims** (crash between claim and completion): a `running`
-   row is considered abandoned when its `stem` has no live `inflight.json`
-   *and* its `started_at` is older than `timeout_minutes + 5 min`, or its
-   recorded `watcher_pid`/`watcher_ident` no longer match a live process
-   (same `procs.identity` check as `cancel-turn`); `_maybe_brief` and
-   `tagteam brief` mark such rows `abandoned` (never respawn
-   automatically) and the log/notification point at `--generate`.
+   **Abandoned claims** (crash between claim and completion): the claim row
+   persists the **runner identity** — `runner_pid` + `runner_ident`
+   (`procs.identity(pid)` of the process that made the claim: the watcher
+   for `kind = auto`, the `tagteam brief --generate` CLI process for `kind =
+   manual`) — and `stem`, so detection needs no file that a crash could
+   lose. A `running` row is abandoned when **(a)** `runner_pid` is not alive
+   or `procs.identity(runner_pid) != runner_ident` (same check
+   `cancel-turn`'s `bind_inflight` uses), **or (b)** the runner is alive but
+   `started_at` is older than `timeout_minutes + 5 min` *and* no
+   `inflight.json` binds to the row's `stem` (a hung runner). A live manual
+   `--generate` process is therefore never misclassified: its pid/identity
+   match. `_maybe_brief` and `tagteam brief` mark such rows `abandoned`
+   (never respawn automatically) and the log/notification point at
+   `--generate`. The briefer's `inflight.json` lifecycle is defined in
+   Scope 4.
 2. **Briefer identity/config** (top-level `briefer:` block in `tagteam.yaml`,
    all optional):
    ```yaml
@@ -194,7 +203,46 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    overwritten. A human-friendly alias `docs/escalations/<phase>_<type>_
    latest.md` is rewritten to the newest ok/partial brief's content after
    each success (alias only; the DB row's `path` is the unique file). The
-   file carries a header line naming its event key and attempt. Headings,
+   file — and every alias copy of it — carries a header line naming its
+   event key and attempt, so even a stale alias identifies which event it
+   briefs. **Alias writes happen only inside enabled briefer handling**
+   (reviewer r5): the runner rewrites the alias on success and replaces it
+   with the stub ("no brief yet for the current event <key>; previous
+   brief: <path>") after a failed attempt; `_maybe_brief` (enabled) writes
+   the stub when it handles a new event that has no successful brief and
+   the alias does not already name that event (e.g. restart with a failed
+   auto row, or a claim refused by a prior failed manual attempt).
+   With the briefer disabled **no file is written or touched** — flag-off
+   behavior stays byte-for-byte 0.9.0 and any existing alias is simply a
+   historical artifact whose header names its event. Tests: enabled event-B
+   failure → stub; enabled event-B no-claim (restart after a failed auto
+   row) → stub; disabled re-escalation → alias content and mtime unchanged.
+   **Inflight lifecycle** (reviewer r5): `headless.run_process` does not
+   manage `inflight.json` (the `HeadlessEngine` wrapper does), so
+   `run_briefer` owns it explicitly for **both** kinds: (i) inside the
+   claim transaction, before the INSERT, read any existing `inflight.json`;
+   if it binds to a live process (`controls.bind_inflight`) the claim is
+   **refused** with "another turn is in flight (<stem>) — wait or
+   `tagteam cancel-turn`" (no row inserted); if it does not bind (stale) it
+   is removed and logged, exactly as `cancel-turn` does; (ii) after the
+   claim, **before spawn**, write `inflight.json` with `role: briefer`,
+   `agent: briefer`, `provider`, `stem`, `log_path`, `events_path`,
+   `started_at`, `pid: null`, `child_ident: null`, `watcher_pid` /
+   `watcher_ident` = the **runner's** pid/identity (same keys as engine
+   turns so `bind_inflight`, `cancel-turn`, and `tagteam tail` work
+   unchanged), plus `brief_id`, `event_key`, `kind`, `attempt`; (iii) in
+   `on_spawn`, record the child `pid` + `child_ident`; (iv) remove the
+   pointer only when `run_process` returns or raises `SpawnError` (normal
+   completion of the runner, before `finish_brief`); a hard runner crash
+   leaves both the pointer and the row's `runner_pid`/`runner_ident`, which
+   is what abandoned detection (Scope 1) reads. `tagteam cancel-turn` on a
+   briefer kills it and the attempt finishes `failed` (reason `cancelled`).
+   Tests: `tagteam tail` (and `--events`) resolves the briefer's log while
+   it runs and prints the `briefer` role banner; a simulated runner crash
+   (row + pointer left, runner pid dead) is detected as abandoned on the
+   next tick, while a live manual `--generate` (runner pid alive, identity
+   matching) is not; a live unrelated inflight turn makes the claim refuse
+   with no row; a stale one is removed and the claim proceeds. Headings,
    in order:
    `## Positions` (lead / reviewer, in their own terms), `## Crux` (what is
    actually in dispute, separated from points already resolved in earlier
@@ -216,8 +264,8 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    updated to `ok | partial | failed | abandoned` after; `kind = auto |
    manual`; `event_key` (repair-safe canonical key, Scope 1) + informational `event_row_id`; partial unique indexes
    `(event_key) WHERE kind = 'auto'` and `(event_key) WHERE status =
-   'running'`; plus `started_at`, `watcher_pid`, `watcher_ident`, `stem`,
-   `attempt` for recovery. The file is the human-facing artifact; the row is
+   'running'`; plus `started_at`, `runner_pid`, `runner_ident`, `stem`,
+   `attempt` for recovery (runner = watcher for auto, CLI for manual). The file is the human-facing artifact; the row is
    what the cockpit (Phase 34) reads. `usage` row with `role = "briefer"` per
    spawn (usage status vocabulary unchanged; the *brief* status lives in
    `briefs`; mapping: usage ok→brief ok/partial by verification, usage
@@ -232,20 +280,29 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    says so and exits 1. Older events stay reachable via `--list` (every row
    for the cycle, newest first, with event key, kind, attempt, status, path)
    and `--event KEY` (explicit selector). `--json` for scripts. The
+   accessors are **named by scope** so nothing can call the wrong one by
+   accident (reviewer r5): `db.successful_brief_for_event(event_key)` is
+   the only lookup `brief` (default) and `rule` use; `db.brief_history(
+   phase, type)` (every row, newest first) backs `--list` and `--event KEY`
+   only; there is **no** cycle-wide "latest successful brief" helper. The
    `_latest.md` alias is rewritten only on a **successful** attempt; when a
-   new event opens without a successful brief the alias is replaced by a
-   stub saying "no brief yet for the current event <key>; previous brief:
-   <path>" so it can never masquerade as current. `rule` records in its
-   `arbiter_ruling` diagnostic only a brief id belonging to the current
-   event (or none). Tests: success(A) → re-arm → same-round event B with
-   failed / running / success — `brief` shows B's state, never A;
-   `_latest.md` stub on B open; `rule` diagnostic never links A while B is
-   current. **`--generate`** = a *forced manual
+   new event is handled by the enabled briefer without a successful brief
+   the alias is replaced by a stub saying "no brief yet for the current
+   event <key>; previous brief: <path>" so it can never masquerade as
+   current (Scope 4 states exactly who writes it; disabled = no writes).
+   `rule` records in its `arbiter_ruling` diagnostic only a brief id
+   belonging to the current event (or none). Tests: success(A) → re-arm →
+   same-round event B with failed / running / success — `brief` shows B's
+   state, never A; `successful_brief_for_event(B)` is None while
+   `successful_brief_for_event(A)` still returns A's row (accessor tested
+   directly); `_latest.md` stub on B open; `rule` diagnostic never links A
+   while B is current. **`--generate`** = a *forced manual
    attempt* using the **same claim transaction** as the watcher (symmetric
    rule): it inserts a `kind = manual`, `status = running` row for the
    current event — refused by the `running` unique index while any attempt
-   (auto or manual, not abandoned) is active, and refused when the cycle is
-   not `escalated`/`needs-human`; it is *not* subject to the auto index and
+   (auto or manual, not abandoned) is active, refused when the cycle is
+   not `escalated`/`needs-human`, and refused while an unrelated live
+   `inflight.json` binds (Scope 4); it is *not* subject to the auto index and
    never blocks a later automatic claim except through the "prior success
    satisfies the event" rule. Consequences, all tested: manual claimed first
    → the watcher's automatic claim fails while it runs; if the manual attempt
@@ -290,7 +347,26 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
      entry — the interjection is the audit record). Valid only from
      `needs-human`/`escalated`.
    Every ruling also writes a `diagnostics` row (`arbiter_ruling`) with the
-   ruling, by, and the brief id it acted on (if any). SKILL.md's stale
+   ruling, by, the **event key it ruled on**, and the brief id it acted on
+   (if any). **Capture-before-append order** (reviewer r5): `add_ruling`
+   appends a new latest entry at the same round, so recomputing "current
+   event" *after* the append would yield the ruling entry's key and link no
+   brief. `rule_command` therefore runs the whole sequence under the
+   (reentrant) project writer lock: (1) read the canonical cycle status and
+   require `escalated`/`needs-human`; (2) resolve and **retain** the
+   triggering `event_key` (+ `event_row_id`) from the latest entry; (3)
+   select `brief_id = successful_brief_for_event(event_key)` (may be None);
+   (4) re-read status + latest entry and abort with exit 1 if either changed
+   (defensive — the lock makes this a no-op in practice); (5) append the
+   ruling via `add_ruling` (approve / request-changes) or record the
+   interjection + `rearm` (answer — same captured-event convention even
+   though it appends no round entry); (6) write the `arbiter_ruling`
+   diagnostic with the *captured* key and brief id. Tests: for `approve`,
+   `request-changes`, and `answer`, after the command the cycle's latest
+   entry is the ruling (or the cycle is re-armed) **and** the diagnostic's
+   `event_key`/`brief_id` are event A's; a ruling on an event with no
+   successful brief records `brief_id = null`, never an older event's.
+   SKILL.md's stale
    "edit the cycle file's Human Input Needed section" instruction is
    replaced by `tagteam brief` / `tagteam rule`.
    **Grouped-rounds contract (reviewer r2):** `parse_jsonl_rounds` keeps only
@@ -335,20 +411,30 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
 
 ### Files
 - `tagteam/briefer.py` — **new**: `get_briefer_spec` glue, `compose_brief_prompt`,
-  `run_briefer(project_root, state) -> BriefResult` (adapter/argv via
-  `headless.build_argv`, `headless.run_process` with stem role `briefer`,
-  usage via `headless.parse_usage` → `db.add_usage(role="briefer")`,
-  verification of the output file, `db.add_brief`, notification text),
-  `brief_command`.
-- `tagteam/controls.py` — `rule_command` (+ `cycle.rearm` in `cycle.py`).
+  `run_briefer(project_root, state, kind) -> BriefResult` — the briefer's
+  own runner, used by watcher-auto and CLI-manual alike: claim (Scope 1,
+  including the inflight collision check), **owns `inflight.json`** for
+  the attempt (create before spawn / update in `on_spawn` / remove on
+  normal completion — Scope 4; `headless.run_process` itself does not
+  manage it), adapter/argv via `headless.build_argv`, `headless.run_process`
+  with stem role `briefer`, usage via `headless.parse_usage` →
+  `db.add_usage(role="briefer")`, verification of the output file,
+  `db.finish_brief`, alias/stub write, notification text; `brief_command`.
+- `tagteam/controls.py` — `rule_command` (capture-before-append under the
+  writer lock, Scope 7; reuses `bind_inflight`), + `cycle.rearm` and
+  `cycle.add_ruling` in `cycle.py`.
 - `tagteam/db.py` — `SCHEMA_VERSION = 5`, `_SCHEMA_V5` briefs table +
-  two partial unique indexes, `latest_event(phase, type) -> (event_key,
-  row_id, entry)`, `claim_brief(event_key, kind, ...) -> id | None` (single
-  INSERT…WHERE NOT EXISTS in a transaction under the writer lock; None when
-  either unique index or the prior-success rule rejects),
+  two partial unique indexes, `current_event(phase, type) -> (event_key,
+  row_id, entry)`, `claim_brief(event_key, kind, runner_pid, runner_ident,
+  ...) -> (id, attempt) | None` (single INSERT…WHERE NOT EXISTS in a
+  transaction under the writer lock; None when either unique index or the
+  prior-success rule rejects; allocates `attempt`),
   `finish_brief(id, status, ...)`, `mark_abandoned(id, reason)`,
-  `get_briefs`, `latest_brief(phase, type)` (highest id with ok/partial),
-  `running_briefs(event_key)`.
+  **`successful_brief_for_event(event_key)`** (highest-id ok/partial row
+  of that event, or None — the only lookup `brief`/`rule` use),
+  **`brief_history(phase, type)`** (all rows newest first — `--list` /
+  `--event` only), `running_briefs(event_key)`. No cycle-wide "latest
+  successful" helper exists.
 - `tagteam/repair.py` — `rebuild_db_from_files_and_verify` snapshots and
   restores `usage`, `interjections`, `briefs` (non-file-backed tables).
 - `tagteam/parser.py` / `tagteam/cycle.py` — additive `entries` + `rulings`
@@ -373,10 +459,21 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
   tick, no auto respawn; `--generate` after failed/abandoned → manual row,
   suffixed path, auto index untouched), roadmap-pause skip, canonical
   cycle_state (needs-human vs escalated read from cycle status), usage row
-  role briefer, `brief` command (latest = highest ok/partial; failed-only
-  → hint), `rule approve|request-changes|answer` transitions + audit rows +
+  role briefer, `brief` command (current-event scoped:
+  `successful_brief_for_event(current key)`; running/failed/abandoned/none
+  → state + hint, never an older event; `--list`/`--event` for history;
+  accessor tested directly for success(A) → failed(B) / running(B)),
+  `rule approve|request-changes|answer` transitions + audit rows +
   invalid-state rejection **from a 10-stale auto-escalated cycle and from an
-  explicit ESCALATE**, **event identity** (NEED_HUMAN r5 → brief → `rule
+  explicit ESCALATE**, **capture-before-append** (`arbiter_ruling`
+  diagnostic links event A's brief after the ruling entry exists, for
+  approve / request-changes / answer; null when A has no successful
+  brief), **inflight lifecycle** (`tagteam tail` resolves a running
+  briefer; simulated runner crash → abandoned next tick; live manual
+  `--generate` not misclassified; live unrelated inflight → claim refused
+  with no row; stale inflight → removed, claim proceeds), **alias
+  scoping** (enabled failure / no-claim → stub; disabled re-escalation →
+  no write), **event identity** (NEED_HUMAN r5 → brief → `rule
   answer` → NEED_HUMAN again r5 → a *second* automatic brief; restart on the
   same event → none), **manual/auto orderings** (manual first then auto tick
   → no concurrent spawn; manual ok → auto never runs; manual failed → auto
@@ -401,7 +498,7 @@ CREATE TABLE IF NOT EXISTS briefs (
     attempt      INTEGER NOT NULL,        -- 1 + max(attempt) over the event's rows (both kinds), allocated in the claim transaction
     status       TEXT NOT NULL,           -- running | ok | partial | failed | abandoned
     started_at   TEXT, finished_at TEXT,
-    watcher_pid  INTEGER, watcher_ident TEXT, stem TEXT,
+    runner_pid   INTEGER, runner_ident TEXT, stem TEXT,  -- process that made the claim (watcher for auto, CLI for manual)
     path         TEXT, content TEXT,
     provider     TEXT, model TEXT,
     usage_row_id INTEGER, duration_ms INTEGER, reason TEXT
@@ -466,12 +563,14 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   (headings missing → stored + flagged), `failed` (no file / nonzero /
   timeout → `briefer_failed` diagnostic, no pause marker written, watcher
   keeps running).
-- [ ] `tagteam brief` prints the latest ok/partial brief **for the current
-  event** (or `--phase/--type`, `--event KEY`), reports running/failed/
+- [ ] `tagteam brief` prints `successful_brief_for_event(current event_key)`
+  (or `--phase/--type`, `--event KEY`), reports running/failed/
   abandoned/none for the current event without falling back to an older
-  event, `--list` shows history, `--json`; exit 1 when none, with a
+  event (no cycle-wide "latest" accessor exists), `--list` shows
+  `brief_history`, `--json`; exit 1 when none, with a
   `--generate` hint when only failed/abandoned rows exist; `_latest.md`
-  becomes a stub when a new event opens without a successful brief;
+  becomes a stub when the enabled briefer handles a new event without a
+  successful brief;
   `--generate` inserts a manual row, writes to the suffixed path without
   overwriting earlier files, refuses outside escalated/needs-human or while an
   attempt is running, and leaves the automatic dedupe intact.
@@ -481,7 +580,10 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   file + shadow DB + auto-export + top-level state preserved), transitions
   the cycle (approved / in-progress→lead) and top-level state accordingly —
   verified from a real 10-stale auto-escalated cycle and from an explicit
-  ESCALATE — and writes an `arbiter_ruling` diagnostic;
+  ESCALATE — and writes an `arbiter_ruling` diagnostic whose `event_key`
+  and `brief_id` are the **triggering** event's, captured under the writer
+  lock before the ruling entry is appended (tested for approve,
+  request-changes, answer; null brief id when that event has none);
   `rule answer --to R` records an interjection targeted at R and re-arms the
   cycle to in-progress/ready_for R; all three are rejected (exit 1, message)
   when the cycle is not `escalated`/`needs-human`.
@@ -494,10 +596,23 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   `agents.*` errors still block as before in every mode; `validate_config()`
   itself is unchanged.
 - [ ] Repair safety: `rebuild_db_from_files_and_verify` preserves `usage`,
-  `interjections`, and `briefs` rows; after repair, dedupe and
-  `latest_brief` behave as before for auto ok / auto failed /
-  running→abandoned / manual ok / manual failed; with `db_invalid` set the
-  briefer does not spawn and says why.
+  `interjections`, and `briefs` rows; after repair, the dedupe outcome on
+  restart and `successful_brief_for_event(current event_key)` (the current
+  event's row, or None) are identical to before the repair for auto ok /
+  auto failed / running→abandoned / manual ok / manual failed; with
+  `db_invalid` set the briefer does not spawn and says why.
+- [ ] Inflight + abandoned detection: `run_briefer` writes `inflight.json`
+  (role `briefer`, runner pid/identity, child pid on spawn, brief id /
+  event key) before spawn and removes it only on normal completion;
+  `tagteam tail` follows a running briefer; a claim is refused (no row)
+  while an unrelated live turn is in flight and proceeds after removing a
+  stale pointer; a simulated runner crash is marked `abandoned` on the next
+  tick while a live manual `--generate` (runner pid alive + identity match)
+  is not; `cancel-turn` ends the attempt `failed`.
+- [ ] `_latest.md` is written only by enabled briefer handling (success →
+  content; enabled failure / no-claim on an unsatisfied event → stub naming
+  the current event); with the briefer disabled no file under
+  `docs/escalations/` is written or touched.
 - [ ] Artifact paths: same-round re-escalation produces two distinct brief
   files (`…_r5_<stampA>-a1.md`, `…_r5_<stampB>-a1.md`); attempts number
   `1 + max(attempt)` across kinds (a failed manual `a1` followed by the
@@ -541,6 +656,19 @@ headings), `brief_nofile`; it parses the output path from the prompt's
 - `tagteam brief` and `rule` diagnostics are scoped to the current event;
   no silent fallback to older events (`--list` / `--event KEY` for history).
 - Prompt-size policy has per-component budgets and a hard 60 000 total.
+- Accessors are named by scope: `successful_brief_for_event(event_key)`
+  (the only lookup `brief`/`rule` use) vs `brief_history(phase, type)`
+  (`--list`/`--event` only); no cycle-wide "latest successful" helper.
+- `rule` captures the triggering `event_key` + brief id under the writer
+  lock **before** appending the ruling entry / re-arming; the diagnostic
+  records the captured values.
+- `run_briefer` owns `inflight.json` for both kinds (create before spawn,
+  child pid on spawn, remove on normal completion); the claim row persists
+  `runner_pid`/`runner_ident`; abandoned = runner dead/identity mismatch,
+  or hung past timeout+5 min with no binding pointer; a live unrelated
+  inflight turn refuses the claim.
+- `_latest.md` (content or stub) is written only by enabled briefer
+  handling; disabled = no writes under `docs/escalations/`.
 
 ## Open Questions
 
