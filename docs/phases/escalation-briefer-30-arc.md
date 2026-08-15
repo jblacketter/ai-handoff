@@ -4,9 +4,9 @@
 - [x] Planning
 - [x] In Review
 - [x] Approved (round 6)
-- [x] Implementation (in progress)
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation
+- [x] Implementation Review (approved round 4)
+- [x] Complete (release: PR → merge → tag v0.10.0 after green CI)
 
 ## Roles
 - Lead: Claude

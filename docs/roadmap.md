@@ -317,7 +317,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 32
 
 ### Phase 33: Escalation Briefer (3.0 arc)
-- **Status:** Implemented — in impl review (target release 0.10.0, branch `phase-33-escalation-briefer`, PR at the end)
+- **Status:** ✅ Complete — impl approved 2026-08-15 (round 4; plan 6 rounds; all review turns headless). Release 0.10.0 via PR from `phase-33-escalation-briefer`; tag after merge + green CI.
 - **Description:** On `escalated`/`needs-human` (canonical cycle status), the watcher runs ONE headless briefer turn per escalation event — event identity is a repair-safe key from the triggering entry; a pre-spawn claim row (schema v5 `briefs`, partial unique indexes) gives at-most-once automatic attempts and one running attempt per event across kinds — that writes `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (Positions / Crux / Evidence / Recommendation / Rulings) under a hard 60k-char prompt budget. `tagteam brief` (current-event scoped, `--list`, `--generate`), `tagteam rule approve|request-changes|answer` (dedicated `add_ruling` path bypassing the stale gate; `answer` = interjection + `rearm`), grouped rounds gain `entries`/`rulings`, repair now preserves `usage`/`interjections`/`briefs`. **Opt-in** (`briefer.enabled: true`; absent = 0.9.0 behavior; §2 hard constraint overrides §4's "opt-out" wording).
 - **Plan:** `docs/phases/escalation-briefer-30-arc.md` (approved round 6). **Findings:** `docs/phases/escalation-briefer-findings.md`.
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 33

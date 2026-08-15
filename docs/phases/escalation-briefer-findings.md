@@ -28,6 +28,20 @@ the interactive Codex in the iTerm tab reviewed and approved, and ran
 (they do not reload code); (b) `cancel-turn`'s identity binding worked when invoked by
 an agent, and the resulting `cancelled` row/marker made the situation legible.
 
+## Impl-cycle review turns (all headless, real `codex exec`, briefer enabled on this repo)
+
+| Round | Outcome | Wall |
+|---|---|---|
+| 1 | REQUEST_CHANGES (5: event under lock, guarded lifecycle, repair abort, sweep timeout, version) | 327 s |
+| 2 | REQUEST_CHANGES (3: never-raise config, hermetic fault tests, identity in timeout test) | 202 s |
+| 3 | REQUEST_CHANGES (1: fallback timeout on every resolve path) | 255 s |
+| 4 | APPROVE | 196 s |
+
+No escalation occurred, so this repo's own briefer never fired (the reviewer's sandbox
+denies `ps`; its runs report 796 passed / 13 skipped vs 804–810 / 5 locally — the
+difference is the capability-gated process-identity tests). Holds were `tagteam pause` /
+`resume`.
+
 ## Dogfood — real briefs on the scratch project (2026-08-15)
 
 Scratch project `greet-cli`, `briefer: {enabled: true}`, a deliberately arguable plan
