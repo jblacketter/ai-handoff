@@ -60,11 +60,11 @@ sum.
    table only — no renames/removals). Recording only; surfacing is
    Phase 32/34.
 3. **`tagteam/headless.py`** (new module):
-   - **Adapter table** — per-provider spec: how to invoke the CLI, how the
-     prompt is passed (stdin), how to parse the final structured output
-     for usage/session id. Two adapters ship: `claude` and `codex`.
-     Selection is by `agents.<role>.headless.provider`, defaulting from
-     the agent's `command`/name (`claude*` → claude, `codex*` → codex).
+   - **Adapter table** — per-provider spec: executable, canonical argv
+     (structured *streaming* output, prompt on stdin, cwd), reserved
+     flags, and an event parser that yields incremental log lines and the
+     final usage record. Two adapters ship: `claude` and `codex`. Argv
+     ownership is fully specified under "Adapters" below.
    - **Prompt composer** — builds the bounded turn context: role banner
      (who you are, which agent name to pass as `--updated-by`), the full
      `.claude/skills/handoff/SKILL.md` contract, `handoff-state.json`
@@ -73,22 +73,32 @@ sum.
      make exactly one `tagteam cycle add`/`cycle init` call as the
      contract says, then stop").
    - **Turn runner** — `Popen` with the prompt on stdin, cwd = project
-     root, stdout+stderr streamed line-by-line to
-     `.tagteam/turns/<phase>_<type>_r<N>_<role>_<ts>.log`; writes
-     `.tagteam/turns/inflight.json` (phase/type/round/role/pid/log_path/
-     started_at) while running and removes it after; enforces
-     `--turn-timeout` (default 60 min) by killing the whole process
-     tree (POSIX: `start_new_session=True` + `os.killpg`; Windows:
-     `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T`); on Ctrl-C kills the
-     child before exiting.
-   - **Outcome verification** — after exit, re-read state: the turn is
-     "ok" iff exit code 0 **and** `seq` advanced with the turn no longer
-     owed to the same role at the same round. Otherwise the outcome is
-     `timeout` / `nonzero_exit` / `no_round`.
-   - **Usage capture** — parse the adapter's structured output (tokens,
-     cache read/write, cost if present, model, session id, num_turns) and
-     insert one `usage` row per spawned turn, including failed ones
-     (status column). Malformed/missing usage never fails a turn that
+     root, **stdout and stderr as separate pipes** read by two reader
+     threads. Per turn, two files under `.tagteam/turns/` with the stem
+     `<phase>_<type>_r<N>_<role>_<ts>`:
+     - `<stem>.events.jsonl` — raw structured stdout, appended line by
+       line as it arrives (this is what usage is parsed from; stderr never
+       touches it).
+     - `<stem>.log` — the human-followable log: each stdout event
+       rendered by the adapter (assistant text, tool calls, results) as
+       it arrives, plus every stderr line prefixed `[stderr] `, plus
+       runner lines (`[tagteam] spawned pid …`, `[tagteam] outcome …`).
+     Both files are flushed per line so `tagteam tail` sees progress
+     during the turn, not at exit. Writes `.tagteam/turns/inflight.json`
+     (phase/type/round/role/pid/stem/started_at) while running and removes
+     it after; enforces `--turn-timeout` (default 60 min) by killing the
+     whole process tree (POSIX: `start_new_session=True` + `os.killpg`;
+     Windows: `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T /PID`); on
+     Ctrl-C kills the child before exiting.
+   - **Outcome verification** — see "Outcome verification" below: the
+     runner snapshots the owed turn's identity *before* spawning and, after
+     exit, requires the **expected cycle transition** by the owed role at
+     the expected round for the expected phase/type — not merely "seq
+     advanced". Anything else is `timeout` / `nonzero_exit` / `no_round`.
+   - **Usage capture** — parse the adapter's structured events from
+     `<stem>.events.jsonl` only (tokens, cache read/write, cost if
+     present, model, session id, num_turns) and insert one `usage` row per
+     spawned turn, including failed ones (status column). Malformed/missing usage never fails a turn that
      otherwise succeeded — the row is written with null token fields and a
      `diagnostics` entry (`kind = headless_usage_unparsed`).
    - **Failure handling** — on any non-ok outcome: write a `diagnostics`
@@ -96,14 +106,18 @@ sum.
      `.tagteam/headless-paused.json` (reason, phase, type, round, role,
      log_path, ts), send a notification, and log the resume recipe. While
      the pause marker exists the orchestrator refuses to dispatch (also
-     on restart) and says why every tick. Zero automatic retries
-     (`--turn-retries N`, default 0, opt-in). Phase 32's `tagteam resume`
-     clears the marker; in 31 the recipe is "delete the marker (or fix
-     state) and the watcher resumes on the next tick".
+     on restart) and says why every tick. **No automatic retries in
+     Phase 31** — coding turns are not idempotent (a timed-out attempt may
+     already have edited the worktree), so any retry is a human decision
+     made with the log in hand. A `--turn-retries` flag with explicit
+     at-least-once semantics is deferred to Phase 32 alongside `resume`.
+     Phase 32's `tagteam resume` clears the marker; in 31 the recipe is
+     "inspect the log, fix the tree/state if needed, delete the marker,
+     and the watcher resumes on the next tick".
 4. **Watcher integration** (`tagteam/watcher.py`):
    - `--mode headless` accepted by `watch_command`; `_auto_detect_mode`
      **never** returns it.
-   - New flags: `--turn-timeout MIN`, `--tail-rounds N`, `--turn-retries N`.
+   - New flags: `--turn-timeout MIN` (default 60), `--tail-rounds N` (default 3).
    - `_handle_ready` gets a `headless` branch that calls the turn runner
      synchronously (the loop has nothing else to do while a turn runs).
      `--confirm` still works (prompt before spawn).
@@ -115,53 +129,73 @@ sum.
    - `_handle_done` / `_handle_escalated` in headless behave like
      `notify` mode (log + notification; no completion nudge is sent
      because there is no terminal to nudge).
-   - Startup validation: both roles' provider CLIs must resolve via
-     `shutil.which` (or the configured command); otherwise exit 1 with a
-     clear message. Existing pause marker → log loudly, do not dispatch.
+   - Startup validation: both roles' headless executables must resolve
+     (see "Adapters": `headless.executable` if set, else
+     `shutil.which(provider)`), and `headless.args` must contain no
+     reserved flags; otherwise exit 1 with a clear message. Existing pause
+     marker → log loudly, do not dispatch.
 5. **`tagteam tail`** (new CLI command, `tagteam/cli.py` dispatch →
-   `headless.tail_command`): follows the in-flight turn log
-   (`inflight.json`) like `tail -f`, prints the outcome line when the
+   `headless.tail_command`): follows the in-flight turn's `<stem>.log`
+   (from `inflight.json`) like `tail -f`, prints the outcome line when the
    turn ends; with no in-flight turn prints the most recent turn log's
-   last `--lines N` (default 40) and exits. `--no-follow` for scripts.
-   Pure Python file following (cross-platform).
+   last `--lines N` (default 40) and exits. `--no-follow` for scripts;
+   `--events` follows the raw `<stem>.events.jsonl` instead. Pure Python
+   file following (cross-platform).
 6. **Config surface** (`tagteam/config.py`, additive, all optional):
    ```yaml
    agents:
      lead:
        name: Claude
        headless:
-         provider: claude            # claude | codex (default: inferred)
-         args: ["--model", "opus"]   # appended to the adapter's base argv
+         provider: claude              # claude | codex (default: inferred, see Adapters)
+         executable: /opt/bin/claude   # optional; default shutil.which(provider)
+         args: ["--model", "opus"]     # YAML list, inserted verbatim (no tokenizing)
    ```
-   `validate_config` checks types; unknown provider is an error.
+   `validate_config` checks types, rejects unknown providers, rejects
+   reserved flags in `args`, and requires `args` to be a list of strings
+   (a string is an error — no shell tokenization anywhere).
 7. **Windows acceptance path**: a new `.github/workflows/tests.yml`
    running pytest on `ubuntu-latest` and `windows-latest` (there is no
    test CI today — only `publish.yml`). The headless tests drive a
    **fake agent CLI** (`tests/fixtures/fake_agent.py`, a Python script
    selected via env var to emulate: writes-round-ok / no-round /
-   nonzero-exit / hang-for-timeout / malformed-output, in both claude-JSON
-   and codex-JSONL flavors) so spawn, streaming, timeout/kill, pause, and
-   usage-parse paths run on both OSes.
+   nonzero-exit / hang-for-timeout / malformed-output /
+   unrelated-state-write, in both claude-stream-json and codex-JSONL
+   flavors, emitting events *incrementally* with sleeps between them) so
+   spawn, streaming, timeout/kill, pause, verification, and usage-parse
+   paths run on both OSes. The fixture is installed into a temp PATH dir
+   as `claude`/`codex` — a shell script on POSIX and a `.cmd` shim on
+   Windows — so tests resolve it through exactly the `shutil.which` +
+   PATHEXT path real shims use.
 8. **Docs** (proposal §6 standing criterion): README gains a "Headless
    mode (opt-in)" section (what it is, how to enable, `tagteam tail`,
    what happens on failure, Windows note); `docs/how-tagteam-works.md`
    is **not** started here (Phase 36); `HELP_TEXT` and `watch --help`
-   updated; SKILL.md updated for `--tail N` and a two-line "headless
-   turns" note (the contract is identical — the agent still writes its
-   own round); `docs/roadmap.md` Phase 31 entry marked complete with
-   outcome notes; CHANGELOG-style notes in the release commit.
-9. **Dogfood acceptance**: one full plan cycle **and** one full impl
-   cycle completed with `--mode headless` on a real project before
-   0.8.0 is tagged. Proposed: this repo's Phase 32 plan cycle runs
-   headless (the impl cycle of Phase 31 itself is the other candidate
-   once the code exists — reviewer's call which is less circular).
-   Findings (tokens per turn, wall time, anything that broke) recorded in
+   updated; SKILL.md (both copies) updated for `--tail N`, a two-line
+   "headless turns" note (the contract is identical — the agent still
+   writes its own round), and the **`/handoff start [phase] impl`
+   clarification** (see "Plan-approved → implement boundary" below);
+   `docs/roadmap.md` Phase 31 entry marked complete with outcome notes;
+   CHANGELOG-style notes in the release commit.
+9. **Dogfood acceptance** (reviewer decision, round 1): (a) the late
+   rounds of Phase 31's own impl cycle run with `--mode headless` once
+   the engine exists; (b) the complete Phase 32 plan cycle runs headless;
+   and (c) the **plan-approved → lead-implements → impl-init boundary is
+   exercised headless** at least once (a `ready` lead turn whose command
+   is `/handoff start <phase> impl`, produced either by full-roadmap
+   auto-advance or by setting that state by hand on a scratch project),
+   with the resulting impl submission verified to contain a real
+   implementation diff. Findings (tokens per turn, wall time, incidents,
+   whether a real Windows CLI smoke happened) recorded in
    `docs/phases/headless-turn-engine-findings.md`.
 
 ### Out of Scope (explicitly)
 
 - `tagteam pause` / `resume` / `cancel-turn` / `interject` / `usage` /
   `rollback` — Phase 32. (31 writes the pause marker; 32 adds the verbs.)
+- Automatic turn retries (`--turn-retries`) — Phase 32, where at-least-once
+  semantics over a possibly-modified worktree can be defined and tested
+  next to `resume`.
 - Windows *notification* path — Phase 32 (in 31 `notify_macos` keeps its
   existing silent no-op off macOS; failures are still visible in the
   watcher log and `tagteam tail`).
@@ -199,32 +233,60 @@ wait/timeout → verify state advanced → record usage → (dispatch next tick
 | pause). Agent stdout is captured for `tagteam tail` and post-mortems,
 and parsed only for the trailing usage record.
 
-### Adapters (Open Question 2 in the proposal)
+### Adapters and argv ownership (proposal Open Question 2)
 
 ```python
 @dataclass(frozen=True)
 class Adapter:
-    provider: str                     # "claude" | "codex"
-    argv: list[str]                   # base invocation, prompt via stdin
-    parse_final: Callable[[str], TurnResult]   # stdout → usage/session/model
+    provider: str                 # "claude" | "codex"
+    canonical: list[str]          # flags tagteam owns (mode/output/cwd/prompt-source)
+    defaults: list[str]           # permission/sandbox flags used unless the user sets them
+    reserved: frozenset[str]      # user args containing these are rejected at startup
+    overridable: frozenset[str]   # if present in user args, the matching default is dropped
+    parse_event: Callable[[str], Event | None]   # one stdout line → rendered log line / usage
 ```
 
-- **claude**: `claude -p --output-format json` + permission flags (see
-  Open Questions). Final stdout is one JSON object with `usage`
-  (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
-  `cache_read_input_tokens`), `total_cost_usd`, `num_turns`,
-  `session_id`, `result`.
-- **codex**: `codex exec --json -C <project_root>` + sandbox flag
-  (`--sandbox workspace-write`), prompt on stdin (`-`). Stdout is JSONL
-  events; the adapter picks the last `turn.completed`/usage-bearing event
-  (`input_tokens`, `cached_input_tokens`, `output_tokens`).
-- **Step 0 of implementation is a probe**: run each CLI once with a
-  trivial prompt, save the *actual* current output as
-  `tests/fixtures/headless/{claude,codex}_sample.txt`, and write the
-  parsers against those fixtures. Field names above are best current
-  knowledge, not a promise; the fixtures are the contract and a drift in
-  either CLI is a one-file fix. Provider argv/parse live in one table so
-  a third CLI is one entry.
+**Who chooses what (deterministic, no tokenizing):**
+
+| Piece | Source | Notes |
+|---|---|---|
+| provider | `agents.<role>.headless.provider` if set; else inferred from the basename of the first whitespace token of `agents.<role>.command` (`claude*` → claude, `codex*` → codex); else from `agents.<role>.name` lowercased | Inference is **only** for picking the adapter; the interactive `command` string is never executed or tokenized for headless. Unknown/uninferable provider → startup error. |
+| argv[0] | `agents.<role>.headless.executable` if set (a single path/name string, resolved with `shutil.which`); else `shutil.which(provider)` | Windows resolves `claude.cmd`/`codex.cmd` via PATHEXT the same way. Not found → startup error. |
+| argv[1:] | `adapter.canonical + effective_defaults + headless.args` | `headless.args` must be a YAML **list** of strings, inserted verbatim. Reserved flags in it → startup error. `effective_defaults` = `adapter.defaults` minus any flag family the user set via `overridable`. |
+| cwd / stdin | always project root / always the composed prompt | Not configurable. |
+
+Final argv (subject to the step-0 probe):
+
+- **claude**: canonical `-p --output-format stream-json --verbose`
+  (`stream-json` requires `--verbose` in print mode); defaults
+  `--permission-mode acceptEdits --allowedTools Bash Read Edit Write Glob Grep`;
+  reserved `-p --print --output-format --input-format --verbose
+  --resume --continue -c`; overridable `--permission-mode --allowedTools
+  --dangerously-skip-permissions --model`. Prompt is read from stdin.
+  The stream is JSONL: `system` (init, includes `model`, `session_id`),
+  `assistant`/`user` message events, and a final `result` event carrying
+  `usage`, `total_cost_usd`, `num_turns`, `session_id`.
+- **codex**: canonical `exec --json -C <project_root> --skip-git-repo-check -`
+  (`-` = prompt on stdin); defaults `--sandbox workspace-write
+  -c approval_policy=never` — an **explicit** non-interactive approval
+  policy so a user `config.toml` that would wait for approval is never
+  inherited (`codex exec --help` in 0.147.0 exposes `--sandbox`,
+  `--approve-for-me`, `--dangerously-bypass-approvals-and-sandbox`, and
+  `-c key=value`; there is no `--full-auto`); reserved `--json -C --cd -o
+  --output-last-message --output-schema --ephemeral`; overridable
+  `--sandbox -s -c approval_policy --approve-for-me
+  --dangerously-bypass-approvals-and-sandbox --model -m`. Stdout is JSONL
+  events; the parser renders agent messages / command events as log lines
+  and takes usage from the terminal turn/usage event.
+
+**Step 0 of implementation is a probe**: run each CLI once with a trivial
+prompt using the argv above, save the actual streamed stdout as
+`tests/fixtures/headless/{claude,codex}_stream.jsonl` (plus stderr as
+`.stderr.txt`), confirm the permission defaults let a real edit + Bash
+test + `tagteam cycle add` turn complete without prompting, and write the
+parsers against those fixtures. Field names above are best current
+knowledge; the fixtures are the contract, and drift in either CLI is a
+one-function fix. Adding a third CLI is one table entry.
 
 ### Prompt composition (Open Question 1)
 
@@ -234,6 +296,7 @@ project at {root}. This is a headless turn: no human is watching this
 terminal. Read the contract below, then act on your turn exactly as it
 says, using --updated-by "{agent_name}". Make exactly one cycle-writing
 call (tagteam cycle add / tagteam cycle init). When it succeeds, stop.
+{boundary_clause}
 
 === COMMAND ===
 {state.command}
@@ -245,8 +308,38 @@ call (tagteam cycle add / tagteam cycle init). When it succeeds, stop.
 {tail_jsonl}
 ```
 
-Full SKILL.md is included in v1 (~4–5k tokens); usage rows make the
-trimmed-variant question measurable rather than argued.
+Full SKILL.md is included in v1 (~4–5k tokens; reviewer decision:
+evaluate trimming from measured Phase 32 data). `{boundary_clause}` is
+empty except in the case below.
+
+### Plan-approved → implement boundary (reviewer point 2)
+
+In full-roadmap mode, plan approval makes the watcher set
+`turn: lead, status: ready, command: /handoff start <phase> impl`
+(`watcher._try_roadmap_advance`). Today's SKILL.md describes
+`/handoff start [phase] impl` only as "create the impl cycle"; a
+context-fresh headless lead following it literally would init an impl
+cycle over an unchanged tree. Two changes, both mode-independent:
+
+1. **SKILL.md (both copies)** — the `/handoff start [phase]` section
+   gains an explicit `impl` paragraph: *before* `cycle init --type impl`,
+   read the approved plan (`docs/phases/<phase>.md`) and the plan cycle's
+   history (`cycle rounds --phase <phase> --type plan`), implement the
+   plan in full, run the project's verification (tests), and only then
+   initialize the impl cycle **exactly once** with a submission that
+   summarizes what was implemented. If an impl cycle for the phase already
+   exists, do not create another — act on it. This is a clarification of
+   existing intent, so it applies to interactive sessions too.
+2. **Composed prompt** — when the state's command matches
+   `/handoff start <phase> impl`, `{boundary_clause}` restates that
+   paragraph and lists the plan path explicitly.
+
+Tests: composer emits the clause for that command and not otherwise; a
+transition test with the fake agent shows a `ready` lead turn with that
+command results in a *new impl cycle at round 1 by the lead* being
+counted as `ok`, and an unchanged state as `no_round`. Dogfood item 9(c)
+exercises the real boundary and checks the impl submission carries a
+real diff.
 
 ### Schema v3 (proposal Open Question 8 — settled: `PRAGMA user_version` already exists)
 
@@ -280,22 +373,56 @@ raise when `user_version` is *greater* than the code's `SCHEMA_VERSION`
 accessors; `export_to_files`/`import_from_files` are untouched (usage is
 runtime data, not cycle history).
 
+### Outcome verification (reviewer point 3)
+
+Before spawning, the runner snapshots the **owed turn identity**:
+`(phase, type, round, role, state.seq, command)` plus the cycle's
+`(state, ready_for, round)` from `cycle status`, and the count of round
+entries in that cycle. After the child exits, the outcome is `ok` **iff
+all** hold:
+
+1. exit code 0;
+2. the *expected transition* happened in the cycle store for the same
+   `(phase, type)`:
+   - owed role `lead`, ordinary turn → a new round entry with
+     `role == lead` at `round == expected` (SUBMIT_FOR_REVIEW), so the
+     cycle is now `ready_for: reviewer` — or, when the command was
+     `/handoff start <phase>` / `… impl`, a **new cycle** for that
+     `(phase, type)` exists at round 1 with a lead entry;
+   - owed role `reviewer` → a new reviewer entry at `round == expected`
+     with one of APPROVE / REQUEST_CHANGES / ESCALATE / NEED_HUMAN, and
+     the cycle state changed accordingly;
+3. `state.phase/type` still identify that cycle (or, for `start`
+   commands, the newly created one), and `state.updated_by` is the owed
+   agent's name.
+
+Everything else is `no_round` (exit 0 but the expected transition is
+absent), `nonzero_exit`, or `timeout` — including: seq advanced by an
+unrelated writer (human `state set`, watcher repair), a round written for
+the wrong phase/type, a round at the wrong round number, an AMEND where a
+SUBMIT was owed, or a concurrent human write that flipped the turn
+without a matching cycle entry. Concurrent writes are not "handled" in
+31: the runner reports what it found (the pause reason names the
+mismatch) and pauses; the human decides. All of these are fake-agent test
+cases and must land as `no_round`/pause, never `ok`.
+
 ### Failure handling detail
 
 | Outcome | Detection | Action |
 |---|---|---|
-| ok | exit 0, seq advanced, role no longer owed at that round | record usage; next tick dispatches next owed turn |
+| ok | exit 0 and expected transition present (above) | record usage; next tick dispatches next owed turn |
 | timeout | wall clock > `--turn-timeout` | kill process tree; usage row status=timeout; pause |
 | nonzero_exit | returncode ≠ 0 (incl. CLI auth/rate-limit failures) | usage row; pause |
-| no_round | exit 0 but state unchanged / same role still owed | usage row status=no_round; pause |
+| no_round | exit 0 but expected transition absent | usage row status=no_round; pause with the specific mismatch in the reason |
 
 "Pause" = diagnostics row + `.tagteam/headless-paused.json` + notification
-+ log line with the resume recipe. The turn log path is in all three.
-`--turn-retries N` (default 0) re-spawns the same turn up to N times
-before pausing; each attempt gets its own usage row and log.
++ log line with the resume recipe. The turn's `<stem>` (both files) is in
+all three. There are no automatic retries in Phase 31 (see Scope 3 and
+Out of Scope): a failed coding turn may already have modified the
+worktree, so re-running it is a human call.
 
 Per-turn logs are retained under `.tagteam/turns/` (already gitignored via
-`/.tagteam/*`); the runner prunes to the newest 50 on each start.
+`/.tagteam/*`); the runner prunes to the newest 50 stems on each start.
 
 ### Interaction with the existing tick loop
 
@@ -324,34 +451,41 @@ desirable but not gating (see Open Questions).
 
 ### Implementation order (each step lands green before the next)
 
-0. Probe `claude -p` / `codex exec` output; commit fixtures. (~½ day)
-1. `cycle rounds --tail N` + `cycle.tail_rounds()` + SKILL.md line + tests.
-2. Schema v3 + `add_usage`/`get_usage` + migration/downgrade tests.
-3. `headless.py`: adapters + composer + runner + verify + pause; fake-agent
-   fixture and tests (both flavors, all five outcomes, timeout kill).
+0. Probe `claude -p --output-format stream-json --verbose` /
+   `codex exec --json` with the argv above; confirm permission defaults
+   complete an edit + Bash + `cycle add` turn unprompted; commit stdout /
+   stderr fixtures. (~½ day)
+1. `cycle rounds --tail N` + `cycle.tail_rounds()` + SKILL.md changes
+   (`--tail`, headless note, `start … impl` clarification) + tests.
+2. Schema v3 + `add_usage`/`get_usage` + migration tests.
+3. `headless.py`: adapters/argv resolution + composer (incl. boundary
+   clause) + runner (two streams, two files, incremental flush) + outcome
+   verification + pause; fake-agent fixture and tests (both flavors, every
+   outcome incl. unrelated-write/wrong-round/wrong-cycle, log-grows-before-
+   exit, timeout kill with grandchild).
 4. Watcher integration + flags + startup validation + `_auto_detect_mode`
    guard + resend short-circuit; `test_watcher.py` must pass **unmodified**
-   (flag-off byte-identical criterion).
+   (flag-off "behavior unchanged" criterion).
 5. `tagteam tail` + tests.
 6. `tests.yml` (ubuntu + windows matrix).
 7. Docs (README, help text, roadmap, findings doc skeleton).
-8. Dogfood cycle headless; write findings; bump to 0.8.0; tag.
+8. Dogfood per Scope 9 (incl. the impl boundary); run the 0.7.1 downgrade proof; write findings; bump to 0.8.0; tag.
 
 ---
 
 ## Files to Create/Modify
 
-- `tagteam/headless.py` — **new**: adapters, prompt composer, turn runner, outcome verification, pause marker, `tail_command`.
+- `tagteam/headless.py` — **new**: adapter table + argv resolution, prompt composer (incl. boundary clause), two-stream turn runner, outcome verification, pause marker, `tail_command`.
 - `tagteam/db.py` — `SCHEMA_VERSION = 3`, `_SCHEMA_V3` usage table, `add_usage`, `get_usage`.
 - `tagteam/cycle.py` — `--tail N` in `_cli_rounds`; `tail_rounds(phase, type, n)` helper.
 - `tagteam/watcher.py` — `headless` mode string, new flags, headless branch in `_handle_ready`, resend short-circuit, startup validation, done/escalated behavior in headless, help text.
-- `tagteam/config.py` — optional `agents.<role>.headless.{provider,args}` parsing + validation; `get_headless_spec(config, role)`.
+- `tagteam/config.py` — optional `agents.<role>.headless.{provider,executable,args}` parsing + validation (list-of-strings, reserved flags); `get_headless_spec(config, role)`.
 - `tagteam/cli.py` — `tail` command dispatch + `HELP_TEXT` entries (`watch --mode headless`, `tail`, `cycle rounds --tail`).
-- `tagteam/data/.claude/skills/handoff/SKILL.md` and `.claude/skills/handoff/SKILL.md` — `--tail N` mention; headless note. (Both copies; the `data/` one ships.)
-- `tests/test_headless.py` — **new**: adapters/parsers against fixtures, composer, runner via fake agent (ok/no_round/nonzero/timeout/malformed), pause marker + no-dispatch-while-paused, usage rows, `tail` command.
-- `tests/fixtures/fake_agent.py` — **new**: env-driven fake CLI (claude-JSON / codex-JSONL flavors).
-- `tests/fixtures/headless/claude_sample.txt`, `codex_sample.txt` — **new**: real captured outputs from step 0.
-- `tests/test_db.py` — v3 migration, `add_usage`/`get_usage`, "user_version greater than code" no-raise guard.
+- `tagteam/data/.claude/skills/handoff/SKILL.md` and `.claude/skills/handoff/SKILL.md` — `--tail N` mention; headless note; `/handoff start [phase] impl` implement-first clarification. (Both copies; the `data/` one ships.)
+- `tests/test_headless.py` — **new**: argv resolution (provider inference, executable, reserved/overridable flags), parsers against fixtures, composer (+ boundary clause), runner via fake agent (ok / no_round variants / nonzero / timeout / malformed / unrelated-write), log-grows-before-exit, stderr kept out of events file, pause marker + no-dispatch-while-paused, usage rows, `tail` command.
+- `tests/fixtures/fake_agent.py` — **new**: env-driven fake CLI (claude-stream-json / codex-JSONL flavors, incremental emission, optional grandchild), installed per-test into a temp PATH dir as `claude`/`codex` (POSIX script or Windows `.cmd` shim).
+- `tests/fixtures/headless/{claude,codex}_stream.jsonl` + `.stderr.txt` — **new**: real captured outputs from step 0.
+- `tests/test_db.py` — v3 migration, `add_usage`/`get_usage`, "user_version greater than code" no-raise regression guard (see criterion below for the separate real-downgrade check).
 - `tests/test_cycle.py` — `--tail N` cases (N > len, N = 0 rejected, AMEND counted).
 - `tests/test_watcher.py` — **unchanged** (criterion); new headless-mode assertions go in `test_headless.py` or a new `test_watcher_headless.py`.
 - `tests/test_watcher_auto_detect.py` — assert headless is never auto-detected.
@@ -364,58 +498,60 @@ desirable but not gating (see Open Questions).
 
 ## Success Criteria
 
-- [ ] `tagteam watch` with no `--mode`, or with `notify|tmux|iterm2`, behaves byte-identically to 0.7.1: `tests/test_watcher.py`, `test_watcher_events.py`, `test_watcher_auto_detect.py` pass **without modification**; `_auto_detect_mode` has a test asserting it never returns `headless`.
-- [ ] `tagteam watch --mode headless` spawns the owed agent on a `ready` state via the configured/inferred adapter, with the composed prompt on stdin, cwd = project root, and streams output to `.tagteam/turns/<…>.log` while `.tagteam/turns/inflight.json` exists (fake-agent tests, both flavors).
-- [ ] After a turn where the fake agent runs `tagteam cycle add`, the orchestrator records `usage.status = ok` with parsed token fields, and the next tick dispatches the *other* role.
-- [ ] Each of timeout / nonzero exit / exit-0-with-no-round produces: a usage row with the matching status, a `diagnostics` row (`headless_turn_failed`), `.tagteam/headless-paused.json`, and no further dispatch on subsequent ticks or on restart until the marker is removed. Timeout kills the whole child process tree (verified on POSIX and Windows CI by a fake agent that spawns a grandchild).
+- [ ] **Flag-off behavior unchanged** (reviewer point 5 wording): for every existing invocation and config — `tagteam watch` with no `--mode`, or with `notify|tmux|iterm2`, existing `tagteam.yaml` files with no `headless` block — runtime behavior is unchanged from 0.7.1 (dispatch, sends, notifications, state writes, files touched). Concretely: `tests/test_watcher.py`, `test_watcher_events.py`, `test_watcher_auto_detect.py`, `test_config.py` pass **without modification**; `_auto_detect_mode` has a test asserting it never returns `headless`. Help text and `--help` output intentionally change and are excluded from this claim.
+- [ ] `tagteam watch --mode headless` spawns the owed agent on a `ready` state via the resolved adapter argv (provider/executable/args rules above), with the composed prompt on stdin, cwd = project root, stdout → `<stem>.events.jsonl`, stdout-rendered + `[stderr]` lines → `<stem>.log`, while `.tagteam/turns/inflight.json` exists (fake-agent tests, both flavors).
+- [ ] **Incremental capture**: with a fake agent that emits events with sleeps between them, `<stem>.log` and `<stem>.events.jsonl` grow *before* the process exits (asserted mid-run), and a stderr line emitted by the fake never appears in `<stem>.events.jsonl` nor breaks usage parsing.
+- [ ] Argv ownership: provider inference (`headless.provider` > interactive `command` basename > name), `headless.executable` override, `headless.args` list appended verbatim, reserved flags rejected at startup with a message, overridable defaults dropped when the user supplies the family — each unit-tested for both adapters. `headless.args` given as a string is a config error.
+- [ ] After a turn where the fake agent performs the expected transition (`cycle add` by the owed role at the owed round, or `cycle init` for a `start` command), the orchestrator records `usage.status = ok` with parsed token fields, and the next tick dispatches the *other* role.
+- [ ] Verification rejects look-alikes: an unrelated `seq` advance, a round for the wrong phase/type, a round at the wrong number, an AMEND where SUBMIT was owed, and a turn flip with no matching cycle entry each land as `no_round` + pause (fake-agent tests), never `ok`.
+- [ ] Composer adds the implement-first boundary clause exactly when the command is `/handoff start <phase> impl`; a fake lead turn on that command that creates the impl cycle at round 1 is `ok`, and one that leaves state unchanged is `no_round`.
+- [ ] Each of timeout / nonzero exit / no_round produces: a usage row with the matching status, a `diagnostics` row (`headless_turn_failed`), `.tagteam/headless-paused.json` naming the specific mismatch, and no further dispatch on subsequent ticks or on restart until the marker is removed. No retry is attempted. Timeout kills the whole child process tree (verified on POSIX and Windows CI by a fake agent that spawns a grandchild).
 - [ ] The watchdog re-send path never fires in headless mode (unit test on `_StateProcessor.tick`).
 - [ ] Ctrl-C during an in-flight turn terminates the child and removes `inflight.json`.
 - [ ] Malformed/missing usage output on an otherwise-ok turn does not fail the turn; it writes a null-token usage row plus a `headless_usage_unparsed` diagnostic.
 - [ ] `tagteam cycle rounds --phase X --type Y --tail N` returns the last N merged entries (AMEND counted), errors on N < 1, returns all when N > len; output format per line unchanged.
-- [ ] `tagteam tail` follows an in-flight log and prints the outcome line on completion; with nothing in flight prints the last turn log tail; `--no-follow` exits immediately.
-- [ ] `db.SCHEMA_VERSION == 3`; a fresh DB and a v2 DB both migrate to v3 with the `usage` table; a DB with `user_version = 4` opens under v3 code without raising (additive-only guard).
-- [ ] Startup with `--mode headless` fails fast (exit 1, clear message) when a role's provider CLI is not on PATH, or when `agents.<role>.headless.provider` is unknown.
-- [ ] `.github/workflows/tests.yml` runs the full suite on ubuntu-latest and windows-latest and is green, including all headless fake-agent tests on Windows.
-- [ ] README documents headless mode (enable, `tagteam tail`, failure/pause behavior, Windows note); `tagteam --help` and `tagteam watch --help` list the new mode/flags/command; SKILL.md (both copies) mentions `--tail N` and the headless note.
-- [ ] One plan cycle and one impl cycle completed end-to-end with `--mode headless` on a real project (see Scope 9); per-turn tokens, wall time, and any incidents recorded in `docs/phases/headless-turn-engine-findings.md`.
-- [ ] Released as 0.8.0 (tag matches `pyproject.toml`); revert recipe (`pip install tagteam==0.7.1` + `tagteam upgrade`) verified against a project that ran a headless turn (0.7.1 opens the v3 DB fine).
+- [ ] `tagteam tail` follows an in-flight `<stem>.log` and prints the outcome line on completion; with nothing in flight prints the last turn log tail; `--no-follow` exits immediately; `--events` follows the raw events file.
+- [ ] `db.SCHEMA_VERSION == 3`; a fresh DB and a v2 DB both migrate to v3 with the `usage` table; **regression guard**: a DB with `user_version = 4` opens under v3 code without raising (protects the additive-only promise going forward — this is *not* the downgrade proof).
+- [ ] **Downgrade proof (release/dogfood check, recorded in the findings doc)**: in a throwaway venv, `pip install tagteam==0.7.1` against a copy of a project DB that has run headless turns (user_version 3, `usage` rows present) → `tagteam cycle rounds`, `tagteam state show`, and a `cycle add` all work; then `tagteam upgrade` completes the revert recipe.
+- [ ] Startup with `--mode headless` fails fast (exit 1, clear message) when a role's executable cannot be resolved, when `headless.provider` is unknown/uninferable, or when `headless.args` contains a reserved flag / is not a list.
+- [ ] `.github/workflows/tests.yml` runs the full suite on ubuntu-latest and windows-latest and is green, including all headless fake-agent tests on Windows through the `.cmd` shim path. (Reviewer decision: this CI is the gating Windows criterion; a real signed-in CLI smoke on Windows is best-effort and the findings doc + release notes state explicitly whether it happened.)
+- [ ] README documents headless mode (enable, `tagteam tail`, failure/pause behavior, Windows note); `tagteam --help` and `tagteam watch --help` list the new mode/flags/command; SKILL.md (both copies) carries `--tail N`, the headless note, and the `start … impl` implement-first clarification.
+- [ ] Dogfood per Scope 9: late Phase 31 impl-cycle turns headless, the full Phase 32 plan cycle headless, and the plan-approved → implement → impl-init boundary exercised headless with a real implementation diff in the resulting submission; per-turn tokens, wall time, incidents, and Windows-smoke status recorded in `docs/phases/headless-turn-engine-findings.md`.
+- [ ] Released as 0.8.0 (tag matches `pyproject.toml`) with the downgrade proof above completed first.
 
 ---
+
+## Decisions (round 1 open questions, resolved by reviewer)
+
+1. **Permission defaults** — least-privileged unattended defaults that
+   still permit workspace edits and the cycle CLI. Claude:
+   `--permission-mode acceptEdits` + explicit `--allowedTools` list,
+   accepted only after step 0 proves a real edit + Bash test +
+   `cycle add` turn completes without prompting (if it prompts, the
+   step-0 findings propose the minimal widening). Codex: `--sandbox
+   workspace-write` + explicit `-c approval_policy=never` — never inherit
+   a user config that could wait for approval. Wider modes reachable via
+   `headless.args` (overridable families).
+2. **Windows verification** — ubuntu/windows fake-agent CI is gating; the
+   fake goes through the same `.cmd`/PATHEXT resolution as real shims; a
+   real signed-in CLI smoke is best-effort and its occurrence is stated in
+   the findings doc and release notes.
+3. **Dogfood** — late Phase 31 impl turns + the complete Phase 32 plan
+   cycle, and the plan-approved → implement → impl-init boundary must be
+   exercised.
+4. **Turn timeout** — one 60-minute default; per-role timeout config
+   deferred.
+5. **Skill context** — full SKILL.md in v1; trimming evaluated from
+   measured Phase 32 data.
+6. **Retries** — none in Phase 31 (reviewer point 6); `--turn-retries`
+   with defined at-least-once semantics moves to Phase 32.
 
 ## Open Questions
 
-1. **Permission flags for the spawned CLIs.** The lead turn must edit
-   files, run tests, and call `tagteam cycle add`. Options for the
-   `claude` adapter default: (a) `--permission-mode acceptEdits` +
-   `--allowedTools "Bash,Read,Edit,Write,Glob,Grep"`, (b)
-   `--dangerously-skip-permissions`. Recommendation: (a) as the shipped
-   default (it is what a trusted interactive session effectively grants
-   after a few approvals), with (b) reachable via
-   `agents.<role>.headless.args` for users who want it. Codex:
-   `--sandbox workspace-write` default (writes inside the repo, which
-   covers `.tagteam/`), `--full-auto` via `args`. Reviewer: agree, or
-   prefer the stricter default and accept more no_round pauses?
-2. **Windows verification level.** Is a green `windows-latest` CI job
-   running the fake-agent suite sufficient for the roadmap's "headless
-   mode runs on Windows" criterion, or must a real `claude`/`codex` turn
-   be run on a Windows machine before 0.8.0? Recommendation: CI is
-   gating; a real-CLI smoke is best-effort and recorded in the findings
-   doc if done.
-3. **Which real cycles satisfy the dogfood criterion.** Proposal: run
-   this repo's Phase 32 *plan* cycle headless (both turns), and — once
-   the code exists mid-phase — run the last round or two of Phase 31's
-   own *impl* cycle headless. Alternatively pick a scratch project.
-   Reviewer preference?
-4. **Turn-timeout default.** 60 min proposed (roadmap-mode lead turns
-   include implementing a phase). Too generous for reviewer turns?
-   Per-role timeouts (`--turn-timeout` + `agents.<role>.headless.timeout_minutes`)
-   are cheap to add now if the reviewer wants them in 31 rather than 32.
-5. **Full SKILL.md every turn vs. trimmed variant.** v1 = full contract;
-   the usage table makes the comparison measurable in soak. Confirm we
-   defer the trimmed variant to a Phase 32 decision rather than shipping
-   both now.
-
----
+- None blocking. If step 0 shows `claude -p --output-format stream-json`
+  needs a companion flag beyond `--verbose` (e.g. for the final `result`
+  event's usage), the adapter's canonical list absorbs it and the plan's
+  Adapters table is amended in the impl submission.
 
 ## Risks
 
@@ -426,8 +562,16 @@ desirable but not gating (see Open Questions).
 - **Duplicate or wrong-role round writes by the spawned agent** (agent
   runs `cycle add` twice, or as the wrong role). Mitigation: existing
   cycle state machine already rejects out-of-turn writes; the prompt says
-  "exactly one" call; outcome verification checks the flip; anything odd
-  lands as no_round → pause, never a silent double round.
+  "exactly one" call; outcome verification requires the *expected*
+  transition by the owed role at the owed round; anything else lands as
+  no_round → pause, never a silent double round.
+- **Headless lead inits an impl cycle over an unchanged tree** at the
+  plan-approved boundary. Mitigation: SKILL.md implement-first
+  clarification + composed boundary clause + transition test + dogfood
+  9(c); the impl reviewer's scope-diff also catches an empty diff.
+- **`claude -p` stream-json needing companion flags / event shapes
+  differing from expectation.** Mitigation: step-0 probe before any
+  parser is written; fixtures pin the shape.
 - **Blocking tick + long turns.** A 60-minute synchronous tick means the
   watcher is unresponsive to state edits made by a human mid-turn.
   Mitigation: acceptable for v1 (headless is opt-in; Phase 32 adds
@@ -435,8 +579,7 @@ desirable but not gating (see Open Questions).
   watchdog callback is starved.
 - **Subscription rate limits / auth expiry surface as nonzero exits.**
   This is desired: the orchestrator pauses loudly instead of hammering the
-  CLI. Mitigation: pause reason includes the log path; zero retries by
-  default.
+  CLI. Mitigation: pause reason includes the log stem; no retries.
 - **Process-tree kill on Windows** (`claude.cmd` shim → node child).
   Mitigation: `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T`; CI test with
   a grandchild-spawning fake agent on windows-latest.
