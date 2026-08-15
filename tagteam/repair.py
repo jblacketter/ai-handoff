@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone, timedelta
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -219,9 +220,24 @@ def rebuild_db_from_files_and_verify(project_dir: str | Path) -> dict[str, Any]:
     conn = None
     try:
         db_path = project_path / db.DEFAULT_DB_RELPATH
+        # Phase 33: preserve non-file-backed tables (usage, interjections,
+        # briefs) across the rebuild — they have no canonical file to
+        # reimport from and briefs link to rounds by a repair-safe key.
+        snapshot: dict = {}
+        if db_path.exists():
+            try:
+                old = sqlite3.connect(db_path)
+                try:
+                    snapshot = db.snapshot_non_file_backed(old)
+                finally:
+                    old.close()
+            except Exception:
+                snapshot = {}
         _remove_sqlite_db_files(db_path)
         conn = db.connect(db_path=db_path)
         db.import_from_files(project_path, conn)
+        if snapshot:
+            db.restore_non_file_backed(conn, snapshot)
 
         bad = _run_parity_unchecked(conn, project_path)
         if bad is not None:

@@ -456,10 +456,13 @@ class _StateProcessor:
         retry_delay: float,
         pre_send_delay: float,
         engine=None,
+        briefer=None,
     ):
         self.mode = mode
         # Phase 31: HeadlessEngine when mode == "headless" (else None).
         self.engine = engine
+        # Phase 33: BriefSpec (enabled) or None — escalation briefer.
+        self.briefer = briefer
         self.lead_name = lead_name
         self.reviewer_name = reviewer_name
         self.lead_pane = lead_pane
@@ -532,6 +535,11 @@ class _StateProcessor:
                 _log(f"Current state: {state.get('status', '?')}"
                      f" (turn: {state.get('turn', '?')},"
                      f" phase: {state.get('phase', '?')})")
+                # Phase 33: a watcher (re)started on an already-escalated
+                # cycle briefs it once (claim dedupe makes this idempotent).
+                # Every other non-ready first state is unchanged.
+                if state.get("status") == "escalated":
+                    self._maybe_brief(state)
                 return
             _log("Picking up active turn from existing state")
 
@@ -732,6 +740,28 @@ class _StateProcessor:
         else:
             _log("!! Escalated to human arbiter")
             notify_macos("Tagteam", "Escalated to human arbiter!")
+            self._maybe_brief(state)
+
+    def _maybe_brief(self, state: dict) -> None:
+        """Phase 33: run the escalation briefer once per escalation event.
+        No-op when the briefer is not enabled (0.9.0 behavior), for
+        roadmap-advance pauses, and when the canonical cycle status is not
+        escalated/needs-human. Idempotent via the briefs claim."""
+        if self.briefer is None or not getattr(self.briefer, "enabled", False):
+            return
+        roadmap = state.get("roadmap") or {}
+        if roadmap.get("pause_reason") or state.get("reason"):
+            return
+        try:
+            from tagteam import briefer as _briefer
+            res = _briefer.run_briefer(self.project_dir, kind="auto", spec=self.briefer,
+                                       log=_log, notify=notify_macos)
+            if res.status in ("ok", "partial"):
+                _log(f"   brief: {res.path}")
+            elif res.status == "failed":
+                _log(f"   brief failed: {res.reason} — `tagteam brief --generate` to retry")
+        except Exception as e:  # the loop must never die because of the briefer
+            _log(f"   briefer error: {type(e).__name__}: {e}")
 
 
 def _build_processor(
@@ -776,6 +806,20 @@ def _build_processor(
             _log("  Run 'python -m tagteam session start' first.")
             return None
 
+    # Phase 33: escalation briefer — opt-in; problems warn and disable, never block.
+    briefer_spec = None
+    try:
+        from tagteam.briefer import resolve_briefer
+        bs = resolve_briefer(config or {}, project_dir)
+        if bs.enabled:
+            briefer_spec = bs
+        elif bs.problems:
+            _log("WARNING: escalation briefer disabled for this run:")
+            for pr in bs.problems:
+                _log(f"  - {pr}")
+    except Exception as e:
+        _log(f"WARNING: escalation briefer disabled for this run: {e}")
+
     engine = None
     if mode == "headless":
         from tagteam.headless import (HeadlessEngine,
@@ -814,6 +858,7 @@ def _build_processor(
         retry_delay=retry_delay,
         pre_send_delay=pre_send_delay,
         engine=engine,
+        briefer=briefer_spec,
     )
 
 
@@ -848,6 +893,9 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
         _log(f"  turn timeout: {eng.timeout_s / 60:.0f} min |"
              f" round tail: {eng.tail_n} | retries: {eng.retries} |"
              f" logs: {eng.project_root}/.tagteam/turns/")
+    if processor.briefer is not None:
+        _log(f"  escalation briefer: on ({processor.briefer.provider}, "
+             f"timeout {processor.briefer.timeout_s / 60:.0f} min)")
     info = processor._pause_info()
     if info is not None:
         processor._log_paused(info, force=True)

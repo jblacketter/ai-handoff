@@ -24,11 +24,15 @@ from pathlib import Path
 # 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
 # ONLY — new tables / nullable columns, never renames or drops — so an
 # older release can still open a newer DB after a downgrade.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed",
                   "cancelled"}
 INTERJECTION_ROLES = {"lead", "reviewer"}
+BRIEF_STATUSES = {"running", "ok", "partial", "failed", "abandoned"}
+BRIEF_KINDS = {"auto", "manual"}
+# Non-file-backed tables: preserved verbatim across `repair` rebuilds.
+NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs")
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
@@ -172,6 +176,44 @@ CREATE INDEX IF NOT EXISTS idx_interjections_phase ON interjections(phase, type,
 """
 
 
+# Schema v5 (Phase 33): escalation briefs. The row is the CLAIM as well as
+# the record: inserted `running` before the briefer spawns (under the
+# project writer lock), finished afterwards. Partial unique indexes give
+# at-most-one automatic attempt per escalation event and at-most-one
+# running attempt per event across kinds. `event_key` is repair-safe
+# (derived from file-backed round data); `event_row_id` is informational.
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS briefs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT NOT NULL,
+    phase        TEXT NOT NULL,
+    type         TEXT NOT NULL,
+    round        INTEGER NOT NULL,
+    cycle_state  TEXT NOT NULL,
+    event_key    TEXT NOT NULL,
+    event_row_id INTEGER,
+    kind         TEXT NOT NULL CHECK (kind IN ('auto','manual')),
+    attempt      INTEGER NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('running','ok','partial','failed','abandoned')),
+    started_at   TEXT,
+    finished_at  TEXT,
+    runner_pid   INTEGER,
+    runner_ident TEXT,
+    stem         TEXT,
+    path         TEXT,
+    content      TEXT,
+    provider     TEXT,
+    model        TEXT,
+    usage_row_id INTEGER,
+    duration_ms  INTEGER,
+    reason       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_cycle ON briefs(phase, type, round);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_auto    ON briefs(event_key) WHERE kind = 'auto';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_running ON briefs(event_key) WHERE status = 'running';
+"""
+
+
 def _resolve_db_path(project_dir: str | Path | None) -> Path:
     """Resolve where the database lives.
 
@@ -216,6 +258,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_V4)
         conn.execute("PRAGMA user_version = 4")
         current = 4
+    if current < 5:
+        conn.executescript(_SCHEMA_V5)
+        conn.execute("PRAGMA user_version = 5")
+        current = 5
     # Future migrations land here.
     # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
     # deliberately tolerated — additive-only migrations mean older code
@@ -620,6 +666,174 @@ def retire_interjection(conn: sqlite3.Connection, id_: int, *, by: str | None,
     )
     conn.commit()
     return cur.rowcount == 1
+
+
+# ---------- Briefs (Phase 33) ----------
+
+_BRIEF_COLS = [
+    "id", "ts", "phase", "type", "round", "cycle_state", "event_key", "event_row_id",
+    "kind", "attempt", "status", "started_at", "finished_at", "runner_pid",
+    "runner_ident", "stem", "path", "content", "provider", "model", "usage_row_id",
+    "duration_ms", "reason",
+]
+
+
+def claim_brief(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str,
+                round_: int, cycle_state: str, event_key: str, kind: str,
+                runner_pid: int | None, runner_ident: str | None,
+                event_row_id: int | None = None, provider: str | None = None
+                ) -> tuple[int, int] | None:
+    """Atomically claim a briefer attempt for `event_key`.
+
+    Single INSERT … SELECT … WHERE NOT EXISTS (an ok|partial row for the
+    event) that also allocates `attempt = 1 + max(attempt)` over the
+    event's rows (both kinds). The two partial unique indexes reject a
+    second automatic attempt / a second running attempt. Returns
+    (row_id, attempt) or None when the claim is refused. Caller holds the
+    project writer lock. Commits.
+    """
+    if kind not in BRIEF_KINDS:
+        raise ValueError(f"Invalid brief kind: {kind!r}")
+    if cycle_state not in ("escalated", "needs-human"):
+        raise ValueError(f"Invalid cycle_state for a brief: {cycle_state!r}")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            """INSERT INTO briefs
+               (ts, phase, type, round, cycle_state, event_key, event_row_id, kind,
+                attempt, status, started_at, runner_pid, runner_ident, provider)
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?,
+                      COALESCE((SELECT MAX(attempt) FROM briefs WHERE event_key = ?), 0) + 1,
+                      'running', ?, ?, ?, ?
+               WHERE NOT EXISTS (SELECT 1 FROM briefs
+                                  WHERE event_key = ? AND status IN ('ok','partial'))""",
+            (ts, phase, cycle_type, round_, cycle_state, event_key, event_row_id, kind,
+             event_key, ts, runner_pid, runner_ident, provider, event_key),
+        )
+        if cur.rowcount != 1:
+            conn.execute("ROLLBACK")
+            return None
+        row_id = cur.lastrowid
+        attempt = conn.execute("SELECT attempt FROM briefs WHERE id=?", (row_id,)).fetchone()[0]
+        conn.execute("COMMIT")
+        return row_id, attempt
+    except sqlite3.IntegrityError:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            pass
+        return None
+
+
+def finish_brief(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
+                 stem: str | None = None, path: str | None = None,
+                 content: str | None = None, model: str | None = None,
+                 usage_row_id: int | None = None, duration_ms: int | None = None,
+                 reason: str | None = None) -> None:
+    if status not in BRIEF_STATUSES or status == "running":
+        raise ValueError(f"Invalid final brief status: {status!r}")
+    conn.execute(
+        """UPDATE briefs SET status=?, finished_at=?, stem=COALESCE(?, stem), path=?,
+               content=?, model=?, usage_row_id=?, duration_ms=?, reason=?
+           WHERE id=?""",
+        (status, ts, stem, path, content, model, usage_row_id, duration_ms, reason, id_),
+    )
+    conn.commit()
+
+
+def set_brief_stem(conn: sqlite3.Connection, id_: int, stem: str) -> None:
+    conn.execute("UPDATE briefs SET stem=? WHERE id=?", (stem, id_))
+    conn.commit()
+
+
+def mark_brief_abandoned(conn: sqlite3.Connection, id_: int, *, ts: str,
+                         reason: str) -> bool:
+    cur = conn.execute(
+        "UPDATE briefs SET status='abandoned', finished_at=?, reason=? "
+        "WHERE id=? AND status='running'", (ts, reason, id_))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def get_brief(conn: sqlite3.Connection, id_: int) -> dict | None:
+    rows = _rows(conn.execute("SELECT " + ", ".join(_BRIEF_COLS) +
+                              " FROM briefs WHERE id=?", (id_,)))
+    return rows[0] if rows else None
+
+
+def successful_brief_for_event(conn: sqlite3.Connection, event_key: str) -> dict | None:
+    """Highest-id ok|partial brief for THIS event, or None. The only lookup
+    `tagteam brief` / `tagteam rule` use — never a cycle-wide latest."""
+    rows = _rows(conn.execute(
+        "SELECT " + ", ".join(_BRIEF_COLS) + " FROM briefs WHERE event_key=? "
+        "AND status IN ('ok','partial') ORDER BY id DESC LIMIT 1", (event_key,)))
+    return rows[0] if rows else None
+
+
+def briefs_for_event(conn: sqlite3.Connection, event_key: str) -> list[dict]:
+    return _rows(conn.execute("SELECT " + ", ".join(_BRIEF_COLS) +
+                              " FROM briefs WHERE event_key=? ORDER BY id", (event_key,)))
+
+
+def running_briefs(conn: sqlite3.Connection, event_key: str | None = None) -> list[dict]:
+    if event_key is None:
+        return _rows(conn.execute("SELECT " + ", ".join(_BRIEF_COLS) +
+                                  " FROM briefs WHERE status='running' ORDER BY id"))
+    return _rows(conn.execute("SELECT " + ", ".join(_BRIEF_COLS) +
+                              " FROM briefs WHERE status='running' AND event_key=? ORDER BY id",
+                              (event_key,)))
+
+
+def brief_history(conn: sqlite3.Connection, phase: str | None = None,
+                  cycle_type: str | None = None) -> list[dict]:
+    """All rows (newest first) — for `--list` / `--event` only."""
+    where, params = [], []
+    if phase is not None:
+        where.append("phase=?"); params.append(phase)
+    if cycle_type is not None:
+        where.append("type=?"); params.append(cycle_type)
+    sql = "SELECT " + ", ".join(_BRIEF_COLS) + " FROM briefs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC"
+    return _rows(conn.execute(sql, params))
+
+
+def snapshot_non_file_backed(conn: sqlite3.Connection) -> dict[str, list[tuple]]:
+    """Copy every row of the non-file-backed tables (repair preservation)."""
+    out: dict[str, list[tuple]] = {}
+    for table in NON_FILE_BACKED_TABLES:
+        try:
+            cur = conn.execute(f"SELECT * FROM {table} ORDER BY id")
+            cols = [d[0] for d in cur.description]
+            out[table] = [tuple(cols)] + [tuple(r) for r in cur.fetchall()]
+        except sqlite3.OperationalError:
+            out[table] = []
+    return out
+
+
+def restore_non_file_backed(conn: sqlite3.Connection, snapshot: dict[str, list[tuple]]) -> dict[str, int]:
+    """Re-insert snapshotted rows unchanged (ids preserved). Commits."""
+    counts: dict[str, int] = {}
+    for table, rows in snapshot.items():
+        if not rows:
+            counts[table] = 0
+            continue
+        cols = rows[0]
+        # only columns the current schema still has (additive schema → all of them)
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        keep = [i for i, c in enumerate(cols) if c in existing]
+        names = [cols[i] for i in keep]
+        placeholders = ", ".join("?" for _ in names)
+        n = 0
+        for row in rows[1:]:
+            conn.execute(
+                f"INSERT OR IGNORE INTO {table} ({', '.join(names)}) VALUES ({placeholders})",
+                [row[i] for i in keep])
+            n += 1
+        counts[table] = n
+    conn.commit()
+    return counts
 
 
 # ---------- Importer (one-way, from existing tagteam project files) ----------

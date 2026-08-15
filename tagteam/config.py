@@ -431,3 +431,70 @@ def get_headless_spec(config: dict, role: str) -> dict:
         "args": list(args) if isinstance(args, list) else (args if args is not None else []),
         "timeout_minutes": headless.get("timeout_minutes"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 33: escalation briefer config (top-level `briefer:` block).
+# Opt-in: an absent block, or `enabled` absent/false, means disabled and
+# 0.9.0 escalation behavior. Validation is deliberately SEPARATE from the
+# fatal `validate_config()` — briefer problems warn and disable, never block.
+# ---------------------------------------------------------------------------
+
+BRIEFER_KEYS = {"enabled", "provider", "executable", "args", "timeout_minutes"}
+BRIEFER_DEFAULT_TIMEOUT_MINUTES = 15
+
+
+def validate_briefer_config(config: dict) -> list[str]:
+    """Return problems with the `briefer:` block (empty when absent/valid)."""
+    if not isinstance(config, dict):
+        return []
+    block = config.get("briefer")
+    if block is None:
+        return []
+    errors: list[str] = []
+    if not isinstance(block, dict):
+        return ["'briefer' must be a mapping"]
+    enabled = block.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append("'briefer.enabled' must be true or false")
+    provider = block.get("provider")
+    if provider is not None and provider not in HEADLESS_PROVIDERS:
+        errors.append(f"'briefer.provider' must be one of: {', '.join(HEADLESS_PROVIDERS)} "
+                      f"(got {provider!r})")
+    executable = block.get("executable")
+    if executable is not None and (not isinstance(executable, str) or not executable.strip()):
+        errors.append("'briefer.executable' must be a non-empty string")
+    args = block.get("args")
+    if args is not None:
+        if not isinstance(args, list):
+            errors.append("'briefer.args' must be a list of strings (never a shell string)")
+        elif not all(isinstance(a, str) for a in args):
+            errors.append("'briefer.args' must contain only strings")
+    tmo = block.get("timeout_minutes")
+    if tmo is not None and (isinstance(tmo, bool) or not isinstance(tmo, (int, float)) or tmo <= 0):
+        errors.append("'briefer.timeout_minutes' must be a positive number")
+    unknown = set(block) - BRIEFER_KEYS
+    if unknown:
+        errors.append(f"'briefer' has unknown keys: {sorted(unknown)}")
+    return errors
+
+
+def get_briefer_spec(config: dict) -> dict:
+    """{"enabled", "provider", "executable", "args", "timeout_minutes"}.
+
+    `enabled` is True only when `briefer.enabled: true` is explicit;
+    `provider` defaults to the lead's headless provider (inference), or
+    None if uninferable. Callers must run `validate_briefer_config` first;
+    this function does not validate.
+    """
+    block = config.get("briefer") if isinstance(config, dict) else None
+    block = block if isinstance(block, dict) else {}
+    provider = block.get("provider") or infer_headless_provider(config, "lead")
+    args = block.get("args")
+    return {
+        "enabled": block.get("enabled") is True,
+        "provider": provider,
+        "executable": block.get("executable") or None,
+        "args": list(args) if isinstance(args, list) else (args if args is not None else []),
+        "timeout_minutes": block.get("timeout_minutes") or BRIEFER_DEFAULT_TIMEOUT_MINUTES,
+    }
