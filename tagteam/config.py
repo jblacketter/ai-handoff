@@ -491,10 +491,15 @@ def get_briefer_spec(config: dict) -> dict:
     block = block if isinstance(block, dict) else {}
     provider = block.get("provider") or infer_headless_provider(config, "lead")
     args = block.get("args")
+    tmo = block.get("timeout_minutes")
+    # Never let an invalid value propagate as a raise: fall back to the
+    # default (validate_briefer_config reports the problem separately).
+    if isinstance(tmo, bool) or not isinstance(tmo, (int, float)) or tmo <= 0:
+        tmo = BRIEFER_DEFAULT_TIMEOUT_MINUTES
     return {
         "enabled": block.get("enabled") is True,
         "provider": provider,
         "executable": block.get("executable") or None,
         "args": list(args) if isinstance(args, list) else (args if args is not None else []),
-        "timeout_minutes": block.get("timeout_minutes") or BRIEFER_DEFAULT_TIMEOUT_MINUTES,
+        "timeout_minutes": tmo,
     }
