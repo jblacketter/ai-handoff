@@ -76,7 +76,10 @@ Creates one `tmux` session named `tagteam` with three labeled panes (Lead, Watch
 <details>
 <summary>Windows / manual fallback</summary>
 
-On Windows without WSL, terminal automation isn't available. Quickstart prints the commands for you to run yourself in three terminals:
+On Windows without WSL, terminal automation (iTerm2/tmux) isn't available. You have two options:
+
+1. **Headless mode** (recommended, fully automated) — no terminals to drive at all; each turn is a fresh `claude -p` / `codex exec` process. See [Headless mode](#headless-mode-opt-in) below.
+2. **Manual fallback** — quickstart prints the commands for you to run yourself in three terminals:
 
 ```bash
 tagteam quickstart --backend manual
@@ -90,8 +93,6 @@ tagteam init
 tagteam session start --backend manual
 tagteam watch --mode notify
 ```
-
-For full automation on Windows today, use WSL with `tmux`.
 
 </details>
 
@@ -113,6 +114,44 @@ Options:
 > **Manual mode:** you can always run handoffs without any automation by pasting `/handoff` output between agents yourself.
 
 </details>
+
+## Headless mode (opt-in)
+
+Instead of typing commands into long-lived agent terminals, the watcher can spawn each turn as a **fresh process** through the agent's own signed-in CLI (`claude -p` for Claude, `codex exec` for Codex — subscription auth, no API keys):
+
+```bash
+tagteam watch --mode headless          # never auto-detected; explicit opt-in only
+tagteam tail                           # follow the in-flight turn like CI logs
+```
+
+On every turn flip the orchestrator composes a bounded context (the handoff skill contract + `handoff-state.json` + the last 3 rounds), pipes it to the agent on stdin, streams the agent's structured output to `.tagteam/turns/<phase>_<type>_r<N>_<role>_<ts>.log` (human-readable) and `.events.jsonl` (raw), and — because the agent still writes its own round with `tagteam cycle add` — verifies that the expected round landed before dispatching the other agent. Per-turn token usage is recorded in the project DB (`usage` table) for later phases to surface.
+
+**When something goes wrong** (turn timeout — 60 min by default, nonzero exit, or the agent exited without writing its round), the watcher pauses dispatch, writes `.tagteam/headless-paused.json` with the reason and log path, and sends a notification. It never retries silently. To resume: read the log, fix anything needed, delete the marker; the watcher picks up on its next tick.
+
+```bash
+tagteam watch --mode headless --turn-timeout 90 --tail-rounds 5 --confirm
+tagteam cycle rounds --phase my-phase --type plan --tail 2   # last 2 entries only
+```
+
+Per-role options live under `agents.<role>.headless` in `tagteam.yaml` (all optional):
+
+```yaml
+agents:
+  lead:
+    name: Claude
+    headless:
+      provider: claude                # claude | codex (inferred from command/name if omitted)
+      executable: /opt/bin/claude     # default: `claude` on PATH
+      args: ["--model", "opus"]       # a YAML list; validated — no positionals, no reserved flags
+  reviewer:
+    name: Codex
+    headless:
+      args: ["-c", "approval_policy=untrusted"]
+```
+
+Defaults are the least-privileged unattended settings that still let the agent edit the repo and run the cycle CLI: Claude runs with `--permission-mode acceptEdits --allowedTools Bash Read Edit Write Glob Grep`; Codex with `--sandbox workspace-write -c approval_policy=never`. Anything you put in `args` is checked against a per-provider option table so a stray token can never become the prompt or override tagteam's own flags.
+
+Interactive modes are unchanged — headless is a peer mode. It is also the path for **Windows**: it needs only `subprocess`, and the test suite runs on `windows-latest` in CI (a real signed-in CLI smoke on Windows is best-effort; see the Phase 31 findings doc).
 
 ## The Saloon
 
@@ -149,6 +188,9 @@ tagteam setup
 tagteam state
 tagteam state diagnose
 tagteam watch --mode notify
+tagteam watch --mode headless          # spawn each turn as a fresh agent process
+tagteam tail                           # follow the in-flight headless turn
+tagteam cycle rounds --phase P --type plan --tail 3
 tagteam roadmap phases
 tagteam serve --dir .
 tagteam upgrade

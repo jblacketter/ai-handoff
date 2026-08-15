@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[event]' pytest
+
+      # The headless suite drives a fake agent CLI installed on PATH as
+      # claude/codex (a .cmd shim on Windows) — this job is the gating
+      # Windows criterion for Phase 31 (docs/phases/headless-turn-engine-30-arc.md).
+      - name: Run tests
+        run: python -m pytest -q

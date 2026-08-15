@@ -19,10 +19,11 @@ module implements.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
+import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,44 @@ _thread_locks_mutex = threading.Lock()
 # this is the outermost acquisition (which must take the fcntl lock)
 # or a re-entry (which already holds it).
 _lock_depth = threading.local()
+
+
+# ---------- Portable exclusive file lock ----------
+#
+# POSIX: fcntl.flock(LOCK_EX). Windows: msvcrt.locking on the first byte
+# (Phase 31 — before this, `import fcntl` at module top made every cycle
+# write fail on Windows). Both are per-process advisory locks on a
+# local file; the design explicitly does not support multi-host
+# concurrency on a network drive.
+
+if sys.platform == "win32":  # pragma: no cover - exercised on Windows CI
+    import msvcrt
+
+    def _os_lock(fd: int) -> None:
+        # LK_NBLCK is non-blocking; poll until acquired so we behave like
+        # a blocking LOCK_EX without msvcrt's 10-second LK_LOCK give-up.
+        while True:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+
+    def _os_unlock(fd: int) -> None:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+else:
+    import fcntl
+
+    def _os_lock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def _os_unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _get_thread_lock(project_key: str) -> threading.RLock:
@@ -120,13 +159,14 @@ def writer_lock(project_dir: str | Path) -> Iterator[None]:
                     lock_path, os.O_RDWR | os.O_CREAT, 0o644
                 )
                 try:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    _os_lock(fd)
                     # Best-effort: stamp PID + timestamp into the lock
                     # file so a diagnostics tool can see who's holding
                     # it. Failure is benign.
                     try:
                         os.lseek(fd, 0, os.SEEK_SET)
-                        os.ftruncate(fd, 0)
+                        if sys.platform != "win32":
+                            os.ftruncate(fd, 0)
                         os.write(
                             fd,
                             f"{os.getpid()} "
@@ -138,7 +178,7 @@ def writer_lock(project_dir: str | Path) -> Iterator[None]:
                     yield
                 finally:
                     try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        _os_unlock(fd)
                     finally:
                         os.close(fd)
             else:

@@ -558,7 +558,7 @@ class TestEngineE2E:
         pidfile = tmp_path / "grandchild.pid"
         monkeypatch.setenv("FAKE_AGENT_PIDFILE", str(pidfile))
         st = _init_cycle(project)
-        eng = _engine(project, timeout_minutes=0.05)  # 3 s
+        eng = _engine(project, timeout_minutes=0.2)  # 12 s (Windows CI python startup is slow)
         t0 = time.monotonic()
         res = eng.run_owed_turn(st)
         assert res.outcome == "timeout"

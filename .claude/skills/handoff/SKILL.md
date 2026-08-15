@@ -27,7 +27,9 @@ Unified command for the AI handoff workflow. Reads your role and current state, 
 
 ## `/handoff` — Main Command
 
-**Step 1:** Read `tagteam.yaml` (your role) and `handoff-state.json` (state). To read the active cycle, run `tagteam cycle rounds --phase [phase] --type [type]` (works for both JSONL and legacy markdown cycles).
+**Step 1:** Read `tagteam.yaml` (your role) and `handoff-state.json` (state). To read the active cycle, run `tagteam cycle rounds --phase [phase] --type [type]` (works for both JSONL and legacy markdown cycles). Add `--tail N` to read only the last N entries when you just need the latest feedback — it saves context tokens on long cycles.
+
+**Headless turns.** If you were started by `tagteam watch --mode headless`, your prompt already contains this contract, the current state, and the round tail, and there is no human at the terminal. The contract is identical: do the work, make exactly one cycle-writing call (`tagteam cycle add` / `cycle init`) with `--updated-by [your-agent-name]`, then stop. The orchestrator verifies that call happened and pauses (with a notification) if it did not.
 
 **Step 2 — CRITICAL: You MUST begin every `/handoff` response with this status banner:**
 
@@ -61,7 +63,7 @@ If there is no state file, show: `Phase: — | Type: — | Round: — | Turn: �
 - **Your turn:** See below.
 
 #### As Lead (your turn)
-1. Read the reviewer's latest feedback: `tagteam cycle rounds --phase [phase] --type [plan|impl]`
+1. Read the reviewer's latest feedback: `tagteam cycle rounds --phase [phase] --type [plan|impl]` (or `--tail 1` for just the last entry)
 2. Address the feedback: update the plan or implementation files
 3. Add your round and update state in one command: `tagteam cycle add --phase [phase] --type [plan|impl] --role lead --action SUBMIT_FOR_REVIEW --round [N+1] --updated-by [your-agent-name] --content "summary of changes"`
 
@@ -110,6 +112,12 @@ Replace `[agent name]` with the next agent's name. For completed/escalated/needs
 3. Create the cycle and update state in one command: `tagteam cycle init --phase [phase] --type [plan|impl] --lead [lead-name] --reviewer [reviewer-name] --updated-by [your-agent-name] --content "summary of initial submission"`
 4. Begin your response with the status banner (showing the newly created state).
 5. End with the NEXT COMMAND box.
+
+**`/handoff start [phase] impl` means implement first.** This command is what you run (or are handed by the watcher after plan approval) when the *plan* cycle is approved and the implementation review must begin. Before step 3:
+- Read the approved plan at `docs/phases/[phase].md` and the plan cycle's history (`tagteam cycle rounds --phase [phase] --type plan`).
+- Implement the plan in full and run the project's verification (tests) until it passes.
+- Only then run `tagteam cycle init --type impl` — **exactly once**, with a submission that summarizes what was implemented. If an impl cycle for this phase already exists, do not create another; act on it with `/handoff` instead.
+An impl cycle opened over an unchanged tree is a contract violation, not a formality.
 
 ---
 
