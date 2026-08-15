@@ -59,16 +59,28 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
      says `state ∈ {escalated, needs-human}` — `cycle_state` is always read
      from there, never inferred from the top-level `escalated`, and the
      round is the cycle status's round;
-   - and an **atomic claim** for this escalation event succeeds (Scope 5):
-     the `briefs` row is inserted with `status = running`, `kind = auto`,
-     **before** the spawn, inside a single transaction under the project
-     writer lock, protected by a partial unique index on `(phase, type,
-     round, cycle_state) WHERE kind = 'auto'`. A second watcher, a racing
-     `--generate`, a re-tick, or a restart cannot create a second automatic
-     attempt: the insert fails → no spawn. Guarantee stated precisely: **at
-     most one automatic briefer attempt per escalation event**; a failed or
-     abandoned automatic attempt is *not* retried automatically (the log
-     and notification say "run `tagteam brief --generate` to retry").
+   - and an **atomic claim** for this **escalation event** succeeds (Scope
+     5). The event identity (reviewer r2) is `event_id` = the `rounds.id` of
+     the entry that produced the current escalated status — by construction
+     the cycle's **latest round entry** at claim time (an `ESCALATE`, a
+     `NEED_HUMAN`, or the `REQUEST_CHANGES` that auto-escalated), read from
+     the DB in the same transaction; a re-armed cycle that escalates again
+     at the same round has a *new* latest entry and therefore a new event.
+     The claim inserts the `briefs` row with `status = running`, `kind =
+     auto`, `event_id`, **before** the spawn, in one transaction under the
+     project writer lock, guarded by two partial unique indexes: `(event_id)
+     WHERE kind = 'auto'` (at most one automatic attempt per event) and
+     `(event_id) WHERE status = 'running'` (at most one **active** attempt
+     per event across kinds), and by an `INSERT … WHERE NOT EXISTS (a row
+     for this event_id with status ok|partial)` — a prior *successful*
+     attempt of either kind satisfies the event. A second watcher, a racing
+     `--generate`, a re-tick, or a restart therefore cannot create a second
+     automatic attempt or a concurrent one: the insert fails → no spawn.
+     Guarantee stated precisely: **at most one automatic briefer attempt
+     per escalation event, at most one running attempt per event across
+     kinds**; a failed or abandoned automatic attempt is *not* retried
+     automatically (the log and notification say "run `tagteam brief
+     --generate` to retry").
    It then spawns the briefer **synchronously** (nothing else is
    dispatchable while a cycle is escalated) with a hard timeout
    (`briefer.timeout_minutes`, default 15), updates the claim row to its
@@ -109,14 +121,24 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    provider (warn + disabled), missing executable (warn + disabled),
    `enabled: false`. Which model tier writes good briefs (proposal Q5) is
    *measured during soak* via `briefer.args` — no decision baked in.
-3. **Composed context** (bounded, like turns): a role banner ("you are the
-   escalation briefer, not a participant; you do not write rounds"), the
-   escalation entry itself, the **entire** cycle round history for that
-   cycle (`cycle rounds`, all entries — a brief must see the whole dispute,
-   not a tail), the plan doc `docs/phases/<phase>.md` when present, pending
-   interjections for the cycle, and the state. The prompt names the exact
-   output path and the required section headings, and forbids any
-   `tagteam cycle add`/`init`/`state set`.
+3. **Composed context** (bounded by policy, reviewer r2): a role banner
+   ("you are the escalation briefer, not a participant; you do not write
+   rounds"), the **escalation entry in full**, the cycle's round history
+   from the grouped view (`tail_rounds(...)`, every round, including the
+   additive `entries` list so nothing is hidden — Scope 7), the plan doc
+   `docs/phases/<phase>.md` when present, pending interjections for the
+   cycle, and the state. **Prompt-size policy** (there is no cap on cycle
+   rounds; `STALE_ROUND_LIMIT` only bounds *stale* repeats): the escalation
+   entry and the newest 6 entries are included verbatim; older entries are
+   reduced to `role/action/ts/updated_by` + the first 400 characters of
+   content; if the composed prompt still exceeds 60 000 characters, older
+   entries are reduced further to their header line only, oldest first,
+   until it fits, and the prompt says "N older entries abbreviated — read
+   `tagteam cycle rounds --phase … --type …` for the full text". Tests pin
+   that the escalation entry is never abbreviated and that a 40-round
+   synthetic cycle fits. The prompt names the exact output path and the
+   required section headings, and forbids any `tagteam cycle add`/`init`/
+   `state set`.
 4. **Output contract.** The briefer writes markdown to
    `docs/escalations/<phase>_<type>_r<N>.md` with these headings, in order:
    `## Positions` (lead / reviewer, in their own terms), `## Crux` (what is
@@ -137,8 +159,9 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
 5. **Storage (schema v5, additive):** table `briefs` — the row is the
    **claim** as well as the record: inserted `running` before the spawn,
    updated to `ok | partial | failed | abandoned` after; `kind = auto |
-   manual`; partial unique index `(phase, type, round, cycle_state) WHERE
-   kind = 'auto'`; plus `started_at`, `watcher_pid`, `watcher_ident`, `stem`,
+   manual`; `event_id` (triggering `rounds.id`); partial unique indexes
+   `(event_id) WHERE kind = 'auto'` and `(event_id) WHERE status =
+   'running'`; plus `started_at`, `watcher_pid`, `watcher_ident`, `stem`,
    `attempt` for recovery. The file is the human-facing artifact; the row is
    what the cockpit (Phase 34) reads. `usage` row with `role = "briefer"` per
    spawn (usage status vocabulary unchanged; the *brief* status lives in
@@ -150,15 +173,22 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    only failed/abandoned/running rows exist it says so and points at
    `--generate`; `--list` shows every row (kind, status, path, ts); `--json`
    for scripts; exit 1 when none. **`--generate`** = a *forced manual
-   attempt*: inserts a `kind = manual` row (not subject to the auto unique
-   index, so it never defeats automatic dedupe), runs the briefer now for the
-   current escalated cycle, and writes to a suffixed path
-   `docs/escalations/<phase>_<type>_r<N>-<attempt>.md` (`attempt` =
-   1 + count of prior rows for the event) — automatic and prior manual files
-   are never overwritten. Refuses (exit 1) when the cycle is not
-   `escalated`/`needs-human`, or when an automatic/manual attempt is
-   currently `running` and not abandoned. Failed automatic attempts are
-   deduped (never auto-retried); `--generate` is the retry path.
+   attempt* using the **same claim transaction** as the watcher (symmetric
+   rule): it inserts a `kind = manual`, `status = running` row for the
+   current event — refused by the `running` unique index while any attempt
+   (auto or manual, not abandoned) is active, and refused when the cycle is
+   not `escalated`/`needs-human`; it is *not* subject to the auto index and
+   never blocks a later automatic claim except through the "prior success
+   satisfies the event" rule. Consequences, all tested: manual claimed first
+   → the watcher's automatic claim fails while it runs; if the manual attempt
+   ends `ok`/`partial`, a later automatic tick or restart does **not** run
+   (event satisfied — the manual brief is the brief); if it ends `failed`,
+   the automatic attempt may still run once; auto claimed first → `--generate`
+   refuses until it finishes; watcher restart after manual success → none,
+   after manual failure → one automatic attempt. Path: `docs/escalations/
+   <phase>_<type>_r<N>-<attempt>.md` (`attempt` = 1 + prior rows for the
+   event) — never overwrites. Failed automatic attempts are never
+   auto-retried; `--generate` is the retry path.
 7. **`tagteam rule <approve|request-changes|answer> [--content TEXT] [--by
    NAME] [--to lead|reviewer]`** — act on an escalation from the terminal
    (Phase 34 adds the browser). Semantics (no round-vocabulary change; the
@@ -193,6 +223,20 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    ruling, by, and the brief id it acted on (if any). SKILL.md's stale
    "edit the cycle file's Human Input Needed section" instruction is
    replaced by `tagteam brief` / `tagteam rule`.
+   **Grouped-rounds contract (reviewer r2):** `parse_jsonl_rounds` keeps only
+   the last non-AMEND entry per role and round, so a ruling (or a second
+   `NEED_HUMAN` after `rule answer`) would hide the triggering entry in
+   `tagteam cycle rounds`, in headless tails, and in the briefer's history.
+   Additive fix: every grouped round gains `entries` — **all** raw entries
+   for that round in order (`role, action, ts, updated_by, content`) — and
+   `rulings` — the subset whose content carries the `[ARBITER RULING by …]`
+   prefix; `reviewer_text/reviewer_action` keep today's semantics (last
+   non-AMEND entry) so existing consumers are unchanged, and the DB-first
+   reader in `cycle.read_rounds`/`tail_rounds` attaches the same lists.
+   `cycle render` already prints every entry. Tests: `cycle rounds` output
+   and the headless/briefer prompt history after `approve`, after
+   `request-changes`, and after `answer` → second `NEED_HUMAN` at the same
+   round show both the escalation and the ruling / both `NEED_HUMAN`s.
 8. **Docs**: README ("Escalations: the briefer and `tagteam rule`"), help
    texts, SKILL.md (both copies), roadmap, findings doc
    `docs/phases/escalation-briefer-findings.md` (real brief(s), tokens/time,
@@ -230,11 +274,14 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
   `brief_command`.
 - `tagteam/controls.py` — `rule_command` (+ `cycle.rearm` in `cycle.py`).
 - `tagteam/db.py` — `SCHEMA_VERSION = 5`, `_SCHEMA_V5` briefs table +
-  partial unique index, `claim_brief(...) -> id | None` (single INSERT in a
-  transaction under the writer lock; None when the auto unique index
-  rejects), `finish_brief(id, status, ...)`, `mark_abandoned(id, reason)`,
-  `get_briefs`, `latest_brief(phase, type)` (highest id with ok/partial),
-  `running_briefs(phase, type)`.
+  two partial unique indexes, `latest_entry_id(phase, type)`,
+  `claim_brief(event_id, kind, ...) -> id | None` (single INSERT…WHERE NOT
+  EXISTS in a transaction under the writer lock; None when either unique
+  index or the prior-success rule rejects), `finish_brief(id, status, ...)`,
+  `mark_abandoned(id, reason)`, `get_briefs`, `latest_brief(phase, type)`
+  (highest id with ok/partial), `running_briefs(event_id)`.
+- `tagteam/parser.py` / `tagteam/cycle.py` — additive `entries` + `rulings`
+  lists on grouped rounds (JSONL and DB-first paths).
 - `tagteam/config.py` — `briefer:` block validation, `get_briefer_spec`.
 - `tagteam/watcher.py` — `_maybe_brief(state)` (canonical cycle status,
   pause-reason skip, enabled, claim → spawn → finish; abandoned detection),
@@ -258,9 +305,17 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
   role briefer, `brief` command (latest = highest ok/partial; failed-only
   → hint), `rule approve|request-changes|answer` transitions + audit rows +
   invalid-state rejection **from a 10-stale auto-escalated cycle and from an
-  explicit ESCALATE**, watcher integration (escalated state → briefer called
+  explicit ESCALATE**, **event identity** (NEED_HUMAN r5 → brief → `rule
+  answer` → NEED_HUMAN again r5 → a *second* automatic brief; restart on the
+  same event → none), **manual/auto orderings** (manual first then auto tick
+  → no concurrent spawn; manual ok → auto never runs; manual failed → auto
+  runs once; auto first → `--generate` refuses), **grouped rounds** (`entries`
+  / `rulings` after approve, request-changes, answer→re-NEED_HUMAN, in CLI
+  output and in the composed prompt), **prompt-size policy** (escalation
+  entry verbatim; 40-round synthetic cycle fits under 60 000 chars with an
+  abbreviation note), watcher integration (escalated state → briefer called
   once; first-poll bootstrap; notify text includes path). `tests/test_db.py`
-  v5 migration + unique index.
+  v5 migration + both unique indexes.
 
 ### Schema v5
 ```sql
@@ -269,6 +324,7 @@ CREATE TABLE IF NOT EXISTS briefs (
     ts           TEXT NOT NULL,           -- claim time
     phase        TEXT NOT NULL, type TEXT NOT NULL, round INTEGER NOT NULL,
     cycle_state  TEXT NOT NULL,           -- escalated | needs-human (from cycle status)
+    event_id     INTEGER NOT NULL,        -- rounds.id of the triggering entry (latest entry at claim)
     kind         TEXT NOT NULL,           -- auto | manual
     attempt      INTEGER NOT NULL,        -- 1 for auto; 1+prior for manual
     status       TEXT NOT NULL,           -- running | ok | partial | failed | abandoned
@@ -279,8 +335,9 @@ CREATE TABLE IF NOT EXISTS briefs (
     usage_row_id INTEGER, duration_ms INTEGER, reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_briefs_cycle ON briefs(phase, type, round);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_auto
-    ON briefs(phase, type, round, cycle_state) WHERE kind = 'auto';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_auto    ON briefs(event_id) WHERE kind = 'auto';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_running ON briefs(event_id) WHERE status = 'running';
+-- claim = single INSERT … SELECT … WHERE NOT EXISTS (ok|partial row for event_id), under the writer lock
 ```
 Downgrade: 0.9.0 (v4) opens a v5 DB (tolerates newer `user_version`,
 ignores the table); verified in the release checklist.
@@ -305,20 +362,30 @@ headings), `brief_nofile`; it parses the output path from the prompt's
 ## Success Criteria
 
 - [ ] A cycle entering `escalated` or `needs-human` causes **at most one
-  automatic** briefer spawn per escalation event, guaranteed by the pre-spawn
-  claim row + partial unique index: a re-tick, a watcher restart on an
-  unbriefed escalation (first-poll bootstrap → exactly one), a restart with a
-  completed/failed record (none), two concurrent claimants (one wins), and a
+  automatic** briefer spawn per escalation event (`event_id` = triggering
+  `rounds.id`) and at most one *running* attempt per event across kinds,
+  guaranteed by the pre-spawn claim row + the two partial unique indexes +
+  the prior-success rule: a re-tick, a watcher restart on an unbriefed
+  escalation (first-poll bootstrap → exactly one), a restart with a
+  completed/failed record (none), two concurrent claimants (one wins), a
   crash after claim (row marked `abandoned` on the next tick, no auto
-  respawn) all behave as stated; a roadmap-advance pause and
+  respawn), a re-armed cycle escalating again at the same round (a new
+  event → one new automatic brief), and every manual/auto ordering listed
+  in Scope 6 all behave as stated; a roadmap-advance pause and
   `briefer.enabled: false` cause none; first-poll behavior for other
   non-ready states is unchanged; `cycle_state` comes from the canonical
   per-cycle status; the watcher's existing escalation log/notification still
   fires and now names the brief path or the failure + `--generate` hint.
-- [ ] The composed prompt contains the whole round history of the cycle, the
-  escalation entry, the plan doc when present, pending interjections, the
-  exact output path, the five required headings, and the no-cycle-writes
-  instruction (unit tests on `compose_brief_prompt`).
+- [ ] The composed prompt contains the escalation entry verbatim, the
+  cycle's grouped rounds with `entries` (nothing hidden), the plan doc when
+  present, pending interjections, the exact output path, the five required
+  headings, and the no-cycle-writes instruction; the size policy abbreviates
+  only older entries and never the escalation entry, and a 40-round
+  synthetic cycle fits (unit tests on `compose_brief_prompt`).
+- [ ] Grouped rounds (`tagteam cycle rounds`, `tail_rounds`, headless and
+  briefer prompts) carry `entries` and `rulings` so the triggering
+  escalation and the ruling — or two `NEED_HUMAN`s at one round — are both
+  visible; `reviewer_text` semantics unchanged for existing consumers.
 - [ ] With the fake briefer: `ok` (file + all headings → `briefs` row status
   ok, `usage` row role briefer, notification names the path), `partial`
   (headings missing → stored + flagged), `failed` (no file / nonzero /
@@ -355,8 +422,14 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   brief (scratch dogfood) and its tokens/time, plus a lighter-model run.
 - [ ] Released as 0.10.0 via PR → merge → tag (post-approval; CI green).
 
-## Decisions (round 1)
+## Decisions (rounds 1–2)
 
+- Escalation event identity = triggering `rounds.id`; auto attempts unique
+  per event; one running attempt per event across kinds; prior success
+  satisfies the event; manual `--generate` uses the same claim transaction.
+- Grouped rounds gain additive `entries` + `rulings`; `reviewer_text`
+  unchanged.
+- Prompt-size policy replaces the (false) 10-round bound.
 - Rulings use a dedicated `cycle.add_ruling` path (no stale gate).
 - Escalated-on-bootstrap briefs once; at-most-once automatic attempts via a
   pre-spawn claim row + partial unique index; abandoned detection; manual
@@ -388,8 +461,11 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   CLIs). Mitigation: the prompt frames it as a non-participant, requires both
   positions "in their own terms" and evidence checked; the arbiter still
   rules; provider is configurable.
-- **Token cost.** Fires only on escalation; whole-history prompt is bounded
-  by the 10-round cap; usage recorded under role `briefer`; opt-out.
+- **Token cost.** Fires only on escalation, at most once automatically per
+  event; the prompt is bounded by the size policy (escalation + newest 6
+  entries verbatim, older abbreviated, 60 000-char cap) rather than by any
+  round cap (cycles can exceed 10 rounds); usage recorded under role
+  `briefer`; opt-out.
 - **Briefer writes elsewhere / touches state.** Prompt forbids it; the
   post-check ignores anything but the named file; a briefer that ran
   `cycle add` would show as a state change and is a bug to report (its
