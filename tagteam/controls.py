@@ -313,8 +313,12 @@ def interject_command(args: list[str], project_root: str | Path | None = None,
             return 1
         # add
         note = " ".join(pos).strip()
-        if not note and not sys.stdin.isatty():
-            note = sys.stdin.read().strip()
+        if not note:
+            try:
+                if not sys.stdin.isatty():
+                    note = sys.stdin.read().strip()
+            except (OSError, ValueError):
+                note = ""
         if not note:
             print("Provide the note as an argument (or on stdin).", file=out)
             return 1

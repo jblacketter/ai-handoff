@@ -12,6 +12,13 @@ Behaviour is driven by environment variables:
   FAKE_AGENT_CAPTURE  path: argv + stdin prompt are dumped here as JSON
   FAKE_AGENT_PIDFILE  path: grandchild pid is written here (grandchild_hang)
   FAKE_AGENT_SLEEP    seconds between emitted events (default 0.25)
+  FAKE_AGENT_SIDE_EFFECT  JSON list of actions run before exiting in
+                      `nonzero` mode (retry-gate tests):
+                        {"write": [relpath, content]}   write a file (append)
+                        {"git": ["commit","-am","x"]}   run a git command
+                        {"cycle_add": true}             perform the owed transition
+  FAKE_AGENT_FAIL_TIMES / FAKE_AGENT_COUNTER  in `flaky` mode: exit 3 for the
+                      first N invocations (counter file), then behave like `ok`
 
 The fake reads the composed prompt from stdin, parses the CURRENT STATE
 block, and in ``ok`` mode performs the transition a real agent would by
@@ -148,7 +155,32 @@ def main() -> int:
                                                 "command": "tagteam cycle add ..."}})
     _sleep()
 
+    if mode == "flaky":
+        counter = os.environ.get("FAKE_AGENT_COUNTER")
+        fails = int(os.environ.get("FAKE_AGENT_FAIL_TIMES", "1"))
+        n = 0
+        if counter and os.path.exists(counter):
+            n = int(open(counter).read().strip() or 0)
+        if counter:
+            with open(counter, "w") as f:
+                f.write(str(n + 1))
+        if n < fails:
+            sys.stderr.write("fatal: flaky failure\n")
+            return 3
+        mode = "ok"
+
     if mode == "nonzero":
+        for action in json.loads(os.environ.get("FAKE_AGENT_SIDE_EFFECT", "[]")):
+            if "write" in action:
+                path, content = action["write"]
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(content)
+            elif "git" in action:
+                subprocess.call(["git", *action["git"]], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+            elif action.get("cycle_add"):
+                _do_transition(prompt, state, "ok")
         sys.stderr.write("fatal: fake failure\n")
         return 3
 
