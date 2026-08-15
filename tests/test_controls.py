@@ -574,15 +574,21 @@ class TestFingerprint:
 
     def test_unsupported_states(self, tmp_path, monkeypatch):
         repo = tmp_path / "r"; repo.mkdir(); _git_init(repo)
-        # unmerged index
+        # unmerged index: conflicting edits on two branches, then a merge that
+        # must fail *because of the conflict* (identity is configured via _git,
+        # so it cannot fail for lack of user.name/email as on a bare CI runner)
+        base = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
         _git(repo, "checkout", "-qb", "other")
         (repo / "tracked.txt").write_text("other\n"); _git(repo, "commit", "-qam", "o")
-        _git(repo, "checkout", "-q", "master") if subprocess.run(
-            ["git", "rev-parse", "--verify", "master"], cwd=repo, capture_output=True).returncode == 0 \
-            else _git(repo, "checkout", "-q", "main")
+        _git(repo, "checkout", "-q", base)
         (repo / "tracked.txt").write_text("mine\n"); _git(repo, "commit", "-qam", "m")
-        r = subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)
+        r = subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "merge", "other"],
+                           cwd=repo, capture_output=True, text=True)
         assert r.returncode != 0
+        unmerged = subprocess.run(["git", "ls-files", "-u"], cwd=repo, capture_output=True,
+                                  text=True).stdout
+        assert unmerged.strip(), f"expected an unmerged index; merge output: {r.stdout} {r.stderr}"
         assert fpm.repo_fingerprint(repo) == fpm.UNSUPPORTED
         # mocked git failure
         repo2 = tmp_path / "r2"; repo2.mkdir(); _git_init(repo2)
