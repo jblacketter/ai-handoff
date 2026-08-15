@@ -342,6 +342,8 @@ Commands:
   interject     Leave an arbiter note for the next turn (--to lead|reviewer, --list, --retire)
   usage         Per-turn token usage for this project (by role / cycle / totals, --json)
   rollback      Print (or with --yes run) the revert recipe for a given version
+  brief         Show the escalation decision brief for the current event (--list, --generate)
+  rule          Rule on an escalation: approve | request-changes | answer (--to lead|reviewer)
   state         View or update the orchestration state file
   roadmap       Query roadmap phases and build execution queue
   cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
@@ -367,6 +369,8 @@ Arbiter controls (any mode):
   tagteam pause --reason "reviewing by hand"    tagteam resume
   tagteam interject "prefer the smaller diff"   tagteam cancel-turn
   tagteam usage
+Escalations (opt-in briefer: `briefer: {enabled: true}` in tagteam.yaml):
+  tagteam brief                                 tagteam rule approve --content "..."
 """
 
 
@@ -421,6 +425,14 @@ def main() -> int:
         from tagteam.controls import rollback_command
 
         return rollback_command(sys.argv[2:])
+    if command == "brief":
+        from tagteam.briefer import brief_command
+
+        return brief_command(sys.argv[2:])
+    if command == "rule":
+        from tagteam.controls import rule_command
+
+        return rule_command(sys.argv[2:])
     if command == "roadmap":
         from tagteam.roadmap import roadmap_command
 

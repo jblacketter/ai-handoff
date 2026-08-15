@@ -401,3 +401,103 @@ def rollback_command(args: list[str], out=None, runner=None) -> int:
             return 1
     print(f"Rolled back to {version}.", file=out)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# rule (Phase 33)
+# ---------------------------------------------------------------------------
+
+def rule_command(args: list[str], project_root: str | Path | None = None, out=None) -> int:
+    """tagteam rule <approve|request-changes|answer> [--content TEXT] [--by NAME] [--to lead|reviewer]
+
+    Capture-before-append: under the writer lock, resolve and retain the
+    current escalation event, select its successful brief, verify the
+    cycle has not changed, apply the ruling, then write the diagnostic
+    with the RETAINED event key (add_ruling appends a new latest entry).
+    """
+    from tagteam import db, dualwrite
+    from tagteam import briefer as _briefer
+    from tagteam import cycle as cycle_mod
+    from tagteam.state import read_state
+    out = out or sys.stdout
+    try:
+        opts, pos = _parse(args, {"--content", "--by", "--to"}, {"-h", "--help"})
+    except ValueError as e:
+        print(f"{e}", file=out); return 1
+    if opts.get("--help") or opts.get("-h") or not pos:
+        print("Usage: tagteam rule <approve|request-changes|answer> [--content TEXT] "
+              "[--by NAME] [--to lead|reviewer]", file=out)
+        print("  Act on an escalated / needs-human cycle from the terminal (see `tagteam brief`).",
+              file=out)
+        return 0 if (opts.get("--help") or opts.get("-h")) else 1
+    verb = pos[0]
+    if verb not in ("approve", "request-changes", "answer"):
+        print(f"Unknown ruling {verb!r}: use approve, request-changes or answer", file=out); return 1
+    content = (opts.get("--content") or " ".join(pos[1:])).strip()
+    if verb in ("request-changes", "answer") and not content:
+        print(f"`{verb}` requires --content", file=out); return 1
+    to = opts.get("--to")
+    if verb == "answer":
+        to = to or "reviewer"
+        if to not in ("lead", "reviewer"):
+            print("--to must be lead or reviewer", file=out); return 1
+    elif to is not None:
+        print("--to only applies to `answer`", file=out); return 1
+    by = _who(opts.get("--by"))
+    root = _root(project_root)
+    st = read_state(str(root)) or {}
+    phase, ctype = st.get("phase"), st.get("type")
+    if not phase or not ctype:
+        print("No active cycle in state.", file=out); return 1
+
+    with dualwrite.writer_lock(root):
+        ev, why = _briefer.event_for_cycle(root, phase, ctype)
+        if ev is None:
+            print(f"Nothing to rule on: {why}", file=out); return 1
+        conn = db.connect(project_dir=str(root))
+        try:
+            brief = db.successful_brief_for_event(conn, ev.event_key)
+        finally:
+            conn.close()
+        # verify unchanged (re-read)
+        ev2, _ = _briefer.event_for_cycle(root, phase, ctype)
+        if ev2 is None or ev2.event_key != ev.event_key:
+            print("Cycle changed while ruling — re-run.", file=out); return 1
+        try:
+            if verb == "approve":
+                cycle_mod.add_ruling(phase, ctype, "APPROVE", content or "Approved by arbiter.",
+                                     by, str(root))
+                outcome = "approved — cycle closed"
+            elif verb == "request-changes":
+                cycle_mod.add_ruling(phase, ctype, "REQUEST_CHANGES", content, by, str(root))
+                outcome = "changes requested — lead's turn"
+            else:
+                conn = db.connect(project_dir=str(root))
+                try:
+                    db.add_interjection(conn, ts=_now_iso(), note=f"[ARBITER ANSWER by {by}] {content}",
+                                        by=by, target_role=to, phase=phase, cycle_type=ctype,
+                                        round_=ev.round, turn=None,
+                                        observed_state={k: st.get(k) for k in
+                                                        ("phase", "type", "round", "status", "result", "turn")})
+                finally:
+                    conn.close()
+                cycle_mod.rearm(phase, ctype, to, by, str(root))
+                outcome = f"answered — {to}'s turn (answer delivered as an interjection)"
+        except ValueError as e:
+            print(f"Cannot rule: {e}", file=out); return 1
+        conn = db.connect(project_dir=str(root))
+        try:
+            db.add_diagnostic(conn, "arbiter_ruling", {
+                "ruling": verb, "by": by, "content": content, "to": to,
+                "phase": phase, "type": ctype, "round": ev.round,
+                "event_key": ev.event_key,
+                "brief_id": brief["id"] if brief else None,
+                "brief_path": brief["path"] if brief else None,
+            }, _now_iso())
+            conn.commit()
+        finally:
+            conn.close()
+    print(f"Ruling recorded ({by}): {outcome}."
+          + (f" Acted on brief #{brief['id']} ({brief['path']})." if brief else " (no brief for this event)"),
+          file=out)
+    return 0

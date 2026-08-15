@@ -323,9 +323,13 @@ def init_cycle(phase: str, cycle_type: str, lead: str, reviewer: str,
     return status
 
 
+RULING_PREFIX = "[ARBITER RULING by "
+
+
 def add_round(phase: str, cycle_type: str, role: str, action: str,
               round_num: int, content: str, project_dir: str = ".",
-              updated_by: str | None = None) -> dict:
+              updated_by: str | None = None, *,
+              _skip_stale_gate: bool = False) -> dict:
     """Append a round entry to the JSONL log, update cycle status,
     and derive handoff-state.json from the new cycle status.
 
@@ -405,8 +409,11 @@ def add_round(phase: str, cycle_type: str, role: str, action: str,
 
         # Auto-escalate only when the cycle is stuck (no progress),
         # not merely because it reached a certain round number.
+        # (`_skip_stale_gate` is set only by `add_ruling`: an arbiter's
+        # REQUEST_CHANGES after auto-escalation must hand the turn back to
+        # the lead, not immediately re-escalate.)
         auto_escalate = False
-        if action == "REQUEST_CHANGES":
+        if action == "REQUEST_CHANGES" and not _skip_stale_gate:
             stale = _count_stale_rounds(phase, cycle_type, project_dir)
             if stale >= STALE_ROUND_LIMIT:
                 auto_escalate = True
@@ -439,6 +446,60 @@ def add_round(phase: str, cycle_type: str, role: str, action: str,
         _shadow_db_after_cycle_write(project_dir, phase, cycle_type)
         _auto_export_cycle_md(project_dir, phase, cycle_type)
 
+    return status
+
+
+def add_ruling(phase: str, cycle_type: str, action: str, content: str,
+               by: str, project_dir: str = ".") -> dict:
+    """Phase 33: record an arbiter ruling as a reviewer-role entry at the
+    current round — the arbiter takes the reviewer's seat — with the
+    `[ARBITER RULING by <name>]` prefix and `updated_by = by`. Applies the
+    plain transition WITHOUT the stale-round auto-escalation gate, and
+    otherwise does everything `add_round` does (canonical rounds file,
+    status, shadow DB, auto-export, top-level state). Valid only while the
+    cycle is `escalated` or `needs-human`."""
+    if action not in ("APPROVE", "REQUEST_CHANGES"):
+        raise ValueError("add_ruling supports APPROVE and REQUEST_CHANGES")
+    if not by or not by.strip():
+        raise ValueError("add_ruling requires the arbiter's name")
+    project_dir = _resolve(project_dir)
+    status = read_status(phase, cycle_type, project_dir) or {}
+    if status.get("state") not in ("escalated", "needs-human"):
+        raise ValueError(
+            f"cycle {phase}_{cycle_type} is {status.get('state')!r}, not "
+            f"escalated/needs-human — nothing to rule on")
+    round_num = int(status.get("round") or 0)
+    body = (content or "").strip()
+    text = f"{RULING_PREFIX}{by}] {body}" if body else f"{RULING_PREFIX}{by}] {action}"
+    return add_round(phase, cycle_type, "reviewer", action, round_num, text,
+                     project_dir, updated_by=by, _skip_stale_gate=True)
+
+
+def rearm(phase: str, cycle_type: str, ready_for: str, by: str,
+          project_dir: str = ".") -> dict:
+    """Phase 33: after `NEED_HUMAN`/`ESCALATE`, re-arm the cycle to
+    `in-progress / ready_for <role>` without a rounds entry (the arbiter's
+    answer is recorded as an interjection). Updates the canonical status
+    file, the shadow DB, auto-export and the top-level state under the
+    writer lock. Valid only while the cycle is escalated/needs-human."""
+    from tagteam import dualwrite
+    if ready_for not in VALID_ROLES:
+        raise ValueError(f"ready_for must be lead or reviewer, got {ready_for!r}")
+    project_dir = _resolve(project_dir)
+    status = _read_status_from_file(_status_path(phase, cycle_type, project_dir)) \
+        or read_status(phase, cycle_type, project_dir) or {}
+    if status.get("state") not in ("escalated", "needs-human"):
+        raise ValueError(
+            f"cycle {phase}_{cycle_type} is {status.get('state')!r}, not "
+            f"escalated/needs-human — nothing to re-arm")
+    with dualwrite.writer_lock(project_dir):
+        status["state"] = "in-progress"
+        status["ready_for"] = ready_for
+        sp = _status_path(phase, cycle_type, project_dir)
+        sp.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
+        _derive_top_level_state(phase, cycle_type, project_dir, updated_by=by)
+        _shadow_db_after_cycle_write(project_dir, phase, cycle_type)
+        _auto_export_cycle_md(project_dir, phase, cycle_type)
     return status
 
 
@@ -1102,6 +1163,8 @@ def _attach_interjections(entries: list[dict], phase: str, cycle_type: str,
     never raises; entries without a DB get empty lists."""
     for e in entries:
         e.setdefault("interjections", [])
+        e.setdefault("entries", [])
+        e.setdefault("rulings", [])
     try:
         from tagteam import db
         conn = db.connect(project_dir=_resolve(project_dir))

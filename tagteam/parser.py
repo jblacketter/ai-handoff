@@ -165,6 +165,11 @@ def _content_summary(content: str) -> str | None:
     return None
 
 
+# Phase 33: arbiter rulings are reviewer-role entries whose content starts
+# with this prefix (see cycle.add_ruling).
+RULING_PREFIX = "[ARBITER RULING by "
+
+
 def parse_jsonl_rounds(jsonl_path: Path) -> list[dict] | None:
     """Parse JSONL round entries into the same structure as extract_all_rounds().
 
@@ -193,10 +198,19 @@ def parse_jsonl_rounds(jsonl_path: Path) -> list[dict] | None:
     # the reviewer's response separately, and accumulate AMENDs per round.
     by_round: dict[int, dict] = {}
     amendments_by_round: dict[int, list[dict]] = {}
+    entries_by_round: dict[int, list[dict]] = {}
+    rulings_by_round: dict[int, list[dict]] = {}
     for e in entries:
         r = e.get("round", 0)
         if r not in by_round:
             by_round[r] = {"lead": None, "reviewer": None}
+        # Phase 33: additive full history per round — nothing hidden by the
+        # last-entry-per-role grouping below.
+        raw = {"role": e.get("role"), "action": e.get("action"), "ts": e.get("ts", ""),
+               "updated_by": e.get("updated_by"), "content": e.get("content", "")}
+        entries_by_round.setdefault(r, []).append(raw)
+        if str(e.get("content", "")).startswith(RULING_PREFIX):
+            rulings_by_round.setdefault(r, []).append(raw)
         if e.get("action") == "AMEND" and e.get("role") == "lead":
             amendments_by_round.setdefault(r, []).append({
                 "content": e.get("content", ""),
@@ -225,6 +239,8 @@ def parse_jsonl_rounds(jsonl_path: Path) -> list[dict] | None:
             "lead_action": lead_action,
             "action": action,
             "lead_amendments": amendments_by_round.get(round_num, []),
+            "entries": entries_by_round.get(round_num, []),
+            "rulings": rulings_by_round.get(round_num, []),
         })
 
     return rounds if rounds else None
@@ -259,6 +275,8 @@ def read_cycle_rounds(phase: str, cycle_type: str,
             if rounds:
                 for r in rounds:
                     r.setdefault("lead_amendments", [])
+                    r.setdefault("entries", [])
+                    r.setdefault("rulings", [])
             return rounds
 
     # Fall back to legacy markdown. Markdown predates the AMEND action
@@ -270,6 +288,8 @@ def read_cycle_rounds(phase: str, cycle_type: str,
         if rounds:
             for r in rounds:
                 r["lead_amendments"] = []
+                r.setdefault("entries", [])
+                r.setdefault("rulings", [])
         return rounds
 
     return None

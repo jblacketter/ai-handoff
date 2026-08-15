@@ -19,6 +19,10 @@ Behaviour is driven by environment variables:
                         {"cycle_add": true}             perform the owed transition
   FAKE_AGENT_FAIL_TIMES / FAKE_AGENT_COUNTER  in `flaky` mode: exit 3 for the
                       first N invocations (counter file), then behave like `ok`
+  brief modes (Phase 33): `brief` writes the file named in the prompt's
+                      === OUTPUT PATH === block with the five headings;
+                      `brief_partial` writes three headings; `brief_nofile`
+                      exits 0 without writing; `brief_hang` writes nothing and sleeps
 
 The fake reads the composed prompt from stdin, parses the CURRENT STATE
 block, and in ``ok`` mode performs the transition a real agent would by
@@ -125,6 +129,45 @@ def main() -> int:
     else:
         _emit({"type": "thread.started", "thread_id": "fake-thread"})
     _sleep()
+
+    if mode.startswith("brief"):
+        out_path = None
+        if "=== OUTPUT PATH ===" in prompt:
+            block = prompt.split("=== OUTPUT PATH ===", 1)[1]
+            for line in block.splitlines()[1:6]:
+                line = line.strip()
+                if line and not line.startswith("Write the brief") and not line.startswith("First line") \
+                        and not line.startswith("Print DONE") and not line.startswith("==="):
+                    out_path = line
+                    break
+        if mode == "brief_hang":
+            time.sleep(600)
+            return 0
+        if mode != "brief_nofile" and out_path:
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            heads = ["## Positions", "## Crux", "## Evidence", "## Recommendation", "## Rulings"]
+            if mode == "brief_partial":
+                heads = heads[:3]
+            body = ["<!-- fake brief -->", "# Decision brief (fake)"]
+            for hd in heads:
+                body += [hd, f"fake text for {hd[3:].lower()}", ""]
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(body))
+        _emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "DONE"}]}}
+              if flavor == "claude" else
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "DONE"}})
+        _sleep()
+        if flavor == "claude":
+            _emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                   "session_id": "fake-brief", "total_cost_usd": 0.02,
+                   "usage": {"input_tokens": 100, "output_tokens": 50,
+                             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                   "result": "DONE"})
+        else:
+            _emit({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50,
+                                                       "cached_input_tokens": 0,
+                                                       "cache_write_input_tokens": 0}})
+        return 0
 
     if mode == "stderr_noise":
         sys.stderr.write("warning: something noisy on stderr\n")
