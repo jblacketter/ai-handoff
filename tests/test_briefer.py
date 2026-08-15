@@ -124,6 +124,31 @@ class TestConfig:
         _escalate(project)
         assert b.brief_command([], project_root=project) == 1
         assert "No brief yet" in capsys.readouterr().out
+        # every disabled/error return of resolve_briefer carries the fallback timeout
+        for extra in ("  timeout_minutes: nope\n", "  provider: gemini\n", "  bogus: 1\n"):
+            _enable(project, extra)
+            spec = _spec(project)
+            assert not spec.enabled and spec.timeout_s == 15 * 60, (extra, spec)
+        # a live matching attempt aged between grace (5) and default timeout+grace (20)
+        # must stay running when `tagteam brief` sweeps under invalid config
+        _enable(project, "  timeout_minutes: nope\n")
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(procs, "pid_alive", lambda pid: pid == 100)
+            monkeypatch.setattr(procs, "identity", lambda pid: "100:start" if pid == 100 else None)
+            ev, _ = b.current_event(project)
+            started = (b.datetime.now(b.timezone.utc) - b.timedelta(minutes=10)).isoformat()
+            conn = db.connect(project_dir=str(project))
+            try:
+                db.claim_brief(conn, ts=started, phase="feat-x", cycle_type="plan", round_=1,
+                               cycle_state="escalated", event_key=ev.event_key, kind="manual",
+                               runner_pid=100, runner_ident="100:start")
+            finally:
+                conn.close()
+            assert b.brief_command([], project_root=project) == 1
+            assert _briefs(project)[0]["status"] == "running"
+        finally:
+            monkeypatch.undo()
 
     def test_enabled_false(self, project, fake_path):
         _enable(project)
