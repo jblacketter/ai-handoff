@@ -1,0 +1,20 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "headless-turn-engine-30-arc",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-15",
+  "baseline": {
+    "sha": "481bbce93a2d2dc28cde68745c2a30f7c51fcc53",
+    "dirty_paths": [
+      " M docs/roadmap.md",
+      "?? docs/phases/headless-turn-engine-30-arc.md",
+      "?? docs/tagteam-3.0-proposal.md"
+    ],
+    "captured_at": "2026-08-15T05:36:23.490148+00:00",
+    "source": "copied-from-plan"
+  }
+}
