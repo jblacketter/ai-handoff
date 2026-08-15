@@ -67,19 +67,28 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
    if not paused (`--quiet` → 0).
 3. **`tagteam cancel-turn`** — reads `.tagteam/turns/inflight.json`, which
    from this phase records `pid` (child), **`watcher_pid`** (the orchestrator
-   process that spawned it, `os.getpid()` in the engine) and `started_at`.
-   Before signalling anything it **binds the PID to the recorded turn**
-   (stale-inflight safety, reviewer r1):
+   process, `os.getpid()` in the engine), `started_at`, and two **stable
+   creation identities** captured *at spawn* with the same helper the
+   canceller uses: `child_ident = procs.identity(pid)` and `watcher_ident =
+   procs.identity(watcher_pid)`. `procs.identity(pid)` returns
+   `"<pid>:<creation-time-string>"` straight from the platform tool (POSIX:
+   `ps -o lstart= -p PID` — Linux additionally uses `/proc/<pid>/stat`
+   starttime ticks when available; Windows: `Get-CimInstance Win32_Process
+   … CreationDate`), or `None` if the lookup fails. Because the recorded and
+   the recomputed value come from the *same source*, comparison is **string
+   equality** — no `>=`, no tolerance, no sub-second/second rounding issue
+   (reviewer r2). Before signalling anything it **binds the PID to the
+   recorded turn**:
    - reject if `pid` is missing, equals the caller's own pid, or equals
      `watcher_pid`;
    - reject if the process is not alive;
+   - reject unless `procs.identity(pid) == child_ident` **and**
+     `procs.identity(watcher_pid) == watcher_ident` (a reused pid has a
+     different creation time; a crashed-and-restarted watcher likewise; a
+     `None` on either side → *unverifiable → do not kill*);
    - reject unless the process's **parent pid equals `watcher_pid`**
-     (POSIX: `ps -o ppid= -p PID`; Windows: PowerShell
-     `(Get-CimInstance Win32_Process -Filter "ProcessId=PID").ParentProcessId`;
-     lookup failure → *unverifiable → do not kill*);
-   - additionally reject if the process started before `started_at`
-     where the platform exposes it cheaply (POSIX `ps -o lstart=`), as a
-     second guard against PID reuse.
+     (POSIX `ps -o ppid=`, Windows `ParentProcessId`; lookup failure →
+     reject) — belt and braces on top of the identity match.
    On rejection it prints why, **removes the stale `inflight.json`**
    (metadata only — nothing is signalled) and exits 1. On success it writes
    `.tagteam/turns/cancel-requested.json` (`{stem, pid, by, ts}`) and kills
@@ -101,8 +110,27 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
    round` from state when present, `turn` NULL — with a printed warning
    "no turn is currently owed; the note will be delivered to the next turn
    that starts". Delivery:
-   - **Pending selection** for a turn of role R: rows with `delivered_ts IS
-     NULL AND (target_role IS NULL OR target_role = R)`, ordered by id.
+   - **Eligibility** for a headless turn of role R whose verification
+     target is cycle `(P, T)` (reviewer r2 — no replay of historical notes):
+     rows with `delivered_ts IS NULL AND retired_ts IS NULL AND (target_role
+     IS NULL OR target_role = R) AND ((phase = P AND type = T) OR phase IS
+     NULL)`, ordered by id. Notes are **scoped to the cycle they were
+     written for**; a note written when nothing was owed (`phase IS NULL`)
+     is eligible for the first turn of whatever cycle starts next, once.
+     Notes for another cycle, or for a cycle that has reached a terminal
+     state, are never injected.
+   - **Retirement**: notes are append-only, but a note can be closed without
+     delivery: `tagteam interject --list` shows pending/delivered/retired
+     rows for the current cycle; `tagteam interject --retire ID` sets
+     `retired_ts` (additive column) with `by`. Notes belonging to a cycle
+     that becomes terminal are not auto-mutated (audit trail) — they simply
+     stop being eligible.
+   - **Same-cycle mode switch** (intended, explicit): a note surfaced to an
+     interactive agent via `cycle rounds` at round k and *not* retired is
+     still eligible when the same cycle later runs a headless turn — it is
+     injected once, and the prompt block says "may already have been
+     addressed in earlier rounds; verify before acting". Cross-cycle it is
+     not eligible (scoping above).
    - **Headless:** `compose_prompt` gains an
      `=== ARBITER INTERJECTIONS (unconsumed) ===` block listing the selected
      notes (`[ts] by (→ target or "next turn"): note`); the engine keeps the
@@ -142,12 +170,18 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
 7. **Headless follow-ups from Phase 31 (measured):**
    - `--turn-retries N` (default 0) with a **deterministic at-least-once
      rule** gated on *both* repository and handoff state (reviewer r1):
-     before spawning, snapshot (a) the **repo fingerprint** = sha1 of
-     `git rev-parse HEAD` + `git status --porcelain=v1 -z
-     --untracked-files=all` (HEAD catches commit-then-fail; `--untracked-
-     files=all` catches edits under an already-untracked directory), and
-     (b) the **handoff fingerprint** = state `seq` + the target cycle's
-     entry count + `(state, ready_for, round)` from `cycle status`. A failed
+     before spawning, snapshot (a) the **repo fingerprint** — *content-
+     sensitive* (reviewer r2): sha1 of `git rev-parse HEAD` ‖ `git
+     write-tree` of the real index (staged content) ‖ `git write-tree` of a
+     **temporary index** built by `GIT_INDEX_FILE=<tmp> git read-tree HEAD
+     && git add -A && git write-tree` (worktree content of every tracked and
+     non-ignored untracked path, hashed by git itself — so editing an
+     already-modified tracked file, or changing the bytes of an already-
+     present untracked file, changes the fingerprint; ordering is git's own,
+     deterministic; the temp index file is deleted afterwards). Only
+     `.gitignore`d paths remain outside the fingerprint (documented blind
+     spot). And (b) the **handoff fingerprint** = state `seq` + the target
+     cycle's entry count + `(state, ready_for, round)` from `cycle status`. A failed
      attempt is retried only if outcome ∈ {`spawn_failed`, `nonzero_exit`,
      `timeout`} **and both fingerprints are unchanged** after the attempt.
      Any handoff transition (e.g. the agent's `cycle add` succeeded and it
@@ -204,7 +238,8 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
 ### Files
 
 - `tagteam/controls.py` — **new**: `pause_command`, `resume_command`,
-  `cancel_turn_command`, `interject_command`, `rollback_command`; helpers
+  `cancel_turn_command`, `interject_command` (incl. `--list`, `--retire`),
+  `rollback_command`; helpers
   `write_pause_cli`, `read_cancel`, `write_cancel`, `clear_cancel`;
   `add_interjection`/`pending_interjections`/`mark_delivered` thin wrappers
   over db.
@@ -215,9 +250,10 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
 - `tagteam/db.py` — `SCHEMA_VERSION = 4`; `_SCHEMA_V4` (`interjections`
   table + index); `USAGE_STATUSES += {"cancelled"}`; `add_interjection(...,
   target_role=None)` (validates role), `get_interjections(phase=None,
-  type=None, undelivered_only=False)`, `pending_interjections_for(role)`
-  (untargeted-or-matching, undelivered, by id),
-  `mark_interjections_delivered(ids, role, round, stem, ts)` (exact ids).
+  type=None, undelivered_only=False)`, `pending_interjections_for(role,
+  phase, type)` (undelivered, unretired, untargeted-or-matching, same cycle
+  or NULL-phase, by id), `mark_interjections_delivered(ids, role, round,
+  stem, ts)` (exact ids), `retire_interjection(id, by, ts)`.
 - `tagteam/headless.py` — `_kill_tree(pid)` refactor + `kill_pid_tree(pid)`
   public; `inflight.json` gains `watcher_pid`; cancel-marker detection →
   `OUTCOME_CANCELLED`; interjection block in `compose_prompt` (new kwarg,
@@ -225,7 +261,8 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
   retries loop with repo + handoff fingerprints; per-role timeout;
   `notify()` via alias. `tagteam/procs.py` (**new**, small): `pid_alive`,
   `parent_pid`, `process_start_time` (POSIX `ps`, Windows PowerShell), used
-  by `cancel-turn`'s identity binding and by tests.
+  by `cancel-turn`'s identity binding and by tests; `identity(pid)` returns
+  the same-source creation string used for equality checks.
 - `tagteam/watcher.py` — pause check in `_handle_ready` for all modes (rate-
   limited log); `notify_macos = notify` alias; `--turn-retries`; help.
 - `tagteam/cycle.py` — `tail_rounds`/`_cli_rounds` attach `interjections`
@@ -258,7 +295,8 @@ CREATE TABLE IF NOT EXISTS interjections (
     target_role     TEXT CHECK (target_role IS NULL OR target_role IN ('lead','reviewer')),
     phase           TEXT, type TEXT, round INTEGER, turn TEXT,
     delivered_role  TEXT, delivered_round INTEGER,
-    delivered_stem  TEXT, delivered_ts TEXT
+    delivered_stem  TEXT, delivered_ts TEXT,
+    retired_ts      TEXT, retired_by TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_interjections_phase ON interjections(phase, type, round);
 ```
@@ -277,10 +315,11 @@ to 0.8.0 readers). Verified in the release checklist as in Phase 31.
 ```
 tagteam cancel-turn:
    inflight = read inflight.json          (else: exit 1 "nothing in flight")
-   bind(pid, watcher_pid, started_at):    pid ∉ {missing, self, watcher_pid}
+   bind(inflight):                        pid ∉ {missing, self, watcher_pid}
                                           ∧ alive(pid)
-                                          ∧ parent_pid(pid) == watcher_pid   (unverifiable ⇒ reject)
-                                          ∧ start_time(pid) ≥ started_at    (when available)
+                                          ∧ identity(pid) == inflight.child_ident        (None ⇒ reject)
+                                          ∧ identity(watcher_pid) == inflight.watcher_ident (None ⇒ reject)
+                                          ∧ parent_pid(pid) == watcher_pid              (unverifiable ⇒ reject)
    if not bound: print reason; remove stale inflight.json; exit 1  (nothing signalled)
    write .tagteam/turns/cancel-requested.json {stem,pid,by,ts}
    kill_pid_tree(pid)
@@ -309,7 +348,7 @@ ready state as new (re-dispatch once). Tested for notify + headless.
 ### Retries rule (deterministic at-least-once)
 
 ```
-repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ `git status --porcelain=v1 -z --untracked-files=all`) or None (not a git repo)
+repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ write-tree(index) ‖ write-tree(tmp index after add -A)) or None (not a git repo)
 handoff_pre = handoff_fingerprint()   # (state.seq, target cycle entry count, cycle state/ready_for/round)
 for attempt in 0..N:
     run turn → outcome
@@ -325,8 +364,11 @@ Each attempt: own stem, usage row (`attempt` is *not* a new column — the
 stem timestamp orders them; the log line names the attempt number). Tests
 (fake-agent modes): nonzero **after** a successful `cycle add` → no retry;
 `git commit` then nonzero → no retry; write inside an already-untracked
-directory then nonzero → no retry; clean nonzero → retried; `no_round` /
-`cancelled` → never retried.
+directory then nonzero → no retry; **edit an already-modified tracked file**
+then nonzero → no retry; **change the contents of an already-present
+untracked file** then nonzero → no retry; `git add` (stage only) then
+nonzero → no retry; clean nonzero → retried; `no_round` / `cancelled` →
+never retried.
 
 ### Notifications
 
@@ -347,11 +389,12 @@ directory then nonzero → no retry; clean nonzero → retried; `no_round` /
 ### Interject provenance & delivery
 
 `interject` writes the row with the *current* owed identity (phase, type,
-round, turn — or NULL turn with a warning when nothing is owed) plus
+round, turn — or NULL phase/turn with a warning when nothing is owed) plus
 `target_role` (`--to`, default NULL = next turn) so an auditor knows the
 state of the loop when the arbiter spoke and who it was for. The engine
-selects `pending_interjections_for(role)` when composing, renders them,
-and remembers their ids; stamping happens only when the outcome is `ok`
+selects `pending_interjections_for(role, target_phase, target_type)` when
+composing (cycle-scoped — see Eligibility), renders them, and remembers
+their ids; stamping happens only when the outcome is `ok`
 and only for those ids (a note whose turn failed remains pending and is
 re-delivered to the retry/next eligible turn — it was never *acted on*;
 a note targeted at the other role is not even rendered). `usage`/DB show
@@ -392,8 +435,11 @@ a note targeted at the other role is not even rendered). `usage`/DB show
 - [ ] Stale-inflight safety: a hand-written `inflight.json` whose `pid` is an
   unrelated sleeper (parent ≠ recorded `watcher_pid`) is rejected — the
   sleeper stays alive, the stale file is removed, exit 1 with the reason;
-  same for `pid` = self, `pid` = `watcher_pid`, missing pid, dead pid, and
-  an unverifiable parent lookup; the live child/grandchild kill test still
+  same for `pid` = self, `pid` = `watcher_pid`, missing pid, dead pid, an
+  unverifiable parent/identity lookup, and — mocked — numeric child and
+  parent pids that match the metadata while `child_ident` **or**
+  `watcher_ident` differs (proves no kill on identity mismatch); the engine
+  records both identities at spawn; the live child/grandchild kill test still
   passes.
 - [ ] `tagteam interject "note" [--to R]` stores a row with
   `by/ts/target_role/phase/type/round/turn` (`--to` validated; no owed turn →
@@ -406,6 +452,15 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   written before a lead turn is absent from the lead's prompt and
   undelivered after the lead's `ok`, then present in and stamped by the
   reviewer's `ok` turn.
+- [ ] Interjection scoping: a note written and surfaced (via `cycle rounds`)
+  during an interactive cycle for phase A is **not** injected into a later
+  headless turn of phase B (nor into any turn after cycle A is terminal);
+  the same note **is** injected exactly once into a later headless turn of
+  the *same* cycle A (mode switch) with the "may already have been
+  addressed" caveat, then stamped; a NULL-phase note (written with nothing
+  owed) is injected into the first turn of the next cycle only; `interject
+  --retire ID` removes a note from eligibility and `--list` shows
+  pending/delivered/retired.
 - [ ] `tagteam cycle rounds` / `--tail N` output attaches
   `interjections: [...]` to the targeted round (empty list otherwise);
   `cycle render` shows them; the rounds JSONL and `rounds` table are
@@ -422,9 +477,12 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   handoff fingerprints unchanged is retried up to N times (own stems/usage
   rows, retry log line) and succeeds when the fake starts behaving; the same
   failure after (a) a successful `cycle add`, (b) a `git commit`, (c) a write
-  inside an already-untracked directory, or (d) any tracked-file edit pauses
-  immediately with no retry; `no_round` and `cancelled` are never retried;
-  a non-git project retries only `spawn_failed`.
+  inside an already-untracked directory, (d) any tracked-file edit, (e) a
+  further edit to a tracked file that was *already modified* before spawn,
+  (f) a content change to an *already-present untracked* file, or (g) a
+  stage-only `git add`, pauses immediately with no retry; `no_round` and
+  `cancelled` are never retried; a non-git project retries only
+  `spawn_failed`.
 - [ ] `agents.<role>.headless.timeout_minutes` overrides `--turn-timeout`
   for that role (validated; non-positive → config error).
 - [ ] `tagteam rollback 0.8.0` prints the install-appropriate command +
@@ -464,10 +522,17 @@ a note targeted at the other role is not even rendered). `usage`/DB show
    --untracked-files=all`) **and** handoff fingerprint (state seq + target
    cycle entry count + cycle status); never retry after any handoff
    transition (Scope 7, Retries rule).
-6. **`cancel-turn` PID binding** — `inflight.json` records `watcher_pid` +
-   `started_at`; kill only a live pid whose parent is the recorded watcher
-   (and, where available, whose start time is not before `started_at`);
-   otherwise report + clean stale metadata (Scope 3, Cancel flow).
+6. **`cancel-turn` PID binding** — `inflight.json` records `watcher_pid`,
+   `started_at`, and same-source creation identities `child_ident` /
+   `watcher_ident`; kill only when both identities match by string equality
+   and the parent pid is the recorded watcher; otherwise report + clean
+   stale metadata (Scope 3, Cancel flow). *(r2)*
+7. **Repo fingerprint is content-sensitive** — HEAD ‖ write-tree(index) ‖
+   write-tree(temp index after `add -A`); only ignored paths are outside it
+   (Scope 7, Retries rule). *(r2)*
+8. **Interjections are cycle-scoped** — eligibility requires the receiving
+   turn's cycle (or NULL phase, once); `retired_ts` + `--list/--retire`;
+   same-cycle mode switch injects once with a caveat (Scope 4). *(r2)*
 
 ## Open Questions
 
@@ -482,9 +547,13 @@ a note targeted at the other role is not even rendered). `usage`/DB show
 - **Cancel race / zombie processes** on Windows shims: mitigated by
   `taskkill /T` on the shim pid (proven in Phase 31 CI) and by labeling the
   outcome from the marker, not from the kill's success.
-- **Retry rule false negatives** (agent wrote only to gitignored paths →
-  tree "unchanged" → retry over side effects). Accepted: gitignored writes
-  are by definition not part of the reviewed tree; documented in README.
+- **Retry rule blind spot: `.gitignore`d paths only.** The fingerprint is
+  content-sensitive over every tracked and non-ignored untracked path (git
+  hashes the bytes via the temp-index `write-tree`), so pre-existing
+  modifications/untracked files do not mask agent edits; only ignored paths
+  (build outputs, `.tagteam/`, venvs) can change without changing it, and the
+  handoff fingerprint independently guards `.tagteam/` state. Documented in
+  README.
 - **Interjection delivered but ignored by the agent.** The prompt marks
   them as arbiter instructions and SKILL.md says so; the audit trail shows
   delivery; enforcement is a Phase 34 cockpit concern (show
