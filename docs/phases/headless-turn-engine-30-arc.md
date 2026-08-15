@@ -400,7 +400,7 @@ CREATE TABLE IF NOT EXISTS usage (
     agent         TEXT,                   -- name from tagteam.yaml
     provider      TEXT,                   -- claude | codex
     model         TEXT,
-    status        TEXT NOT NULL,          -- ok | timeout | nonzero_exit | no_round | spawn_failed
+    status        TEXT NOT NULL,          -- ok | timeout | nonzero_exit | no_round | spawn_failed | cancelled
     exit_code     INTEGER,
     duration_ms   INTEGER,
     input_tokens  INTEGER, output_tokens INTEGER,

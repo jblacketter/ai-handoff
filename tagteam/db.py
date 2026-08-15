@@ -24,9 +24,11 @@ from pathlib import Path
 # 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
 # ONLY — new tables / nullable columns, never renames or drops — so an
 # older release can still open a newer DB after a downgrade.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
-USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed"}
+USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed",
+                  "cancelled"}
+INTERJECTION_ROLES = {"lead", "reviewer"}
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
@@ -141,6 +143,35 @@ CREATE INDEX IF NOT EXISTS idx_usage_phase ON usage(phase, type, round);
 """
 
 
+# Schema v4 (Phase 32): arbiter interjections. Append-only sibling of
+# `rounds` (the rounds role CHECK forbids a third role); phase/type/round/
+# turn are all NULL when nothing was owed at write time (observed_state
+# keeps what the CLI saw, provenance only). Delivery is stamped by the
+# headless engine for exactly the ids it rendered; retirement closes a note
+# without delivery.
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS interjections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT NOT NULL,
+    by              TEXT,
+    note            TEXT NOT NULL,
+    target_role     TEXT CHECK (target_role IS NULL OR target_role IN ('lead','reviewer')),
+    phase           TEXT,
+    type            TEXT,
+    round           INTEGER,
+    turn            TEXT,
+    observed_state  TEXT,
+    delivered_role  TEXT,
+    delivered_round INTEGER,
+    delivered_stem  TEXT,
+    delivered_ts    TEXT,
+    retired_ts      TEXT,
+    retired_by      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_interjections_phase ON interjections(phase, type, round);
+"""
+
+
 def _resolve_db_path(project_dir: str | Path | None) -> Path:
     """Resolve where the database lives.
 
@@ -181,6 +212,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_V3)
         conn.execute("PRAGMA user_version = 3")
         current = 3
+    if current < 4:
+        conn.executescript(_SCHEMA_V4)
+        conn.execute("PRAGMA user_version = 4")
+        current = 4
     # Future migrations land here.
     # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
     # deliberately tolerated — additive-only migrations mean older code
@@ -484,6 +519,107 @@ def get_usage(conn: sqlite3.Connection, phase: str | None = None,
     cur = conn.execute(sql, params)
     names = [d[0] for d in cur.description]
     return [dict(zip(names, row)) for row in cur.fetchall()]
+
+
+# ---------- Interjections (Phase 32) ----------
+
+_INTERJECTION_COLS = [
+    "id", "ts", "by", "note", "target_role", "phase", "type", "round", "turn",
+    "observed_state", "delivered_role", "delivered_round", "delivered_stem",
+    "delivered_ts", "retired_ts", "retired_by",
+]
+
+
+def add_interjection(conn: sqlite3.Connection, *, ts: str, note: str,
+                     by: str | None = None, target_role: str | None = None,
+                     phase: str | None = None, cycle_type: str | None = None,
+                     round_: int | None = None, turn: str | None = None,
+                     observed_state: dict | None = None) -> int:
+    """Insert an arbiter note. Commits. Returns the row id."""
+    if not note or not note.strip():
+        raise ValueError("interjection note must be non-empty")
+    if target_role is not None and target_role not in INTERJECTION_ROLES:
+        raise ValueError(
+            f"Invalid target_role: {target_role!r} (must be one of "
+            f"{', '.join(sorted(INTERJECTION_ROLES))})")
+    cur = conn.execute(
+        """INSERT INTO interjections
+           (ts, by, note, target_role, phase, type, round, turn, observed_state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (ts, by, note, target_role, phase, cycle_type, round_, turn,
+         json.dumps(observed_state) if observed_state is not None else None),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _rows(cur) -> list[dict]:
+    names = [d[0] for d in cur.description]
+    return [dict(zip(names, row)) for row in cur.fetchall()]
+
+
+def get_interjections(conn: sqlite3.Connection, phase: str | None = None,
+                      cycle_type: str | None = None,
+                      undelivered_only: bool = False,
+                      include_retired: bool = True) -> list[dict]:
+    where, params = [], []
+    if phase is not None:
+        where.append("phase = ?"); params.append(phase)
+    if cycle_type is not None:
+        where.append("type = ?"); params.append(cycle_type)
+    if undelivered_only:
+        where.append("delivered_ts IS NULL")
+    if not include_retired:
+        where.append("retired_ts IS NULL")
+    sql = "SELECT " + ", ".join(_INTERJECTION_COLS) + " FROM interjections"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id"
+    return _rows(conn.execute(sql, params))
+
+
+def pending_interjections_for(conn: sqlite3.Connection, role: str,
+                              phase: str | None, cycle_type: str | None) -> list[dict]:
+    """Eligible notes for a turn of `role` whose verification target is the
+    cycle (phase, type): undelivered, unretired, untargeted-or-matching the
+    role, and either scoped to that cycle or written with nothing owed
+    (phase IS NULL). Ordered by id."""
+    if role not in INTERJECTION_ROLES:
+        raise ValueError(f"Invalid role: {role!r}")
+    sql = ("SELECT " + ", ".join(_INTERJECTION_COLS) + " FROM interjections "
+           "WHERE delivered_ts IS NULL AND retired_ts IS NULL "
+           "AND (target_role IS NULL OR target_role = ?) "
+           "AND (phase IS NULL OR (phase = ? AND type = ?)) ORDER BY id")
+    return _rows(conn.execute(sql, (role, phase, cycle_type)))
+
+
+def mark_interjections_delivered(conn: sqlite3.Connection, ids: list[int], *,
+                                 role: str, round_: int, stem: str, ts: str) -> int:
+    """Stamp delivery on exactly `ids`. Commits. Returns rows updated."""
+    if not ids:
+        return 0
+    marks = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"""UPDATE interjections
+               SET delivered_role=?, delivered_round=?, delivered_stem=?, delivered_ts=?
+             WHERE id IN ({marks}) AND delivered_ts IS NULL""",
+        [role, round_, stem, ts, *ids],
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def retire_interjection(conn: sqlite3.Connection, id_: int, *, by: str | None,
+                        ts: str) -> bool:
+    """Close a note without delivery. Returns False if not found or already
+    delivered/retired. Commits."""
+    cur = conn.execute(
+        "UPDATE interjections SET retired_ts=?, retired_by=? "
+        "WHERE id=? AND delivered_ts IS NULL AND retired_ts IS NULL",
+        (ts, by, id_),
+    )
+    conn.commit()
+    return cur.rowcount == 1
 
 
 # ---------- Importer (one-way, from existing tagteam project files) ----------

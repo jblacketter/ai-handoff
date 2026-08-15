@@ -333,7 +333,8 @@ class TestProviderAndExecutable:
         documented = {t.strip() for t in m.group(1).split("|")}
         assert documented == set(db.USAGE_STATUSES)
         assert documented == {h.OUTCOME_OK, h.OUTCOME_TIMEOUT, h.OUTCOME_NONZERO,
-                              h.OUTCOME_NO_ROUND, h.OUTCOME_SPAWN_FAILED}
+                              h.OUTCOME_NO_ROUND, h.OUTCOME_SPAWN_FAILED,
+                              h.OUTCOME_CANCELLED}
 
     @pytest.mark.parametrize("headless_yaml,needle", [
         ('      args: "--model opus"\n', "list of strings"),
@@ -1018,9 +1019,9 @@ class TestCycleRoundsTail:
 # ---------------------------------------------------------------------------
 
 class TestSchemaV3:
-    def test_fresh_and_v2_migrate_to_v3(self, tmp_path):
+    def test_fresh_and_v2_migrate_to_current(self, tmp_path):
         c = db.connect(project_dir=str(tmp_path))
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert c.execute("SELECT name FROM sqlite_master WHERE name='usage'").fetchone()
         c.close()
         # simulate a v2 DB
@@ -1031,7 +1032,7 @@ class TestSchemaV3:
         raw.executescript(db._SCHEMA_V1)  # V1 DDL already carries ready_for_present
         raw.execute("PRAGMA user_version = 2"); raw.commit(); raw.close()
         c = db.connect(project_dir=str(tmp_path / "v2"))
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert c.execute("SELECT name FROM sqlite_master WHERE name='usage'").fetchone()
         c.close()
 
@@ -1040,9 +1041,9 @@ class TestSchemaV3:
         newer release (this is the *regression guard*, not the downgrade
         proof — see the plan's release checklist)."""
         c = db.connect(project_dir=str(tmp_path))
-        c.execute("PRAGMA user_version = 4"); c.commit(); c.close()
+        c.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}"); c.commit(); c.close()
         c = db.connect(project_dir=str(tmp_path))
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION + 1
         c.close()
 
     def test_add_and_get_usage(self, tmp_path):

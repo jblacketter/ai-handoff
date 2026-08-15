@@ -61,6 +61,7 @@ OUTCOME_TIMEOUT = "timeout"
 OUTCOME_NONZERO = "nonzero_exit"
 OUTCOME_NO_ROUND = "no_round"
 OUTCOME_SPAWN_FAILED = "spawn_failed"   # OSError from Popen (bad exe, perms, ...)
+OUTCOME_CANCELLED = "cancelled"         # `tagteam cancel-turn` (Phase 32)
 
 VARIADIC = -1  # option arity: one or more values until the next flag
 
