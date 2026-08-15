@@ -31,6 +31,8 @@ Unified command for the AI handoff workflow. Reads your role and current state, 
 
 **Headless turns.** If you were started by `tagteam watch --mode headless`, your prompt already contains this contract, the current state, and the round tail, and there is no human at the terminal. The contract is identical: do the work, make exactly one cycle-writing call (`tagteam cycle add` / `cycle init`) with `--updated-by [your-agent-name]`, then stop. The orchestrator verifies that call happened and pauses (with a notification) if it did not.
 
+**Arbiter interjections.** The human arbiter can leave notes with `tagteam interject`. In a headless turn they appear in your prompt under `=== ARBITER INTERJECTIONS (unconsumed) ===`; interactively they appear as an `interjections` list on the round in `tagteam cycle rounds` output. Treat them as authoritative instructions for this cycle (they may already have been addressed in earlier rounds — verify before acting), and mention in your submission how you handled them.
+
 **Step 2 — CRITICAL: You MUST begin every `/handoff` response with this status banner:**
 
 ```

@@ -311,8 +311,9 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 31
 
 ### Phase 32: Orchestration Controls & Usage Surfacing (3.0 arc)
-- **Status:** Not started
-- **Description:** `tagteam pause`/`resume`/`cancel-turn`, `tagteam interject` (arbiter note injected into next turn + recorded in round log), `tagteam usage` (tokens by role/phase/cycle/project), Windows notification path, optional `tagteam rollback`.
+- **Status:** Implemented — in impl review (target release 0.9.0, branch `phase-32-orchestration-controls`, PR at the end)
+- **Description:** `tagteam pause`/`resume` (marker honored by every watcher mode; resume re-dispatches the owed turn once), `tagteam cancel-turn` (binds the recorded child PID to the recorded turn via same-source creation identities + parent pid before signalling; engine records outcome `cancelled`), `tagteam interject` (additive `interjections` table with provenance, `--to lead|reviewer`, cycle-scoped eligibility, exact-id delivery stamping on `ok`, `--list/--retire`; surfaced in headless prompts and on `cycle rounds`/`render`), `tagteam usage` (per-turn lines + by-role/by-cycle/totals, `--json`), cross-platform `notify()` (osascript / PowerShell toast → `msg` / notify-send; `TAGTEAM_NO_NOTIFY`), `--turn-retries N` gated on a content-sensitive recursive repo fingerprint AND a handoff fingerprint (fail closed on UNSUPPORTED), per-role `headless.timeout_minutes`, `tagteam rollback X.Y.Z [--yes]`. Schema v4 additive.
+- **Plan:** `docs/phases/orchestration-controls-usage-surfacing-30-arc.md` (approved round 7; every review turn headless). **Findings:** `docs/phases/orchestration-controls-findings.md`.
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 32
 
 ### Phase 33: Escalation Briefer (3.0 arc)

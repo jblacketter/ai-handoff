@@ -153,6 +153,26 @@ Defaults are the least-privileged unattended settings that still let the agent e
 
 Interactive modes are unchanged — headless is a peer mode. It is also the path for **Windows**: it needs only `subprocess`, and the test suite runs on `windows-latest` in CI (a real signed-in CLI smoke on Windows is best-effort; see the Phase 31 findings doc).
 
+### Arbiter controls (any watcher mode)
+
+```bash
+tagteam pause --reason "reviewing by hand"    # every watcher mode holds dispatch
+tagteam resume                                # clears the hold; the owed turn is re-dispatched once
+tagteam cancel-turn                           # kill the in-flight headless turn → outcome 'cancelled', then paused
+tagteam interject "prefer the smaller diff"   # note for the next turn (--to lead|reviewer to target a role)
+tagteam interject --list                      # pending / delivered / retired notes for this cycle
+tagteam interject --retire 3                  # close a note without delivering it
+tagteam usage [--json]                        # per-turn tokens; roll-ups by role, by cycle, totals
+```
+
+- **pause/resume** use the same marker file the engine writes on a failed turn (`.tagteam/headless-paused.json`), so `resume` also tells you what failed and where the log is.
+- **cancel-turn** never signals a PID it cannot bind to the recorded turn: it checks the child's and the watcher's creation identities (recorded at spawn) and the parent pid, and if anything is stale or unverifiable it just removes the stale metadata and says so.
+- **interject** notes are stored with provenance (who, when, which cycle/round/turn was owed) in the project DB and go into the *next eligible* turn's prompt under an `ARBITER INTERJECTIONS` heading (headless) or show up as `interjections` on `tagteam cycle rounds` (interactive). A note is scoped to the cycle it was written for; delivery is stamped only when the receiving turn succeeds. `--to reviewer` waits for the reviewer's turn.
+- **Retries** (`tagteam watch --mode headless --turn-retries N`, default 0) re-run a failed turn only when it provably did nothing: the outcome is `spawn_failed`/`nonzero_exit`/`timeout` **and** a content-sensitive repo fingerprint (HEAD + index + worktree, recursively through every gitlink) **and** the handoff state are unchanged. `no_round`/`cancelled` are never retried; any git failure or unmerged index fails closed. Only `.gitignore`d paths are outside the fingerprint.
+- Per-role turn timeouts: `agents.<role>.headless.timeout_minutes`.
+- **Notifications** work on macOS (osascript), Windows (toast, `msg` fallback) and Linux (`notify-send`); `TAGTEAM_NO_NOTIFY=1` silences them.
+- `tagteam rollback X.Y.Z` prints the revert recipe for your install (uv tool or pip, then `tagteam upgrade`) and runs it only with `--yes`.
+
 ## The Saloon
 
 A graphical dashboard for monitoring and controlling handoff cycles:
@@ -191,6 +211,10 @@ tagteam watch --mode notify
 tagteam watch --mode headless          # spawn each turn as a fresh agent process
 tagteam tail                           # follow the in-flight headless turn
 tagteam cycle rounds --phase P --type plan --tail 3
+tagteam pause --reason "..." / tagteam resume / tagteam cancel-turn
+tagteam interject "note" [--to lead|reviewer] / --list / --retire ID
+tagteam usage [--json]
+tagteam rollback 0.8.0 [--yes]
 tagteam roadmap phases
 tagteam serve --dir .
 tagteam upgrade
