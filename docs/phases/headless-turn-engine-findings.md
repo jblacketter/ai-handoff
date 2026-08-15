@@ -107,8 +107,13 @@ scratch project above (DB `user_version = 3`, 2 usage rows):
 ## Windows
 
 - CI: `.github/workflows/tests.yml` runs the full suite on `windows-latest`
-  (fake-agent shims via `.cmd`). Status: **pending first push** — the lead has commit
-  permission only; the workflow runs when Jack pushes `main`. **Revised gate:** a green
-  windows-latest run gates the `v0.8.0` tag push, not impl approval.
+  (fake-agent shims via `.cmd`). **Green on 2026-08-15** (run 31870118036: ubuntu + windows
+  success, 687 tests). The first run (31869807990) was red for reasons unrelated to headless —
+  every headless test passed on Windows on the first try; the fixes were: the recorded
+  parity corpus's `handoff-state.json` files had never been committed (global gitignore),
+  the Windows writer-lock byte range overlapped the holder-info stamp (now locks at
+  offset 1<<30), and four `test_quickstart` tests that patch `sys.platform='darwin'` to
+  simulate POSIX venv paths are skipped on win32 (the code path is Windows-aware).
+- Windows via GitHub Actions is a hosted Windows VM — no local Windows machine needed.
 - Real signed-in CLI smoke on a Windows machine: **not performed** in this
   phase (no Windows host available); recorded here per the plan's Decisions §2.
