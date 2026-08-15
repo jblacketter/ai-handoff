@@ -139,6 +139,17 @@ def _read_config_fallback(content: str) -> dict | None:
                         headless["executable"] = _parse_simple_value(h.split(":", 1)[1])
                         i += 1
                         continue
+                    if h.startswith("timeout_minutes:"):
+                        raw_t = _parse_simple_value(h.split(":", 1)[1])
+                        try:
+                            headless["timeout_minutes"] = int(raw_t)
+                        except (TypeError, ValueError):
+                            try:
+                                headless["timeout_minutes"] = float(raw_t)
+                            except (TypeError, ValueError):
+                                headless["timeout_minutes"] = raw_t
+                        i += 1
+                        continue
                     if h.startswith("args:"):
                         rest = h.split(":", 1)[1].strip()
                         args_list: list[str] = []
@@ -299,7 +310,11 @@ def validate_config(config: dict) -> list[str]:
                 )
             elif not all(isinstance(a, str) for a in args):
                 errors.append(f"'agents.{role}.headless.args' must contain only strings")
-        unknown = set(headless) - {"provider", "executable", "args"}
+        tmo = headless.get("timeout_minutes")
+        if tmo is not None and (isinstance(tmo, bool) or not isinstance(tmo, (int, float))
+                                or tmo <= 0):
+            errors.append(f"'agents.{role}.headless.timeout_minutes' must be a positive number")
+        unknown = set(headless) - {"provider", "executable", "args", "timeout_minutes"}
         if unknown:
             errors.append(
                 f"'agents.{role}.headless' has unknown keys: {sorted(unknown)}"
@@ -414,4 +429,5 @@ def get_headless_spec(config: dict, role: str) -> dict:
         "provider": infer_headless_provider(config, role),
         "executable": headless.get("executable") or None,
         "args": list(args) if isinstance(args, list) else (args if args is not None else []),
+        "timeout_minutes": headless.get("timeout_minutes"),
     }

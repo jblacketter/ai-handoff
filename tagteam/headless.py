@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Callable
 
 from tagteam.config import HEADLESS_PROVIDERS, get_headless_spec, validate_config
+from tagteam import procs
 
 # ---------------------------------------------------------------------------
 # Constants / paths
@@ -43,6 +44,7 @@ from tagteam.config import HEADLESS_PROVIDERS, get_headless_spec, validate_confi
 
 TURNS_RELDIR = Path(".tagteam") / "turns"
 INFLIGHT_NAME = "inflight.json"
+CANCEL_NAME = "cancel-requested.json"
 PAUSE_RELPATH = Path(".tagteam") / "headless-paused.json"
 SKILL_RELPATH = Path(".claude") / "skills" / "handoff" / "SKILL.md"
 
@@ -597,9 +599,27 @@ IMPLEMENTATION review cycle for phase "{phase}". Before you run
 """.strip()
 
 
+INTERJECTIONS_HEADER = "=== ARBITER INTERJECTIONS (unconsumed) ==="
+
+
+def render_interjections(notes: list[dict]) -> str:
+    """Render the arbiter-note block for the prompt (empty string if none)."""
+    if not notes:
+        return ""
+    lines = [INTERJECTIONS_HEADER,
+             "The human arbiter left these instructions for this cycle. Treat",
+             "them as authoritative. Some may already have been addressed in",
+             "earlier rounds — verify before acting.", ""]
+    for n in notes:
+        target = n.get("target_role") or "next turn"
+        lines.append(f"[{n.get('ts')}] {n.get('by') or 'arbiter'} (→ {target}): "
+                     f"{n.get('note')}")
+    return "\n".join(lines) + "\n\n"
+
+
 def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
                    state: dict, skill_text: str, tail_entries: list[dict],
-                   tail_n: int) -> str:
+                   tail_n: int, interjections: list[dict] | None = None) -> str:
     """Build the bounded turn context sent on stdin."""
     command = state.get("command") or STANDARD_TURN_COMMAND
     start = parse_start_command(command)
@@ -607,6 +627,7 @@ def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
     if start and start[1] == "impl":
         boundary = "\n" + IMPL_BOUNDARY_CLAUSE.format(phase=start[0]) + "\n"
     tail_text = "\n".join(json.dumps(e) for e in tail_entries) or "(no rounds yet)"
+    inter = render_interjections(interjections or [])
     return (
         f"You are the {role} ({agent_name}) in a tagteam handoff cycle for the\n"
         f"project at {project_root}. This is a headless turn: no human is\n"
@@ -615,6 +636,7 @@ def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
         f"exactly one cycle-writing call (tagteam cycle add / tagteam cycle\n"
         f"init). When it succeeds, stop.\n"
         f"{boundary}\n"
+        f"{inter}"
         f"=== COMMAND ===\n{command}\n\n"
         f"=== HANDOFF CONTRACT (.claude/skills/handoff/SKILL.md) ===\n"
         f"{skill_text.rstrip()}\n\n"
@@ -655,6 +677,37 @@ def write_pause(project_root: str | Path, payload: dict) -> Path:
 
 def clear_pause(project_root: str | Path) -> bool:
     p = pause_path(project_root)
+    if p.exists():
+        p.unlink()
+        return True
+    return False
+
+
+def cancel_path(project_root: str | Path) -> Path:
+    return turns_dir(project_root) / CANCEL_NAME
+
+
+def read_cancel(project_root: str | Path) -> dict | None:
+    p = cancel_path(project_root)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {"stem": None, "unreadable": True}
+
+
+def write_cancel(project_root: str | Path, payload: dict) -> Path:
+    p = cancel_path(project_root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
+    payload.setdefault("ts", _now_iso())
+    p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return p
+
+
+def clear_cancel(project_root: str | Path) -> bool:
+    p = cancel_path(project_root)
     if p.exists():
         p.unlink()
         return True
@@ -714,17 +767,15 @@ def prune_turn_logs(project_root: str | Path, keep: int = KEEP_TURN_LOGS) -> int
 # Process runner
 # ---------------------------------------------------------------------------
 
+def kill_pid_tree(pid: int) -> bool:
+    """Kill a spawned turn's process tree by pid (used by `cancel-turn`)."""
+    return procs.kill_tree(pid)
+
+
 def _kill_tree(proc: subprocess.Popen) -> None:
     """Kill the child and everything it spawned."""
     try:
-        if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=15)
-        else:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        procs.kill_tree(proc.pid)
     except Exception:
         pass
     try:
@@ -1009,6 +1060,7 @@ class RoleSpec:
     provider: str
     executable: str
     argv: list[str]
+    timeout_s: float | None = None   # per-role override (headless.timeout_minutes)
 
 
 class HeadlessEngine:
@@ -1021,8 +1073,10 @@ class HeadlessEngine:
                  confirm: bool = False,
                  log: Callable[[str], None] | None = None,
                  notify: Callable[[str, str], None] | None = None,
-                 skill_path: Path | None = None):
+                 skill_path: Path | None = None,
+                 retries: int = 0):
         self.project_root = str(Path(project_root).resolve())
+        self.retries = max(0, int(retries))
         self.config = config or {}
         self.names = {"lead": lead_name, "reviewer": reviewer_name}
         self.timeout_s = float(timeout_minutes) * 60.0
@@ -1067,7 +1121,9 @@ class HeadlessEngine:
             except HeadlessConfigError as e:
                 errors.append(f"agents.{role}: {e}")
                 continue
-            self.roles[role] = RoleSpec(role, self.names[role], provider, exe, argv)
+            tmo = spec.get("timeout_minutes")
+            self.roles[role] = RoleSpec(role, self.names[role], provider, exe, argv,
+                                        timeout_s=(float(tmo) * 60.0) if tmo else None)
         if not self.skill_path.exists():
             errors.append(f"handoff skill contract not found at {self.skill_path}")
         return errors
@@ -1093,7 +1149,15 @@ class HeadlessEngine:
 
     def run_owed_turn(self, state: dict) -> TurnResult | None:
         """Spawn the owed agent for a ``ready`` state. Returns None if the
-        engine is paused or the role is unknown (already logged)."""
+        engine is paused or the role is unknown (already logged).
+
+        With ``retries > 0`` a failed attempt is re-run only under the
+        deterministic at-least-once rule (Phase 32): outcome in
+        {spawn_failed, nonzero_exit, timeout} AND the repo fingerprint AND
+        the handoff fingerprint are unchanged since before the attempt.
+        ``no_round``/``cancelled``, any handoff transition, any tree change,
+        or an UNSUPPORTED fingerprint → pause immediately.
+        """
         if self.paused():
             self.log_paused(force=True)
             return None
@@ -1103,10 +1167,66 @@ class HeadlessEngine:
             self._log(f"   headless: no adapter for role {role!r}; skipping")
             return None
 
+        from tagteam import fingerprint as fpm
         prune_turn_logs(self.project_root)
         ident = snapshot_identity(self.project_root, state)
+
+        attempts = self.retries + 1
+        result: TurnResult | None = None
+        for attempt in range(attempts):
+            repo_pre = fpm.repo_fingerprint(self.project_root) if self.retries else None
+            handoff_pre = (fpm.handoff_fingerprint(self.project_root, ident.target_phase,
+                                                   ident.target_type)
+                           if self.retries else None)
+            result = self._run_attempt(state, ident, spec, attempt)
+            if result is None:          # confirm declined
+                return None
+            if result.outcome == OUTCOME_OK:
+                return result
+            if attempt + 1 >= attempts:
+                break
+            # --- retry gate -------------------------------------------------
+            retryable = result.outcome in (OUTCOME_SPAWN_FAILED, OUTCOME_NONZERO,
+                                           OUTCOME_TIMEOUT)
+            handoff_post = fpm.handoff_fingerprint(self.project_root, ident.target_phase,
+                                                   ident.target_type)
+            repo_post = fpm.repo_fingerprint(self.project_root)
+            handoff_ok = handoff_post == handoff_pre
+            if repo_pre is None and repo_post is None:
+                repo_ok = result.outcome == OUTCOME_SPAWN_FAILED   # non-git: nothing ran
+                repo_why = "not a git repo"
+            elif fpm.UNSUPPORTED in (repo_pre, repo_post):
+                repo_ok = False
+                repo_why = "repo fingerprint UNSUPPORTED (git failure / unmerged index / parse error)"
+            else:
+                repo_ok = repo_post == repo_pre
+                repo_why = "repo fingerprint unchanged" if repo_ok else "worktree changed"
+            if retryable and handoff_ok and repo_ok:
+                self._log(f"   headless: retry {attempt + 1}/{self.retries} "
+                          f"({result.outcome}; {repo_why}; handoff fingerprint unchanged)")
+                with open(result.log_path, "ab") as f:
+                    f.write((f"[tagteam] retry {attempt + 1}/{self.retries} — "
+                             f"repo + handoff fingerprints unchanged\n").encode())
+                # the failed attempt already wrote its usage row; clear its
+                # pause marker so the retry can proceed
+                clear_pause(self.project_root)
+                continue
+            why = []
+            if not retryable:
+                why.append(f"{result.outcome} is never retried")
+            if not handoff_ok:
+                why.append("handoff state changed (never retry after a transition)")
+            if not repo_ok:
+                why.append(repo_why)
+            self._log(f"   headless: not retrying — {'; '.join(why)}")
+            break
+        return result
+
+    def _run_attempt(self, state: dict, ident: TurnIdentity, spec: RoleSpec,
+                     attempt: int) -> TurnResult | None:
+        role = spec.role
         stem = (f"{ident.phase or 'nophase'}_{ident.type}_r{ident.round}"
-                f"_{role}_{_stamp()}")
+                f"_{role}_{_stamp()}" + (f"_a{attempt + 1}" if attempt else ""))
         d = turns_dir(self.project_root)
         d.mkdir(parents=True, exist_ok=True)
         log_path = d / f"{stem}.log"
@@ -1118,11 +1238,25 @@ class HeadlessEngine:
                 if ident.phase else []
         except Exception:
             tail = []
+        # Arbiter interjections eligible for this turn (Phase 32): the ids
+        # rendered here are exactly the ids stamped as delivered on `ok`.
+        notes: list[dict] = []
+        try:
+            from tagteam import db
+            conn = db.connect(project_dir=self.project_root)
+            try:
+                notes = db.pending_interjections_for(conn, role, ident.target_phase,
+                                                     ident.target_type)
+            finally:
+                conn.close()
+        except Exception as e:
+            self._log(f"   headless: could not read interjections: {e}")
+        note_ids = [n["id"] for n in notes]
         skill_text = self.skill_path.read_text(encoding="utf-8")
         prompt = compose_prompt(role=role, agent_name=spec.agent_name,
                                 project_root=self.project_root, state=state,
                                 skill_text=skill_text, tail_entries=tail,
-                                tail_n=self.tail_n)
+                                tail_n=self.tail_n, interjections=notes)
 
         if self.confirm:
             try:
@@ -1132,36 +1266,48 @@ class HeadlessEngine:
                 return None
 
         started_at = _now_iso()
+        watcher_pid = os.getpid()
         inflight = {
             "phase": ident.phase, "type": ident.type, "round": ident.round,
             "role": role, "agent": spec.agent_name, "provider": spec.provider,
             "stem": stem, "log_path": str(log_path),
             "events_path": str(events_path), "started_at": started_at,
-            "pid": None,
+            "pid": None, "watcher_pid": watcher_pid,
+            "watcher_ident": procs.identity(watcher_pid), "child_ident": None,
+            "attempt": attempt + 1, "interjection_ids": note_ids,
         }
         inflight_file = inflight_path(self.project_root)
         inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
+        # A stale cancel marker from an earlier turn must never apply here.
+        stale = read_cancel(self.project_root)
+        if stale is not None:
+            self._log(f"   headless: removing stale cancel marker for stem "
+                      f"{stale.get('stem')!r}")
+            clear_cancel(self.project_root)
 
         def _on_spawn(pid: int) -> None:
             inflight["pid"] = pid
+            inflight["child_ident"] = procs.identity(pid)
             try:
                 inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
             except OSError:
                 pass
 
         self._log(f"   headless: spawning {spec.provider} for {spec.agent_name} "
-                  f"({role}) — log: {log_path}")
+                  f"({role}) — log: {log_path}"
+                  + (f" [{len(notes)} interjection(s)]" if notes else ""))
 
         # Child env: make sure nested-session guards don't refuse to run.
         env = dict(os.environ)
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
             env.pop(k, None)
 
+        timeout_s = spec.timeout_s or self.timeout_s
         spawn_error: str | None = None
         try:
             out = run_process(spec.argv, prompt, self.project_root,
                               events_path=events_path, log_path=log_path,
-                              provider=spec.provider, timeout_s=self.timeout_s,
+                              provider=spec.provider, timeout_s=timeout_s,
                               on_spawn=_on_spawn, env=env)
         except SpawnError as e:
             spawn_error = str(e)
@@ -1172,13 +1318,27 @@ class HeadlessEngine:
             except OSError:
                 pass
 
+        # Cancel marker (Phase 32): the arbiter's intent wins regardless of
+        # exit code; a marker for another stem is stale and never applied.
+        cancel = read_cancel(self.project_root)
+        cancelled_by = None
+        if cancel is not None:
+            clear_cancel(self.project_root)
+            if cancel.get("stem") == stem:
+                cancelled_by = cancel.get("by") or "arbiter"
+            else:
+                self._log(f"   headless: ignoring stale cancel marker for stem "
+                          f"{cancel.get('stem')!r}")
+
         # Outcome
-        if spawn_error is not None:
+        if cancelled_by is not None:
+            outcome, reason = OUTCOME_CANCELLED, f"cancelled by {cancelled_by}"
+        elif spawn_error is not None:
             outcome, reason = OUTCOME_SPAWN_FAILED, (
                 f"could not start {spec.provider} ({spec.executable}): {spawn_error}")
         elif out.timed_out:
             outcome, reason = OUTCOME_TIMEOUT, (
-                f"turn exceeded {self.timeout_s / 60:.0f} min timeout")
+                f"turn exceeded {timeout_s / 60:.0f} min timeout")
         elif out.exit_code != 0:
             outcome, reason = OUTCOME_NONZERO, f"{spec.provider} exited {out.exit_code}"
         else:
@@ -1192,6 +1352,20 @@ class HeadlessEngine:
             lines = []
         usage = parse_usage(spec.provider, lines)
         row_id = self._record_usage(ident, spec, outcome, out, usage, log_path)
+
+        # Interjection delivery: exactly the rendered ids, only on ok.
+        if outcome == OUTCOME_OK and note_ids:
+            try:
+                from tagteam import db
+                conn = db.connect(project_dir=self.project_root)
+                try:
+                    db.mark_interjections_delivered(conn, note_ids, role=role,
+                                                    round_=ident.target_round,
+                                                    stem=stem, ts=_now_iso())
+                finally:
+                    conn.close()
+            except Exception as e:
+                self._log(f"   headless: could not stamp interjection delivery: {e}")
 
         with open(log_path, "ab") as f:
             f.write(f"[tagteam] outcome {outcome}: {reason}\n".encode("utf-8", "replace"))
@@ -1251,10 +1425,12 @@ class HeadlessEngine:
             "duration_ms": result.duration_ms, "log_path": result.log_path,
             "events_path": result.events_path, "ts": _now_iso(),
         }
+        kind = ("headless_turn_cancelled" if result.outcome == OUTCOME_CANCELLED
+                else "headless_turn_failed")
         try:
             conn = db.connect(project_dir=self.project_root)
             try:
-                db.add_diagnostic(conn, "headless_turn_failed", payload, payload["ts"])
+                db.add_diagnostic(conn, kind, payload, payload["ts"])
                 conn.commit()
             finally:
                 conn.close()

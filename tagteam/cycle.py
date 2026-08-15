@@ -1090,7 +1090,44 @@ def tail_rounds(phase: str, cycle_type: str, n: int | None = None,
         entries = read_rounds(phase, cycle_type, project_dir)
     if not entries:
         return []
-    return entries[-n:] if n is not None else list(entries)
+    entries = list(entries)
+    _attach_interjections(entries, phase, cycle_type, project_dir)
+    return entries[-n:] if n is not None else entries
+
+
+def _attach_interjections(entries: list[dict], phase: str, cycle_type: str,
+                          project_dir: str) -> None:
+    """Phase 32: add an additive `interjections` list to each round dict
+    (arbiter notes written while that round was current). Best-effort —
+    never raises; entries without a DB get empty lists."""
+    for e in entries:
+        e.setdefault("interjections", [])
+    try:
+        from tagteam import db
+        conn = db.connect(project_dir=_resolve(project_dir))
+        try:
+            rows = db.get_interjections(conn, phase=phase, cycle_type=cycle_type)
+        finally:
+            conn.close()
+    except Exception:
+        return
+    if not rows:
+        return
+    by_round: dict[int, list[dict]] = {}
+    for r in rows:
+        by_round.setdefault(int(r.get("round") or 0), []).append({
+            "id": r["id"], "ts": r["ts"], "by": r["by"], "note": r["note"],
+            "target_role": r["target_role"], "delivered_role": r["delivered_role"],
+            "delivered_round": r["delivered_round"], "delivered_stem": r["delivered_stem"],
+            "retired_ts": r["retired_ts"],
+        })
+    for e in entries:
+        try:
+            rn = int(e.get("round") or 0)
+        except (TypeError, ValueError):
+            continue
+        if rn in by_round:
+            e["interjections"] = by_round[rn]
 
 
 def _cli_rounds(args: list[str]) -> int:
@@ -1124,6 +1161,43 @@ def _cli_rounds(args: list[str]) -> int:
     return 1
 
 
+def _with_interjections(md: str, phase: str, cycle_type: str,
+                        project_dir: str = ".") -> str:
+    """Phase 32: insert an 'Arbiter interjections' line under each
+    `## Round N` heading that has notes. No-op when there are none (keeps
+    the parity corpus byte-identical)."""
+    try:
+        from tagteam import db
+        conn = db.connect(project_dir=_resolve(project_dir))
+        try:
+            rows = db.get_interjections(conn, phase=phase, cycle_type=cycle_type)
+        finally:
+            conn.close()
+    except Exception:
+        return md
+    if not rows:
+        return md
+    by_round: dict[int, list[dict]] = {}
+    for r in rows:
+        by_round.setdefault(int(r.get("round") or 0), []).append(r)
+    out_lines = []
+    for line in md.splitlines():
+        out_lines.append(line)
+        if line.startswith("## Round "):
+            try:
+                rn = int(line[len("## Round "):].strip())
+            except ValueError:
+                continue
+            for r in by_round.get(rn, []):
+                status = ("retired" if r["retired_ts"] else
+                          f"delivered → {r['delivered_role']} r{r['delivered_round']}"
+                          if r["delivered_ts"] else "pending")
+                out_lines.append("")
+                out_lines.append(f"**Arbiter interjection #{r['id']}** ({r['by']}, "
+                                 f"→ {r['target_role'] or 'next turn'}, {status}): {r['note']}")
+    return "\n".join(out_lines)
+
+
 def _cli_render(args: list[str]) -> int:
     allowed = {"--phase", "--type"}
     parsed = _parse_args(args, allowed)
@@ -1137,7 +1211,7 @@ def _cli_render(args: list[str]) -> int:
     # Try JSONL render first
     md = render_cycle(phase, cycle_type)
     if md is not None:
-        print(md)
+        print(_with_interjections(md, phase, cycle_type))
         return 0
 
     # Fall back to legacy markdown — just cat the file

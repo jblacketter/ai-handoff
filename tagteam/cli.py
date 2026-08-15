@@ -336,6 +336,12 @@ Commands:
   watch         Start the watcher daemon for automated orchestration
                 (--mode headless spawns each turn as a fresh agent process)
   tail          Follow the in-flight headless turn log (or show the last one)
+  pause         Hold dispatch in every watcher mode (marker file)
+  resume        Clear the pause; the watcher re-dispatches the owed turn once
+  cancel-turn   Kill the in-flight headless turn (recorded as 'cancelled', then paused)
+  interject     Leave an arbiter note for the next turn (--to lead|reviewer, --list, --retire)
+  usage         Per-turn token usage for this project (by role / cycle / totals, --json)
+  rollback      Print (or with --yes run) the revert recipe for a given version
   state         View or update the orchestration state file
   roadmap       Query roadmap phases and build execution queue
   cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
@@ -356,6 +362,11 @@ Manual workflow fallback:
 Headless mode (opt-in; no terminals to drive, works on Windows):
   tagteam watch --mode headless
   tagteam tail
+
+Arbiter controls (any mode):
+  tagteam pause --reason "reviewing by hand"    tagteam resume
+  tagteam interject "prefer the smaller diff"   tagteam cancel-turn
+  tagteam usage
 """
 
 
@@ -386,6 +397,30 @@ def main() -> int:
         from tagteam.headless import tail_command
 
         return tail_command(sys.argv[2:])
+    if command == "pause":
+        from tagteam.controls import pause_command
+
+        return pause_command(sys.argv[2:])
+    if command == "resume":
+        from tagteam.controls import resume_command
+
+        return resume_command(sys.argv[2:])
+    if command == "cancel-turn":
+        from tagteam.controls import cancel_turn_command
+
+        return cancel_turn_command(sys.argv[2:])
+    if command == "interject":
+        from tagteam.controls import interject_command
+
+        return interject_command(sys.argv[2:])
+    if command == "usage":
+        from tagteam.usage import usage_command
+
+        return usage_command(sys.argv[2:])
+    if command == "rollback":
+        from tagteam.controls import rollback_command
+
+        return rollback_command(sys.argv[2:])
     if command == "roadmap":
         from tagteam.roadmap import roadmap_command
 
