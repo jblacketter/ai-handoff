@@ -303,7 +303,44 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Origin:** Phase 29 followup discovered while wiring up the live two-agent loop on this repo.
 - **Phase Plan:** `docs/phases/polish-pack-watcher-tokens-adopt.md` (Sub-phase C)
 
+### Phase 31: Headless Turn Engine (3.0 arc)
+- **Status:** Not started
+- **Description:** Opt-in `tagteam watch --mode headless`: on turn flip, the orchestrator spawns the owed agent via its signed-in CLI (`claude -p` / `codex exec`) with a bounded context (skill contract + state + round tail), captures output, writes the round, and records per-turn token usage. Includes `cycle rounds --tail N`, `tagteam tail`, and failure handling (timeout/pause/notify). Windows headless support is an acceptance criterion; flag-off behavior must be identical to 0.7.x.
+- **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 31
+
+### Phase 32: Orchestration Controls & Usage Surfacing (3.0 arc)
+- **Status:** Not started
+- **Description:** `tagteam pause`/`resume`/`cancel-turn`, `tagteam interject` (arbiter note injected into next turn + recorded in round log), `tagteam usage` (tokens by role/phase/cycle/project), Windows notification path, optional `tagteam rollback`.
+- **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 32
+
+### Phase 33: Escalation Briefer (3.0 arc)
+- **Status:** Not started
+- **Description:** On `ESCALATE`/`NEED_HUMAN`, spawn one headless turn that writes the arbiter a decision brief (both positions, actual dispute, recommendation). Fires only on escalation; opt-out via config.
+- **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 33
+
+### Phase 34: Arbiter Cockpit (3.0 arc)
+- **Status:** Not started
+- **Description:** Dashboard redesigned around arbitration and monitoring: SSE live round feed, open-threads/blockers panel, submission diff view, escalation inbox with in-browser rulings, and token-usage panels (burn by role/phase/process + subscription-window gauge). Saloon becomes an optional theme. Hand-rolled server stays.
+- **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 34
+
+### Phase 35: Cross-Project Hub (3.0 arc)
+- **Status:** Not started
+- **Description:** `tagteam hub` — one surface over every registered project: waiting turns, pending escalations, stale cycles, aggregate token burn against the shared subscription pool.
+- **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 35
+
+### Phase 36: Visual Story & Portfolio Feed (3.0 arc)
+- **Status:** Not started
+- **Description:** README restructured around a visual narrative (mermaid flowcharts of the planning/review processes and 3.0 architecture), standalone SVG diagram exports in `docs/media/` shaped for the portfolio site's featured-app pages, and an outside-reader `docs/showcase.md` with real soak numbers. Portfolio repo itself is out of scope.
+- **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 36
+
 ## Backlog
+
+### 3.0 candidate later phases (unscheduled)
+- **Status:** Not started — deliberately kept out of the 3.0 arc to protect focus; see `docs/tagteam-3.0-proposal.md` §4 "Candidate later phases"
+- Gatekeeper pre-checks (deterministic-first: tests + scope-diff before reviewer sees a submission)
+- Reviewer panels (2–3 lenses merged into one `REQUEST_CHANGES`; opt-in per phase)
+- Roadmap as DAG (`depends_on`, parallel phases in worktrees)
+- Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
 ### Terminal.app backend (macOS, optional)
 - **Status:** Not started
