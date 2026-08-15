@@ -149,11 +149,14 @@ sum.
        headless:
          provider: claude              # claude | codex (default: inferred, see Adapters)
          executable: /opt/bin/claude   # optional; default shutil.which(provider)
-         args: ["--model", "opus"]     # YAML list, inserted verbatim (no tokenizing)
+         args: ["--model", "opus"]     # YAML list; validated against the adapter option table
    ```
-   `validate_config` checks types, rejects unknown providers, rejects
-   reserved flags in `args`, and requires `args` to be a list of strings
-   (a string is an error — no shell tokenization anywhere).
+   `validate_config` checks types, rejects unknown providers, and requires
+   `args` to be a list of strings (a string is an error — no shell
+   tokenization anywhere); `headless.build_argv()` then validates the
+   list structurally against the adapter's option table (positional
+   text, `-`, `--`, and reserved options in any spelling are startup
+   errors — see "Adapters and argv ownership").
 7. **Windows acceptance path**: a new `.github/workflows/tests.yml`
    running pytest on `ubuntu-latest` and `windows-latest` (there is no
    test CI today — only `publish.yml`). The headless tests drive a
@@ -203,7 +206,7 @@ sum.
 - Any dashboard/server change (`server.py`, `tagteam/data/web/`) —
   Phase 34. Usage is recorded, not shown.
 - Trimmed/"headless-variant" skill contract — v1 sends the full SKILL.md;
-  measurement during soak decides (see Open Questions).
+  measurement during soak decides (Decisions §5).
 - Resuming prior CLI sessions (`claude --resume`, `codex resume`) —
   fresh spawn every turn; `session_id` is recorded so this can be
   trialed later without a schema change.
@@ -222,16 +225,20 @@ The composed prompt tells the spawned agent to follow the SKILL.md
 contract exactly as an interactive agent would — i.e. it makes the
 `tagteam cycle add` / `cycle init` call itself. The orchestrator does
 **not** parse agent prose into a round. Reasons: (a) the SKILL.md contract
-stays the single source of truth for both modes; (b) no second, brittle
+is the single source of truth for both modes; (b) no second, brittle
 output-format contract to design and version; (c) the agent needs Bash
 anyway (it edits files, runs tests, calls the CLI), so requiring it to
 write the round adds no permission surface; (d) failure detection is
-trivial and exact — did `seq` advance and the turn flip, or not?
+exact — the cycle store either contains the expected transition by the
+owed role at the expected round (or the expected new cycle for a `start`
+command) or it does not (see "Outcome verification").
 
-The orchestrator's job per turn is therefore: compose → spawn → stream →
-wait/timeout → verify state advanced → record usage → (dispatch next tick
-| pause). Agent stdout is captured for `tagteam tail` and post-mortems,
-and parsed only for the trailing usage record.
+The orchestrator's job per turn is therefore: compose → spawn → stream
+structured events → wait/timeout → verify the expected transition →
+record usage → (dispatch next tick | pause). Agent stdout is a stream of
+structured events consumed as it arrives: rendered into the human log for
+`tagteam tail` and post-mortems, and mined for the usage record (model,
+session id, final token counts) — never for round content.
 
 ### Adapters and argv ownership (proposal Open Question 2)
 
@@ -252,7 +259,7 @@ class Adapter:
 |---|---|---|
 | provider | `agents.<role>.headless.provider` if set; else inferred from the basename of the first whitespace token of `agents.<role>.command` (`claude*` → claude, `codex*` → codex); else from `agents.<role>.name` lowercased | Inference is **only** for picking the adapter; the interactive `command` string is never executed or tokenized for headless. Unknown/uninferable provider → startup error. |
 | argv[0] | `agents.<role>.headless.executable` if set (a single path/name string, resolved with `shutil.which`); else `shutil.which(provider)` | Windows resolves `claude.cmd`/`codex.cmd` via PATHEXT the same way. Not found → startup error. |
-| argv[1:] | `adapter.canonical + effective_defaults + headless.args` | `headless.args` must be a YAML **list** of strings, inserted verbatim. Reserved flags in it → startup error. `effective_defaults` = `adapter.defaults` minus any flag family the user set via `overridable`. |
+| argv[1:] | `adapter.canonical_head + effective_defaults + validated(headless.args) + adapter.canonical_tail` | Built by `build_argv()` (rules below). `headless.args` must be a YAML **list** of strings and is validated **structurally**, not by token membership. `effective_defaults` = `adapter.defaults` minus any flag family the user set via `overridable`. The prompt-source marker (codex `-`) is always the final token; nothing user-supplied can follow it. |
 | cwd / stdin | always project root / always the composed prompt | Not configurable. |
 
 Final argv (subject to the step-0 probe):
@@ -278,6 +285,46 @@ Final argv (subject to the step-0 probe):
   --dangerously-bypass-approvals-and-sandbox --model -m`. Stdout is JSONL
   events; the parser renders agent messages / command events as log lines
   and takes usage from the terminal turn/usage event.
+
+**`build_argv()` validation of `headless.args` (reviewer round 2, point 1).**
+The threat is not just a reserved flag but any user token that the CLI
+would read as a *prompt* or an option terminator, silently displacing the
+stdin prompt. So user args are parsed, not scanned:
+
+- Each adapter carries an **option table**: `{flag_name: arity}` for the
+  options it knows (`--model`: 1, `--permission-mode`: 1, `--allowedTools`:
+  variadic-until-next-flag, `--dangerously-skip-permissions`: 0, `-s`/
+  `--sandbox`: 1, `-c`: 1, `--approve-for-me`: 0, …). Every token in
+  `headless.args` must be consumed as an option from that table (with its
+  value tokens) — the parser walks the list left to right and any token
+  that is not a known option, or is a value where an option was expected,
+  is a **startup error naming the token**. Unknown-but-harmless flags are
+  therefore rejected too; the table is the allowlist and users extend it
+  by editing config *and* the plan for a new adapter entry, not by
+  passing raw strings.
+- Consequently rejected: bare text (`"fix the tests"`), `-`, `--`, any
+  positional; reserved options in **every spelling** — `--output-format
+  json`, `--output-format=json`, `-C dir`, `-Cdir`, `--cd=dir`,
+  `--print`, `-p`; and value tokens that themselves look like a
+  terminator or marker (`--model --`, `--model -`).
+- Reserved-family membership is checked on the **normalized option name**
+  (split `--flag=value` at the first `=`, expand `-Cdir` to `-C dir` for
+  short options with attached values), so `--output-format=stream-json`
+  and `--output-format` are the same family.
+- Ordering: `canonical_head` (mode/output flags, `-C <root>` for codex)
+  first, then effective defaults, then validated user args, then
+  `canonical_tail` (codex: `--skip-git-repo-check -`; claude: nothing —
+  the prompt is stdin with `-p` and no positional). Because
+  `canonical_tail` is appended after user args, an accepted user option
+  can never leave a dangling value that swallows the marker (the parser
+  guarantees arity is satisfied) and can never introduce a positional.
+- Tests (both adapters): each of the rejected forms above → startup error
+  with the offending token; accepted forms (`--model X`,
+  `--permission-mode bypassPermissions`, `--allowedTools A B`, `-c
+  approval_policy=untrusted`) land in the expected position with the
+  overridden default dropped; the last argv token for codex is always `-`
+  and the composed prompt is what the fake agent receives on stdin in
+  every accepted case.
 
 **Step 0 of implementation is a probe**: run each CLI once with a trivial
 prompt using the argv above, save the actual streamed stdout as
@@ -378,23 +425,44 @@ runtime data, not cycle history).
 Before spawning, the runner snapshots the **owed turn identity**:
 `(phase, type, round, role, state.seq, command)` plus the cycle's
 `(state, ready_for, round)` from `cycle status`, and the count of round
-entries in that cycle. After the child exits, the outcome is `ok` **iff
-all** hold:
+entries in that cycle. It then derives the **verification target** —
+where the expected transition must appear — because for `start` commands
+the target is *not* the pre-spawn cycle (reviewer round 2, point 2):
+
+- **Ordinary turn** (command is the standard "act on your turn" text):
+  target = the pre-spawn `(phase, type)`, expected round = the owed round.
+- **Start command**: the command is parsed by a narrow validator,
+  `parse_start_command(cmd) -> (phase, "plan"|"impl") | None`, accepting
+  exactly `/handoff start <slug>` and `/handoff start <slug> impl` where
+  `<slug>` matches `^[a-z0-9][a-z0-9-]*$` (the roadmap slug alphabet) —
+  nothing else (no `--roadmap`, no extra tokens, no other verbs). Target =
+  `(<slug>, plan|impl)`, expected round = 1, expected role = lead. This
+  covers both cases the pre-spawn identity gets wrong: `/handoff start
+  <next-phase>` runs while state still names the completed previous phase,
+  and `/handoff start <phase> impl` runs while `state.type` is `plan`.
+- **Anything else** (malformed or arbitrary command text) is **not** a
+  cycle-init transition: it is verified as an ordinary turn against the
+  pre-spawn identity, so a spawned agent that "helpfully" inits a cycle
+  under an unrecognized command lands as `no_round`.
+
+The target is used *only* for expected-transition verification; the
+composed prompt still passes `state.command` through verbatim. After the
+child exits, the outcome is `ok` **iff all** hold:
 
 1. exit code 0;
 2. the *expected transition* happened in the cycle store for the same
    `(phase, type)`:
    - owed role `lead`, ordinary turn → a new round entry with
      `role == lead` at `round == expected` (SUBMIT_FOR_REVIEW), so the
-     cycle is now `ready_for: reviewer` — or, when the command was
-     `/handoff start <phase>` / `… impl`, a **new cycle** for that
-     `(phase, type)` exists at round 1 with a lead entry;
+     cycle is now `ready_for: reviewer` — or, for a parsed start command,
+     a **new cycle** for the *target* `(phase, type)` exists (absent
+     pre-spawn) at round 1 with a lead entry and `ready_for: reviewer`;
    - owed role `reviewer` → a new reviewer entry at `round == expected`
      with one of APPROVE / REQUEST_CHANGES / ESCALATE / NEED_HUMAN, and
      the cycle state changed accordingly;
-3. `state.phase/type` still identify that cycle (or, for `start`
-   commands, the newly created one), and `state.updated_by` is the owed
-   agent's name.
+3. `state.phase/type/round` identify the target cycle and round (for
+   start commands, the newly created one), and `state.updated_by` is the
+   owed agent's name.
 
 Everything else is `no_round` (exit 0 but the expected transition is
 absent), `nonzero_exit`, or `timeout` — including: seq advanced by an
@@ -447,7 +515,7 @@ The headless path touches nothing platform-specific except process-tree
 kill and notification (already a no-op off macOS). `shutil.which` handles
 `claude.cmd`/`codex.cmd` via PATHEXT. The `windows-latest` CI job is the
 verification mechanism; a manual smoke on a real Windows box is
-desirable but not gating (see Open Questions).
+desirable but not gating (Decisions §2).
 
 ### Implementation order (each step lands green before the next)
 
@@ -475,7 +543,7 @@ desirable but not gating (see Open Questions).
 
 ## Files to Create/Modify
 
-- `tagteam/headless.py` — **new**: adapter table + argv resolution, prompt composer (incl. boundary clause), two-stream turn runner, outcome verification, pause marker, `tail_command`.
+- `tagteam/headless.py` — **new**: adapter table + `build_argv()` structural validation, `parse_start_command()`, prompt composer (incl. boundary clause), two-stream turn runner, outcome verification with start-command targets, pause marker, `tail_command`.
 - `tagteam/db.py` — `SCHEMA_VERSION = 3`, `_SCHEMA_V3` usage table, `add_usage`, `get_usage`.
 - `tagteam/cycle.py` — `--tail N` in `_cli_rounds`; `tail_rounds(phase, type, n)` helper.
 - `tagteam/watcher.py` — `headless` mode string, new flags, headless branch in `_handle_ready`, resend short-circuit, startup validation, done/escalated behavior in headless, help text.
@@ -501,10 +569,12 @@ desirable but not gating (see Open Questions).
 - [ ] **Flag-off behavior unchanged** (reviewer point 5 wording): for every existing invocation and config — `tagteam watch` with no `--mode`, or with `notify|tmux|iterm2`, existing `tagteam.yaml` files with no `headless` block — runtime behavior is unchanged from 0.7.1 (dispatch, sends, notifications, state writes, files touched). Concretely: `tests/test_watcher.py`, `test_watcher_events.py`, `test_watcher_auto_detect.py`, `test_config.py` pass **without modification**; `_auto_detect_mode` has a test asserting it never returns `headless`. Help text and `--help` output intentionally change and are excluded from this claim.
 - [ ] `tagteam watch --mode headless` spawns the owed agent on a `ready` state via the resolved adapter argv (provider/executable/args rules above), with the composed prompt on stdin, cwd = project root, stdout → `<stem>.events.jsonl`, stdout-rendered + `[stderr]` lines → `<stem>.log`, while `.tagteam/turns/inflight.json` exists (fake-agent tests, both flavors).
 - [ ] **Incremental capture**: with a fake agent that emits events with sleeps between them, `<stem>.log` and `<stem>.events.jsonl` grow *before* the process exits (asserted mid-run), and a stderr line emitted by the fake never appears in `<stem>.events.jsonl` nor breaks usage parsing.
-- [ ] Argv ownership: provider inference (`headless.provider` > interactive `command` basename > name), `headless.executable` override, `headless.args` list appended verbatim, reserved flags rejected at startup with a message, overridable defaults dropped when the user supplies the family — each unit-tested for both adapters. `headless.args` given as a string is a config error.
+- [ ] Argv ownership: provider inference (`headless.provider` > interactive `command` basename > name), `headless.executable` override, `headless.args` list validated structurally against the adapter option table (see `build_argv()`), reserved families rejected in every spelling, overridable defaults dropped when the user supplies the family — each unit-tested for both adapters. `headless.args` given as a string is a config error.
 - [ ] After a turn where the fake agent performs the expected transition (`cycle add` by the owed role at the owed round, or `cycle init` for a `start` command), the orchestrator records `usage.status = ok` with parsed token fields, and the next tick dispatches the *other* role.
 - [ ] Verification rejects look-alikes: an unrelated `seq` advance, a round for the wrong phase/type, a round at the wrong number, an AMEND where SUBMIT was owed, and a turn flip with no matching cycle entry each land as `no_round` + pause (fake-agent tests), never `ok`.
 - [ ] Composer adds the implement-first boundary clause exactly when the command is `/handoff start <phase> impl`; a fake lead turn on that command that creates the impl cycle at round 1 is `ok`, and one that leaves state unchanged is `no_round`.
+- [ ] Start-command targets: `parse_start_command` accepts exactly `/handoff start <slug>` and `/handoff start <slug> impl` (slug alphabet enforced) and rejects everything else; a cross-phase plan start (state still on the completed previous phase, fake lead inits `<next>_plan` r1) and a plan→impl start (state.type `plan`, fake lead inits `<phase>_impl` r1) both verify `ok`; a fake lead that inits a cycle under a malformed/arbitrary command lands as `no_round`.
+- [ ] `build_argv()` structural validation: bare text, `-`, `--`, `--output-format=json`, `--output-format json`, `-C dir`, `-Cdir`, `--cd=dir`, `--print`, `-p`, and a dangling value (`--model --`) in `headless.args` each fail at startup naming the token, for both adapters; accepted options land in position with the overridden default dropped; codex argv always ends with `-`; the fake agent receives the composed prompt on stdin in every accepted case.
 - [ ] Each of timeout / nonzero exit / no_round produces: a usage row with the matching status, a `diagnostics` row (`headless_turn_failed`), `.tagteam/headless-paused.json` naming the specific mismatch, and no further dispatch on subsequent ticks or on restart until the marker is removed. No retry is attempted. Timeout kills the whole child process tree (verified on POSIX and Windows CI by a fake agent that spawns a grandchild).
 - [ ] The watchdog re-send path never fires in headless mode (unit test on `_StateProcessor.tick`).
 - [ ] Ctrl-C during an in-flight turn terminates the child and removes `inflight.json`.
@@ -555,7 +625,8 @@ desirable but not gating (see Open Questions).
 
 ## Risks
 
-- **CLI output format drift (`claude -p` JSON / `codex exec` JSONL).**
+- **CLI event-stream drift (`claude -p --output-format stream-json` /
+  `codex exec --json` JSONL).**
   Mitigation: parsers written against captured fixtures; usage parse
   failure never fails a turn (null row + diagnostic); adapter table
   isolates the change to one function per provider.
