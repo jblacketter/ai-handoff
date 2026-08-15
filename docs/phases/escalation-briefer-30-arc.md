@@ -86,7 +86,7 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
      31–32, `usage` and `interjections`. This phase makes repair **preserve
      non-file-backed tables**: before removing the DB it snapshots `usage`,
      `interjections`, `briefs` rows (via `ATTACH`/row copy into a temp
-     file), rebuilds, then re-inserts them verbatim (ids preserved; the
+     file), rebuilds, then re-inserts them unchanged (ids preserved; the
      tables have no FKs into `rounds`, and `briefs` links by `event_key`, so
      nothing dangles). While the `db_invalid` sentinel is set, claim
      uniqueness cannot be trusted: `_maybe_brief` and `--generate` **do not
@@ -143,7 +143,7 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    `get_briefer_spec(config)`; the existing fatal `validate_config()` (agents
    block) is unchanged, so `agents.*` errors still block startup in every
    mode exactly as in 0.9.0 and briefer errors never do. Tests cover: absent
-   block (enabled, lead provider), invalid block (warn + disabled), unknown
+   block (disabled — 0.9.0 behavior), invalid block (warn + disabled), unknown
    provider (warn + disabled), missing executable (warn + disabled),
    `enabled: false`, and the pre-0.10 flag-off compatibility case (a
    0.9.0-era `tagteam.yaml` with no block escalates exactly as before —
@@ -152,27 +152,36 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    *measured during soak* via `briefer.args` — no decision baked in.
 3. **Composed context** (bounded by policy, reviewer r2): a role banner
    ("you are the escalation briefer, not a participant; you do not write
-   rounds"), the **escalation entry in full**, the cycle's round history
+   rounds"), the **escalation entry (bounded — see policy below)**, the cycle's round history
    from the grouped view (`tail_rounds(...)`, every round, including the
    additive `entries` list so nothing is hidden — Scope 7), the plan doc
    `docs/phases/<phase>.md` when present, pending interjections for the
    cycle, and the state. **Prompt-size policy** — deterministic
    per-component budgets with a hard total (reviewer r3; there is no cap on
    cycle rounds, `STALE_ROUND_LIMIT` only bounds *stale* repeats): total
-   ≤ 60 000 chars. Budgets: escalation entry ≤ 8 000 (head 6 000 + tail
-   2 000 with an `[… N chars elided …]` marker when longer — it is the
-   *last* component reduced and never below that head+tail); newest 6
-   entries ≤ 4 000 each (head+tail); older entries `role/action/ts/
-   updated_by` + first 400 chars; plan doc ≤ 20 000 (head); interjections
-   ≤ 4 000 total; state ≤ 4 000; skill/role banner fixed. If the sum still
-   exceeds 60 000 the reducer trims in fixed order — older entries to header
-   lines (oldest first) → plan doc → interjections → newest entries → the
-   escalation entry — and every reduction is announced in the prompt
-   ("N older entries abbreviated / plan truncated — read `tagteam cycle
-   rounds …` / the file for the full text"). Tests: an oversized escalation
-   entry, an oversized plan doc, oversized interjections, and a 40-round
-   ordinary cycle each produce a prompt ≤ 60 000 chars with the expected
-   markers, and the escalation entry's head and tail are always present. The prompt names the exact output path and the
+   ≤ 60 000 chars, **measured on the complete serialized prompt** (banner,
+   headings, notices, separators, markers included). Per-component budgets
+   are **inclusive of their own markers/separators**: escalation entry
+   ≤ 8 000 (when longer: head 5 800 + `[… N chars elided …]` marker + tail
+   2 000, all inside 8 000 — reduced *last*, and its minimum evidence is a
+   1 000-char head + 500-char tail + marker); newest 6 entries ≤ 4 000 each
+   (same head/marker/tail shape); older entries: header line + first 400
+   chars; plan doc ≤ 20 000 (head + marker); interjections ≤ 4 000 total;
+   state ≤ 4 000; banner + headings ≤ 3 000 fixed. Reduction order when the
+   measured total exceeds 60 000: older entries → header lines (oldest
+   first) → plan doc → interjections → newest entries → escalation entry
+   (down to its minimum). If the total is *still* over 60 000 (pathological
+   framing), a **final deterministic clamp** truncates the serialized prompt
+   from the end while preserving the escalation-entry minimum, the output
+   path block and the required-headings block (which are placed before the
+   history for exactly this reason). Every reduction is announced in the
+   prompt ("N older entries abbreviated / plan truncated — read `tagteam
+   cycle rounds …` / the file for the full text"). Tests: an oversized
+   escalation entry, an oversized plan doc, oversized interjections, a
+   40-round ordinary cycle, and a **boundary case whose component maxima
+   plus framing sum above 60 000** each produce a prompt ≤ 60 000 chars with
+   the expected markers, escalation head+tail present, and the path/headings
+   blocks intact. The prompt names the exact output path and the
    required section headings, and forbids any `tagteam cycle add`/`init`/
    `state set`.
 4. **Output contract.** The briefer writes markdown to a path that is
@@ -180,7 +189,7 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    `docs/escalations/<phase>_<type>_r<N>_<eventstamp>-a<attempt>.md`, where
    `<eventstamp>` is the triggering entry's `ts` compacted to
    `YYYYMMDDTHHMMSSffffff` and `<attempt>` counts rows for *that event*
-   (auto is `a1`; manual attempts continue `a2, a3, …`). Same-round
+   (`attempt = 1 + max(attempt)` over all rows of that event, both kinds, allocated atomically inside the shared claim transaction; the automatic attempt is `a1` only when it is the first claimant — after a failed manual `a1` the automatic attempt is `a2`). Same-round
    re-escalation therefore yields distinct files; nothing is ever
    overwritten. A human-friendly alias `docs/escalations/<phase>_<type>_
    latest.md` is rewritten to the newest ok/partial brief's content after
@@ -205,20 +214,33 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
 5. **Storage (schema v5, additive):** table `briefs` — the row is the
    **claim** as well as the record: inserted `running` before the spawn,
    updated to `ok | partial | failed | abandoned` after; `kind = auto |
-   manual`; `event_id` (triggering `rounds.id`); partial unique indexes
-   `(event_id) WHERE kind = 'auto'` and `(event_id) WHERE status =
+   manual`; `event_key` (repair-safe canonical key, Scope 1) + informational `event_row_id`; partial unique indexes
+   `(event_key) WHERE kind = 'auto'` and `(event_key) WHERE status =
    'running'`; plus `started_at`, `watcher_pid`, `watcher_ident`, `stem`,
    `attempt` for recovery. The file is the human-facing artifact; the row is
    what the cockpit (Phase 34) reads. `usage` row with `role = "briefer"` per
    spawn (usage status vocabulary unchanged; the *brief* status lives in
    `briefs`; mapping: usage ok→brief ok/partial by verification, usage
    timeout/nonzero_exit/spawn_failed/no_round→brief failed).
-6. **`tagteam brief [--phase P --type T] [--list] [--json] [--generate]`** —
-   prints the **latest** brief for the current (or given) cycle = the
-   highest-id row with status `ok` or `partial` for that cycle (any kind); if
-   only failed/abandoned/running rows exist it says so and points at
-   `--generate`; `--list` shows every row (kind, status, path, ts); `--json`
-   for scripts; exit 1 when none. **`--generate`** = a *forced manual
+6. **`tagteam brief [--phase P --type T] [--list] [--json] [--generate]
+   [--event KEY]`** — scoped to the **current escalation event** (reviewer
+   r4): it computes the cycle's current `event_key` (Scope 1) and prints
+   the highest-id `ok`/`partial` row **for that event** (any kind); if the
+   current event has only running/failed/abandoned rows — or none — it
+   reports exactly that state (with a `--generate` hint) and **never falls
+   back to an older event's brief**; when the cycle is not escalated it
+   says so and exits 1. Older events stay reachable via `--list` (every row
+   for the cycle, newest first, with event key, kind, attempt, status, path)
+   and `--event KEY` (explicit selector). `--json` for scripts. The
+   `_latest.md` alias is rewritten only on a **successful** attempt; when a
+   new event opens without a successful brief the alias is replaced by a
+   stub saying "no brief yet for the current event <key>; previous brief:
+   <path>" so it can never masquerade as current. `rule` records in its
+   `arbiter_ruling` diagnostic only a brief id belonging to the current
+   event (or none). Tests: success(A) → re-arm → same-round event B with
+   failed / running / success — `brief` shows B's state, never A;
+   `_latest.md` stub on B open; `rule` diagnostic never links A while B is
+   current. **`--generate`** = a *forced manual
    attempt* using the **same claim transaction** as the watcher (symmetric
    rule): it inserts a `kind = manual`, `status = running` row for the
    current event — refused by the `running` unique index while any attempt
@@ -232,7 +254,7 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    the automatic attempt may still run once; auto claimed first → `--generate`
    refuses until it finishes; watcher restart after manual success → none,
    after manual failure → one automatic attempt. Path: `docs/escalations/
-   <phase>_<type>_r<N>-<attempt>.md` (`attempt` = 1 + prior rows for the
+   <phase>_<type>_r<N>_<eventstamp>-a<attempt>.md` (`attempt` = 1 + max(attempt) for the
    event) — never overwrites (see Scope 4 for the exact per-event path).
    Failed automatic attempts are never auto-retried; `--generate` is the
    retry path. `tagteam brief`, `--list`, notifications and `rule`
@@ -361,7 +383,7 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
   runs once; auto first → `--generate` refuses), **grouped rounds** (`entries`
   / `rulings` after approve, request-changes, answer→re-NEED_HUMAN, in CLI
   output and in the composed prompt), **prompt-size policy** (escalation
-  entry verbatim; 40-round synthetic cycle fits under 60 000 chars with an
+  entry head+tail always present; oversized entry/plan/interjections and a framing-boundary case each fit under 60 000 chars with
   abbreviation note), watcher integration (escalated state → briefer called
   once; first-poll bootstrap; notify text includes path). `tests/test_db.py`
   v5 migration + both unique indexes.
@@ -376,7 +398,7 @@ CREATE TABLE IF NOT EXISTS briefs (
     event_key    TEXT NOT NULL,           -- "<phase>|<type>|<round>|<role>|<action>|<ts>" of the triggering entry (repair-safe)
     event_row_id INTEGER,                 -- rounds.id at claim time (informational; not preserved by reimport)
     kind         TEXT NOT NULL,           -- auto | manual
-    attempt      INTEGER NOT NULL,        -- 1 for auto; 1+prior for manual
+    attempt      INTEGER NOT NULL,        -- 1 + max(attempt) over the event's rows (both kinds), allocated in the claim transaction
     status       TEXT NOT NULL,           -- running | ok | partial | failed | abandoned
     started_at   TEXT, finished_at TEXT,
     watcher_pid  INTEGER, watcher_ident TEXT, stem TEXT,
@@ -412,8 +434,8 @@ headings), `brief_nofile`; it parses the output path from the prompt's
 ## Success Criteria
 
 - [ ] A cycle entering `escalated` or `needs-human` causes **at most one
-  automatic** briefer spawn per escalation event (`event_id` = triggering
-  `rounds.id`) and at most one *running* attempt per event across kinds,
+  automatic** briefer spawn per escalation event (`event_key` = canonical key of the triggering
+  entry) and at most one *running* attempt per event across kinds,
   guaranteed by the pre-spawn claim row + the two partial unique indexes +
   the prior-success rule: a re-tick, a watcher restart on an unbriefed
   escalation (first-poll bootstrap → exactly one), a restart with a
@@ -427,12 +449,14 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   per-cycle status; the watcher's existing escalation log/notification still
   fires and now names the brief path or the failure + `--generate` hint.
 - [ ] The composed prompt contains the escalation entry (head+tail always
-  present), the cycle's grouped rounds with `entries` (nothing hidden), the
-  plan doc when present, pending interjections, the exact output path, the
-  five required headings, and the no-cycle-writes instruction; the size
-  policy enforces the 60 000-char total with the fixed reduction order and
-  markers — tested with an oversized escalation entry, plan doc,
-  interjections, and a 40-round cycle (unit tests on `compose_brief_prompt`).
+  present within its inclusive budget), the cycle's grouped rounds with
+  `entries` (nothing hidden), the plan doc when present, pending
+  interjections, the exact output path, the five required headings, and the
+  no-cycle-writes instruction; the serializer measures the complete prompt
+  and enforces the 60 000-char total via the fixed reduction order, markers,
+  and the final clamp — tested with an oversized escalation entry, plan
+  doc, interjections, a 40-round cycle, and the framing-boundary case (unit
+  tests on `compose_brief_prompt`).
 - [ ] Grouped rounds (`tagteam cycle rounds`, `tail_rounds`, headless and
   briefer prompts) carry `entries` and `rulings` so the triggering
   escalation and the ruling — or two `NEED_HUMAN`s at one round — are both
@@ -442,9 +466,12 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   (headings missing → stored + flagged), `failed` (no file / nonzero /
   timeout → `briefer_failed` diagnostic, no pause marker written, watcher
   keeps running).
-- [ ] `tagteam brief` prints the latest brief (highest-id ok/partial) for
-  the current cycle (or `--phase/--type`), `--list`, `--json`; exit 1 when
-  none, with a `--generate` hint when only failed/abandoned rows exist;
+- [ ] `tagteam brief` prints the latest ok/partial brief **for the current
+  event** (or `--phase/--type`, `--event KEY`), reports running/failed/
+  abandoned/none for the current event without falling back to an older
+  event, `--list` shows history, `--json`; exit 1 when none, with a
+  `--generate` hint when only failed/abandoned rows exist; `_latest.md`
+  becomes a stub when a new event opens without a successful brief;
   `--generate` inserts a manual row, writes to the suffixed path without
   overwriting earlier files, refuses outside escalated/needs-human or while an
   attempt is running, and leaves the automatic dedupe intact.
@@ -472,8 +499,9 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   running→abandoned / manual ok / manual failed; with `db_invalid` set the
   briefer does not spawn and says why.
 - [ ] Artifact paths: same-round re-escalation produces two distinct brief
-  files (`…_r5_<stampA>-a1.md`, `…_r5_<stampB>-a1.md`), manual attempts
-  `-a2…`, nothing overwritten; `_latest.md` alias tracks the newest
+  files (`…_r5_<stampA>-a1.md`, `…_r5_<stampB>-a1.md`); attempts number
+  `1 + max(attempt)` across kinds (a failed manual `a1` followed by the
+  automatic attempt yields `a2`, both files preserved); nothing overwritten; `_latest.md` alias tracks the newest
   ok/partial; `brief`, `--list`, DB rows, notifications and `rule`
   diagnostics reference the intended event's row + path.
 - [ ] Schema: `SCHEMA_VERSION == 5`; fresh/v4 → v5; newer `user_version`
@@ -489,12 +517,12 @@ headings), `brief_nofile`; it parses the output path from the prompt's
 
 ## Decisions (rounds 1–2)
 
-- Escalation event identity = triggering `rounds.id`; auto attempts unique
+- Escalation event identity = canonical `event_key` (see r3 bullet); auto attempts unique
   per event; one running attempt per event across kinds; prior success
   satisfies the event; manual `--generate` uses the same claim transaction.
 - Grouped rounds gain additive `entries` + `rulings`; `reviewer_text`
   unchanged.
-- Prompt-size policy replaces the (false) 10-round bound.
+- Prompt-size policy (per-component budgets, hard 60 000 total, final clamp) replaces the (false) 10-round bound.
 - Rulings use a dedicated `cycle.add_ruling` path (no stale gate).
 - Escalated-on-bootstrap briefs once; at-most-once automatic attempts via a
   pre-spawn claim row + partial unique index; abandoned detection; manual
@@ -507,7 +535,11 @@ headings), `brief_nofile`; it parses the output path from the prompt's
 - Event identity = repair-safe canonical `event_key` (phase|type|round|
   role|action|ts of the triggering entry); repair preserves `usage`,
   `interjections`, `briefs`; `db_invalid` ⇒ no briefer spawn.
-- Artifact paths are unique per event + attempt; `_latest.md` is an alias.
+- Artifact paths are unique per event + attempt (`attempt = 1 + max` across
+  kinds, allocated in the claim transaction); `_latest.md` is an alias that
+  becomes a stub when a new event opens without a successful brief.
+- `tagteam brief` and `rule` diagnostics are scoped to the current event;
+  no silent fallback to older events (`--list` / `--event KEY` for history).
 - Prompt-size policy has per-component budgets and a hard 60 000 total.
 
 ## Open Questions
@@ -534,7 +566,7 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   rules; provider is configurable.
 - **Token cost.** Fires only on escalation, at most once automatically per
   event; the prompt is bounded by the size policy (escalation + newest 6
-  entries verbatim, older abbreviated, 60 000-char cap) rather than by any
+  entries head+tail-bounded, older abbreviated, hard 60 000-char cap with a final clamp) rather than by any
   round cap (cycles can exceed 10 rounds); usage recorded under role
   `briefer`; opt-out.
 - **Briefer writes elsewhere / touches state.** Prompt forbids it; the
