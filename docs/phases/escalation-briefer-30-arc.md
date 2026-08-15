@@ -22,7 +22,8 @@ turn — the *briefer* — whose only job is to write the human arbiter a
 decision brief: each side's position, what is actually in dispute, what the
 briefer checked, a recommendation with confidence, and the exact commands
 that enact each possible ruling. The brief lands in
-`docs/escalations/<phase>_<type>_r<N>.md` and an additive `briefs` table;
+`docs/escalations/<phase>_<type>_r<N>_<eventstamp>-a<attempt>.md` (plus a
+`…_latest.md` alias) and an additive `briefs` table;
 `tagteam brief` shows it; the escalation notification points at it. A small
 `tagteam rule` CLI lets the arbiter act on it from the terminal.
 
@@ -60,20 +61,39 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
      from there, never inferred from the top-level `escalated`, and the
      round is the cycle status's round;
    - and an **atomic claim** for this **escalation event** succeeds (Scope
-     5). The event identity (reviewer r2) is `event_id` = the `rounds.id` of
-     the entry that produced the current escalated status — by construction
-     the cycle's **latest round entry** at claim time (an `ESCALATE`, a
-     `NEED_HUMAN`, or the `REQUEST_CHANGES` that auto-escalated), read from
-     the DB in the same transaction; a re-armed cycle that escalates again
-     at the same round has a *new* latest entry and therefore a new event.
+     5). The event identity (reviewer r2/r3) is a **repair-safe canonical
+     key** derived only from file-backed data: `event_key = "<phase>|<type>|
+     <round>|<role>|<action>|<ts>"` of the entry that produced the current
+     escalated status — by construction the cycle's **latest round entry**
+     at claim time (an `ESCALATE`, a `NEED_HUMAN`, or the `REQUEST_CHANGES`
+     that auto-escalated), read from the canonical rounds source in the same
+     transaction. `ts` is the entry's ISO timestamp stored in the JSONL, so
+     the key survives a DB rebuild (unlike `rounds.id`, which reimport does
+     not preserve; the numeric `rounds.id` is stored only as informational
+     `event_row_id`). A re-armed cycle that escalates again at the same
+     round has a new latest entry (new action/ts) and therefore a new event.
      The claim inserts the `briefs` row with `status = running`, `kind =
-     auto`, `event_id`, **before** the spawn, in one transaction under the
-     project writer lock, guarded by two partial unique indexes: `(event_id)
-     WHERE kind = 'auto'` (at most one automatic attempt per event) and
-     `(event_id) WHERE status = 'running'` (at most one **active** attempt
-     per event across kinds), and by an `INSERT … WHERE NOT EXISTS (a row
-     for this event_id with status ok|partial)` — a prior *successful*
-     attempt of either kind satisfies the event. A second watcher, a racing
+     auto`, `event_key`, **before** the spawn, in one transaction under the
+     project writer lock, guarded by two partial unique indexes:
+     `(event_key) WHERE kind = 'auto'` (at most one automatic attempt per
+     event) and `(event_key) WHERE status = 'running'` (at most one
+     **active** attempt per event across kinds), and by an `INSERT … WHERE
+     NOT EXISTS (a row for this event_key with status ok|partial)` — a
+     prior *successful* attempt of either kind satisfies the event.
+     **Repair & `db_invalid`** (reviewer r3): `repair.rebuild_db_from_files_
+     and_verify()` currently deletes the DB and reimports only file-backed
+     cycles/state, which would erase `briefs` — and, latent since Phases
+     31–32, `usage` and `interjections`. This phase makes repair **preserve
+     non-file-backed tables**: before removing the DB it snapshots `usage`,
+     `interjections`, `briefs` rows (via `ATTACH`/row copy into a temp
+     file), rebuilds, then re-inserts them verbatim (ids preserved; the
+     tables have no FKs into `rounds`, and `briefs` links by `event_key`, so
+     nothing dangles). While the `db_invalid` sentinel is set, claim
+     uniqueness cannot be trusted: `_maybe_brief` and `--generate` **do not
+     spawn** and log "briefer skipped: DB invalid — run `tagteam state
+     repair-db`". Tests: repair after auto ok / auto failed / running→
+     abandoned / manual ok / manual failed, then restart: dedupe and
+     `latest_brief` semantics unchanged; `db_invalid` set → no spawn. A second watcher, a racing
      `--generate`, a re-tick, or a restart therefore cannot create a second
      automatic attempt or a concurrent one: the insert fails → no spawn.
      Guarantee stated precisely: **at most one automatic briefer attempt
@@ -99,7 +119,7 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    all optional):
    ```yaml
    briefer:
-     enabled: true              # default true
+     enabled: true              # REQUIRED to activate; absent block = off
      provider: claude           # claude | codex; default: the lead's provider
      executable: /opt/bin/claude
      args: ["--model", "opus"]  # same structural validation as headless.args
@@ -108,18 +128,27 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    Defaults reuse Phase 31's adapters and permission defaults; the brief is
    read-mostly work but the briefer needs Bash/Read to inspect the tree and
    run tests, plus Write for the one output file. **One rule** (reviewer
-   r1): an *absent* `briefer:` block means **enabled with the lead's
-   provider**; `enabled: false` disables; an *invalid* block (bad types,
-   unknown keys, unknown provider) or an executable that cannot be resolved
-   at startup **warns and disables the briefer for that watcher run** — it
-   never blocks the loop. To keep that isolation explicit, briefer checks
+   r1, corrected r3 to honor the arc's hard constraint — proposal §2 "new
+   behavior ships behind opt-in flags; flag-off behavior identical to the
+   previous release" — which overrides §4's "opt-out via config" wording):
+   the briefer is **opt-in**: an *absent* `briefer:` block, or `enabled`
+   absent/false, means **disabled** and the watcher's escalation handling is
+   byte-for-byte what 0.9.0 does; `enabled: true` activates it (provider
+   defaults to the lead's); an *invalid* block (bad types, unknown keys,
+   unknown provider) or an executable that cannot be resolved at startup
+   **warns and disables the briefer for that watcher run** — it never blocks
+   the loop. The arbiter may later flip the default in a subsequent phase
+   once soak data exists. To keep that isolation explicit, briefer checks
    live in a separate `validate_briefer_config(config) -> list[str]` and
    `get_briefer_spec(config)`; the existing fatal `validate_config()` (agents
    block) is unchanged, so `agents.*` errors still block startup in every
    mode exactly as in 0.9.0 and briefer errors never do. Tests cover: absent
    block (enabled, lead provider), invalid block (warn + disabled), unknown
    provider (warn + disabled), missing executable (warn + disabled),
-   `enabled: false`. Which model tier writes good briefs (proposal Q5) is
+   `enabled: false`, and the pre-0.10 flag-off compatibility case (a
+   0.9.0-era `tagteam.yaml` with no block escalates exactly as before —
+   existing watcher tests unmodified). Which model tier writes good briefs
+   (proposal Q5) is
    *measured during soak* via `briefer.args` — no decision baked in.
 3. **Composed context** (bounded by policy, reviewer r2): a role banner
    ("you are the escalation briefer, not a participant; you do not write
@@ -127,20 +156,37 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    from the grouped view (`tail_rounds(...)`, every round, including the
    additive `entries` list so nothing is hidden — Scope 7), the plan doc
    `docs/phases/<phase>.md` when present, pending interjections for the
-   cycle, and the state. **Prompt-size policy** (there is no cap on cycle
-   rounds; `STALE_ROUND_LIMIT` only bounds *stale* repeats): the escalation
-   entry and the newest 6 entries are included verbatim; older entries are
-   reduced to `role/action/ts/updated_by` + the first 400 characters of
-   content; if the composed prompt still exceeds 60 000 characters, older
-   entries are reduced further to their header line only, oldest first,
-   until it fits, and the prompt says "N older entries abbreviated — read
-   `tagteam cycle rounds --phase … --type …` for the full text". Tests pin
-   that the escalation entry is never abbreviated and that a 40-round
-   synthetic cycle fits. The prompt names the exact output path and the
+   cycle, and the state. **Prompt-size policy** — deterministic
+   per-component budgets with a hard total (reviewer r3; there is no cap on
+   cycle rounds, `STALE_ROUND_LIMIT` only bounds *stale* repeats): total
+   ≤ 60 000 chars. Budgets: escalation entry ≤ 8 000 (head 6 000 + tail
+   2 000 with an `[… N chars elided …]` marker when longer — it is the
+   *last* component reduced and never below that head+tail); newest 6
+   entries ≤ 4 000 each (head+tail); older entries `role/action/ts/
+   updated_by` + first 400 chars; plan doc ≤ 20 000 (head); interjections
+   ≤ 4 000 total; state ≤ 4 000; skill/role banner fixed. If the sum still
+   exceeds 60 000 the reducer trims in fixed order — older entries to header
+   lines (oldest first) → plan doc → interjections → newest entries → the
+   escalation entry — and every reduction is announced in the prompt
+   ("N older entries abbreviated / plan truncated — read `tagteam cycle
+   rounds …` / the file for the full text"). Tests: an oversized escalation
+   entry, an oversized plan doc, oversized interjections, and a 40-round
+   ordinary cycle each produce a prompt ≤ 60 000 chars with the expected
+   markers, and the escalation entry's head and tail are always present. The prompt names the exact output path and the
    required section headings, and forbids any `tagteam cycle add`/`init`/
    `state set`.
-4. **Output contract.** The briefer writes markdown to
-   `docs/escalations/<phase>_<type>_r<N>.md` with these headings, in order:
+4. **Output contract.** The briefer writes markdown to a path that is
+   **unique and stable per event and attempt** (reviewer r3):
+   `docs/escalations/<phase>_<type>_r<N>_<eventstamp>-a<attempt>.md`, where
+   `<eventstamp>` is the triggering entry's `ts` compacted to
+   `YYYYMMDDTHHMMSSffffff` and `<attempt>` counts rows for *that event*
+   (auto is `a1`; manual attempts continue `a2, a3, …`). Same-round
+   re-escalation therefore yields distinct files; nothing is ever
+   overwritten. A human-friendly alias `docs/escalations/<phase>_<type>_
+   latest.md` is rewritten to the newest ok/partial brief's content after
+   each success (alias only; the DB row's `path` is the unique file). The
+   file carries a header line naming its event key and attempt. Headings,
+   in order:
    `## Positions` (lead / reviewer, in their own terms), `## Crux` (what is
    actually in dispute, separated from points already resolved in earlier
    rounds), `## Evidence` (what it checked: files, tests, diffs — and what it
@@ -187,8 +233,10 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
    refuses until it finishes; watcher restart after manual success → none,
    after manual failure → one automatic attempt. Path: `docs/escalations/
    <phase>_<type>_r<N>-<attempt>.md` (`attempt` = 1 + prior rows for the
-   event) — never overwrites. Failed automatic attempts are never
-   auto-retried; `--generate` is the retry path.
+   event) — never overwrites (see Scope 4 for the exact per-event path).
+   Failed automatic attempts are never auto-retried; `--generate` is the
+   retry path. `tagteam brief`, `--list`, notifications and `rule`
+   diagnostics reference the row id + path of the intended event.
 7. **`tagteam rule <approve|request-changes|answer> [--content TEXT] [--by
    NAME] [--to lead|reviewer]`** — act on an escalation from the terminal
    (Phase 34 adds the browser). Semantics (no round-vocabulary change; the
@@ -255,11 +303,9 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
 - New round actions or roles; changes to `rounds`/`cycles` schema.
 - Automatic rulings — the briefer recommends, the human decides.
 - Briefs for non-escalation events (e.g. every round) — token budget.
-- Retrying a failed brief automatically (a human can `tagteam brief --rerun`?
-  — no: out of scope; re-escalating or a manual `tagteam brief --generate`
-  is *in* scope only as the single flag `tagteam brief --generate` that runs
-  the briefer on demand for the current escalated cycle, same dedupe key
-  ignored explicitly; useful for the model-tier experiment).
+- Retrying a failed brief automatically. Manual retry is `tagteam brief
+  --generate` (Scope 6), which uses the same claim transaction as the
+  watcher.
 
 ---
 
@@ -274,12 +320,15 @@ Phase 32 (`notify()`, interjections, controls). Source brief:
   `brief_command`.
 - `tagteam/controls.py` — `rule_command` (+ `cycle.rearm` in `cycle.py`).
 - `tagteam/db.py` — `SCHEMA_VERSION = 5`, `_SCHEMA_V5` briefs table +
-  two partial unique indexes, `latest_entry_id(phase, type)`,
-  `claim_brief(event_id, kind, ...) -> id | None` (single INSERT…WHERE NOT
-  EXISTS in a transaction under the writer lock; None when either unique
-  index or the prior-success rule rejects), `finish_brief(id, status, ...)`,
-  `mark_abandoned(id, reason)`, `get_briefs`, `latest_brief(phase, type)`
-  (highest id with ok/partial), `running_briefs(event_id)`.
+  two partial unique indexes, `latest_event(phase, type) -> (event_key,
+  row_id, entry)`, `claim_brief(event_key, kind, ...) -> id | None` (single
+  INSERT…WHERE NOT EXISTS in a transaction under the writer lock; None when
+  either unique index or the prior-success rule rejects),
+  `finish_brief(id, status, ...)`, `mark_abandoned(id, reason)`,
+  `get_briefs`, `latest_brief(phase, type)` (highest id with ok/partial),
+  `running_briefs(event_key)`.
+- `tagteam/repair.py` — `rebuild_db_from_files_and_verify` snapshots and
+  restores `usage`, `interjections`, `briefs` (non-file-backed tables).
 - `tagteam/parser.py` / `tagteam/cycle.py` — additive `entries` + `rulings`
   lists on grouped rounds (JSONL and DB-first paths).
 - `tagteam/config.py` — `briefer:` block validation, `get_briefer_spec`.
@@ -324,7 +373,8 @@ CREATE TABLE IF NOT EXISTS briefs (
     ts           TEXT NOT NULL,           -- claim time
     phase        TEXT NOT NULL, type TEXT NOT NULL, round INTEGER NOT NULL,
     cycle_state  TEXT NOT NULL,           -- escalated | needs-human (from cycle status)
-    event_id     INTEGER NOT NULL,        -- rounds.id of the triggering entry (latest entry at claim)
+    event_key    TEXT NOT NULL,           -- "<phase>|<type>|<round>|<role>|<action>|<ts>" of the triggering entry (repair-safe)
+    event_row_id INTEGER,                 -- rounds.id at claim time (informational; not preserved by reimport)
     kind         TEXT NOT NULL,           -- auto | manual
     attempt      INTEGER NOT NULL,        -- 1 for auto; 1+prior for manual
     status       TEXT NOT NULL,           -- running | ok | partial | failed | abandoned
@@ -335,9 +385,9 @@ CREATE TABLE IF NOT EXISTS briefs (
     usage_row_id INTEGER, duration_ms INTEGER, reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_briefs_cycle ON briefs(phase, type, round);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_auto    ON briefs(event_id) WHERE kind = 'auto';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_running ON briefs(event_id) WHERE status = 'running';
--- claim = single INSERT … SELECT … WHERE NOT EXISTS (ok|partial row for event_id), under the writer lock
+CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_auto    ON briefs(event_key) WHERE kind = 'auto';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_running ON briefs(event_key) WHERE status = 'running';
+-- claim = single INSERT … SELECT … WHERE NOT EXISTS (ok|partial row for event_key), under the writer lock
 ```
 Downgrade: 0.9.0 (v4) opens a v5 DB (tolerates newer `user_version`,
 ignores the table); verified in the release checklist.
@@ -376,12 +426,13 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   non-ready states is unchanged; `cycle_state` comes from the canonical
   per-cycle status; the watcher's existing escalation log/notification still
   fires and now names the brief path or the failure + `--generate` hint.
-- [ ] The composed prompt contains the escalation entry verbatim, the
-  cycle's grouped rounds with `entries` (nothing hidden), the plan doc when
-  present, pending interjections, the exact output path, the five required
-  headings, and the no-cycle-writes instruction; the size policy abbreviates
-  only older entries and never the escalation entry, and a 40-round
-  synthetic cycle fits (unit tests on `compose_brief_prompt`).
+- [ ] The composed prompt contains the escalation entry (head+tail always
+  present), the cycle's grouped rounds with `entries` (nothing hidden), the
+  plan doc when present, pending interjections, the exact output path, the
+  five required headings, and the no-cycle-writes instruction; the size
+  policy enforces the 60 000-char total with the fixed reduction order and
+  markers — tested with an oversized escalation entry, plan doc,
+  interjections, and a 40-round cycle (unit tests on `compose_brief_prompt`).
 - [ ] Grouped rounds (`tagteam cycle rounds`, `tail_rounds`, headless and
   briefer prompts) carry `entries` and `rulings` so the triggering
   escalation and the ruling — or two `NEED_HUMAN`s at one round — are both
@@ -408,15 +459,29 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   cycle to in-progress/ready_for R; all three are rejected (exit 1, message)
   when the cycle is not `escalated`/`needs-human`.
 - [ ] Briefer startup validation never blocks the watcher: an absent block
-  enables the briefer with the lead's provider; invalid block / unknown
-  provider / missing executable each log a warning and disable the briefer
-  for that run (tests for each); `agents.*` errors still block as before in
-  every mode; `validate_config()` itself is unchanged.
+  (or `enabled` absent/false) leaves the briefer off and escalation handling
+  identical to 0.9.0 (pre-0.10 config compatibility test; existing watcher
+  tests unmodified); `enabled: true` activates it with the lead's provider
+  by default; invalid block / unknown provider / missing executable each log
+  a warning and disable the briefer for that run (tests for each);
+  `agents.*` errors still block as before in every mode; `validate_config()`
+  itself is unchanged.
+- [ ] Repair safety: `rebuild_db_from_files_and_verify` preserves `usage`,
+  `interjections`, and `briefs` rows; after repair, dedupe and
+  `latest_brief` behave as before for auto ok / auto failed /
+  running→abandoned / manual ok / manual failed; with `db_invalid` set the
+  briefer does not spawn and says why.
+- [ ] Artifact paths: same-round re-escalation produces two distinct brief
+  files (`…_r5_<stampA>-a1.md`, `…_r5_<stampB>-a1.md`), manual attempts
+  `-a2…`, nothing overwritten; `_latest.md` alias tracks the newest
+  ok/partial; `brief`, `--list`, DB rows, notifications and `rule`
+  diagnostics reference the intended event's row + path.
 - [ ] Schema: `SCHEMA_VERSION == 5`; fresh/v4 → v5; newer `user_version`
   tolerated; 0.9.0 opens a v5 project (release checklist).
-- [ ] Flag-off behavior unchanged for the loop itself: with `briefer.enabled:
-  false`, `_handle_escalated` behaves exactly as in 0.9.0 (existing watcher
-  tests pass unmodified).
+- [ ] Flag-off behavior unchanged for the loop itself: with no `briefer:`
+  block (or `enabled` false), `_handle_escalated` and the first-poll
+  bootstrap behave exactly as in 0.9.0 (existing watcher tests pass
+  unmodified).
 - [ ] Docs: README section, help texts, SKILL.md needs-human/escalated
   guidance updated (both copies), roadmap, findings with at least one real
   brief (scratch dogfood) and its tokens/time, plus a lighter-model run.
@@ -435,9 +500,15 @@ headings), `brief_nofile`; it parses the output path from the prompt's
   pre-spawn claim row + partial unique index; abandoned detection; manual
   `--generate` retries never defeat the automatic dedupe.
 - `cycle_state` always from the canonical per-cycle status.
-- Absent `briefer:` = enabled with the lead's provider; invalid config or
-  missing executable = warn + disabled for the run; briefer validation is
-  separate from the fatal `validate_config`.
+- Briefer is **opt-in** (`briefer.enabled: true`); absent = disabled =
+  0.9.0 behavior (arc hard constraint wins over §4's "opt-out" wording);
+  invalid config or missing executable = warn + disabled for the run;
+  briefer validation is separate from the fatal `validate_config`.
+- Event identity = repair-safe canonical `event_key` (phase|type|round|
+  role|action|ts of the triggering entry); repair preserves `usage`,
+  `interjections`, `briefs`; `db_invalid` ⇒ no briefer spawn.
+- Artifact paths are unique per event + attempt; `_latest.md` is an alias.
+- Prompt-size policy has per-component budgets and a hard 60 000 total.
 
 ## Open Questions
 
