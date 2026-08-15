@@ -110,7 +110,9 @@ def _do_transition(prompt: str, state: dict, mode: str) -> None:
 def main() -> int:
     flavor = os.environ.get("FAKE_AGENT_FLAVOR", "claude")
     mode = os.environ.get("FAKE_AGENT_MODE", "ok")
-    prompt = sys.stdin.read()
+    # The engine writes the prompt as UTF-8 bytes; decode explicitly so a
+    # Windows console code page (cp1252) cannot mangle non-ASCII text.
+    prompt = sys.stdin.buffer.read().decode("utf-8", "replace")
     capture = os.environ.get("FAKE_AGENT_CAPTURE")
     if capture:
         with open(capture, "w", encoding="utf-8") as f:
