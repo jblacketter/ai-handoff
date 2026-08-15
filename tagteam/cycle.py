@@ -1072,10 +1072,29 @@ def _cli_status(args: list[str]) -> int:
     return 1
 
 
-def _cli_rounds(args: list[str]) -> int:
-    from tagteam.parser import read_cycle_rounds
+def tail_rounds(phase: str, cycle_type: str, n: int | None = None,
+                project_dir: str = ".") -> list[dict]:
+    """Return the entries `cycle rounds` would print, optionally the last N.
 
-    allowed = {"--phase", "--type"}
+    Same source order as the CLI: the merged per-round view from
+    `tagteam.parser.read_cycle_rounds` when available, else the raw
+    JSONL/DB entries from `read_rounds`. `n=None` returns everything;
+    `n` larger than the list returns the whole list. Used by the headless
+    orchestrator (Phase 31) to compose a bounded turn context.
+    """
+    if n is not None and n < 1:
+        raise ValueError("--tail must be >= 1")
+    from tagteam.parser import read_cycle_rounds
+    entries = read_cycle_rounds(phase, cycle_type, project_dir=project_dir)
+    if not entries:
+        entries = read_rounds(phase, cycle_type, project_dir)
+    if not entries:
+        return []
+    return entries[-n:] if n is not None else list(entries)
+
+
+def _cli_rounds(args: list[str]) -> int:
+    allowed = {"--phase", "--type", "--tail"}
     parsed = _parse_args(args, allowed)
 
     phase = parsed.get("--phase")
@@ -1084,15 +1103,18 @@ def _cli_rounds(args: list[str]) -> int:
         print("Required: --phase, --type")
         return 1
 
-    # Use dispatcher (checks JSONL first, falls back to markdown)
-    rounds = read_cycle_rounds(phase, cycle_type)
-    if rounds:
-        for r in rounds:
-            print(json.dumps(r))
-        return 0
+    tail_n: int | None = None
+    if "--tail" in parsed:
+        try:
+            tail_n = int(parsed["--tail"])
+        except ValueError:
+            print(f"--tail must be an integer >= 1, got: {parsed['--tail']}")
+            return 1
+        if tail_n < 1:
+            print(f"--tail must be an integer >= 1, got: {tail_n}")
+            return 1
 
-    # Also try JSONL-only read_rounds for raw entries
-    entries = read_rounds(phase, cycle_type)
+    entries = tail_rounds(phase, cycle_type, tail_n)
     if entries:
         for e in entries:
             print(json.dumps(e))

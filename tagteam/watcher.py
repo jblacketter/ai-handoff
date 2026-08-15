@@ -458,8 +458,11 @@ class _StateProcessor:
         max_retries: int,
         retry_delay: float,
         pre_send_delay: float,
+        engine=None,
     ):
         self.mode = mode
+        # Phase 31: HeadlessEngine when mode == "headless" (else None).
+        self.engine = engine
         self.lead_name = lead_name
         self.reviewer_name = reviewer_name
         self.lead_pane = lead_pane
@@ -525,6 +528,14 @@ class _StateProcessor:
                              f"No activity for {self.timeout_minutes}m")
                 self.idle_since = time.time()
 
+            if self.mode == "headless":
+                # A headless turn is a synchronous spawn; re-sending would
+                # start a duplicate agent process. If dispatch is paused
+                # (failed turn), keep the operator informed instead.
+                if state.get("status") == "ready" and self.engine is not None:
+                    self.engine.log_paused()
+                return
+
             if (state.get("status") == "ready"
                     and self.last_ready_send_time is not None
                     and (time.time() - self.last_ready_send_time
@@ -557,7 +568,7 @@ class _StateProcessor:
 
         if current_status == "ready" and command:
             self._handle_ready(agent_name, pane, session_id,
-                               command, phase, round_num)
+                               command, phase, round_num, state=state)
         elif current_status == "working":
             _log(f"   {agent_name} is working...")
         elif current_status == "done":
@@ -570,7 +581,7 @@ class _StateProcessor:
             notify_macos("Tagteam", f"Cycle aborted: {reason}")
 
     def _handle_ready(self, agent_name, pane, session_id,
-                      command, phase, round_num):
+                      command, phase, round_num, state=None):
         _log(f">> {agent_name}'s turn"
              f" (phase: {phase}, round: {round_num})")
         send_success = False
@@ -619,6 +630,19 @@ class _StateProcessor:
             send_success = True
             _log(f"   Command: {command}")
             notify_macos("Tagteam", f"{agent_name}'s turn: {command}")
+
+        elif self.mode == "headless":
+            # Phase 31: spawn a fresh agent process for this turn and block
+            # until it exits. The engine verifies the expected cycle
+            # transition, records usage, and pauses dispatch on failure.
+            # No send-time bookkeeping: the watchdog re-send path is
+            # short-circuited for headless in tick().
+            if self.engine is None:
+                _log("   ERROR: headless mode without an engine")
+                return
+            _log(f"   Command: {command}")
+            self.engine.run_owed_turn(state or {})
+            return
 
         # Track send time for watchdog re-send (success OR failure;
         # failure also gets a retry window via watchdog).
@@ -680,11 +704,14 @@ def _build_processor(
     max_retries: int,
     retry_delay: float,
     pre_send_delay: float,
+    turn_timeout_minutes: int | None = None,
+    tail_rounds: int | None = None,
 ) -> _StateProcessor | None:
     """Resolve config + iTerm session IDs into a ready processor.
 
-    Returns None if iterm2 mode is requested but session IDs are missing
-    (caller should bail out — error already logged here).
+    Returns None if iterm2 mode is requested but session IDs are missing,
+    or if headless mode fails startup validation (caller should bail out
+    — error already logged here).
     """
     config_path = Path(project_dir) / "tagteam.yaml"
     config = read_config(config_path)
@@ -707,6 +734,28 @@ def _build_processor(
             _log("  Run 'python -m tagteam session start' first.")
             return None
 
+    engine = None
+    if mode == "headless":
+        from tagteam.headless import (HeadlessEngine,
+                                      DEFAULT_TURN_TIMEOUT_MINUTES,
+                                      DEFAULT_TAIL_ROUNDS)
+        engine = HeadlessEngine(
+            project_dir, config,
+            lead_name=lead_name, reviewer_name=reviewer_name,
+            timeout_minutes=(turn_timeout_minutes
+                             if turn_timeout_minutes is not None
+                             else DEFAULT_TURN_TIMEOUT_MINUTES),
+            tail_rounds=(tail_rounds if tail_rounds is not None
+                         else DEFAULT_TAIL_ROUNDS),
+            confirm=confirm, log=_log, notify=notify_macos,
+        )
+        errors = engine.validate()
+        if errors:
+            _log("ERROR: headless mode cannot start:")
+            for e in errors:
+                _log(f"  - {e}")
+            return None
+
     return _StateProcessor(
         mode=mode,
         lead_name=lead_name,
@@ -721,6 +770,7 @@ def _build_processor(
         max_retries=max_retries,
         retry_delay=retry_delay,
         pre_send_delay=pre_send_delay,
+        engine=engine,
     )
 
 
@@ -746,6 +796,15 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
             else:
                 _log(f"  WARNING: {name} session '{sid}'"
                      " not found in iTerm2")
+    elif processor.mode == "headless" and processor.engine is not None:
+        eng = processor.engine
+        for role in ("lead", "reviewer"):
+            spec = eng.roles.get(role)
+            if spec:
+                _log(f"  {role}: {spec.provider} via {spec.executable}")
+        _log(f"  turn timeout: {eng.timeout_s / 60:.0f} min |"
+             f" round tail: {eng.tail_n} | logs: {eng.project_root}/.tagteam/turns/")
+        eng.log_paused(force=True)
     if processor.confirm:
         _log("Confirm mode: will pause before sending commands")
     print(flush=True)
@@ -763,8 +822,13 @@ def watch(
     retry_delay: float = 2.0,
     pre_send_delay: float = 1.0,
     force_poll: bool = False,
-) -> None:
+    turn_timeout_minutes: int | None = None,
+    tail_rounds: int | None = None,
+) -> bool:
     """Main watch loop. Blocks until interrupted with Ctrl-C.
+
+    Returns False if the watcher could not start (missing iTerm session
+    IDs, headless startup validation failed); True otherwise.
 
     Delegates per-tick work to _StateProcessor. Trigger source is either
     polling (default fallback when ``watchdog`` isn't installed, or when
@@ -780,18 +844,26 @@ def watch(
         max_retries=max_retries,
         retry_delay=retry_delay,
         pre_send_delay=pre_send_delay,
+        turn_timeout_minutes=turn_timeout_minutes,
+        tail_rounds=tail_rounds,
     )
     if processor is None:
-        return
+        return False
 
     _log_startup_banner(processor, interval)
+
+    if mode == "headless" and not force_poll:
+        # A headless tick blocks for the length of a turn; running that
+        # inside a watchdog callback is the wrong shape. Poll instead.
+        force_poll = True
+        _log("[trigger] headless mode uses poll trigger")
 
     if not force_poll:
         from tagteam import watcher_events
         if watcher_events.is_available():
             _log("[trigger] event-driven (watchdog) with 30s heartbeat")
             if _run_event_loop(processor, project_dir):
-                return
+                return True
             # Event loop failed at startup — fall through to poll mode.
             _log(f"[trigger] falling back to poll mode"
                  f" (interval={interval}s)")
@@ -802,6 +874,7 @@ def watch(
         _log(f"[trigger] poll mode (forced via --poll, interval={interval}s)")
 
     _run_poll_loop(processor, project_dir, interval)
+    return True
 
 
 def _run_poll_loop(processor: "_StateProcessor",
@@ -904,6 +977,8 @@ def watch_command(args: list[str]) -> int:
     retry_delay = 2.0
     pre_send_delay = 1.0
     force_poll = False
+    turn_timeout_minutes = None
+    tail_rounds = None
 
     i = 0
     while i < len(args):
@@ -913,8 +988,9 @@ def watch_command(args: list[str]) -> int:
             i += 2
         elif arg == "--mode" and i + 1 < len(args):
             mode = args[i + 1]
-            if mode not in ("notify", "tmux", "iterm2"):
-                print(f"Invalid mode: {mode}. Use 'notify', 'tmux', or 'iterm2'.")
+            if mode not in ("notify", "tmux", "iterm2", "headless"):
+                print(f"Invalid mode: {mode}. Use 'notify', 'tmux', 'iterm2',"
+                      " or 'headless'.")
                 return 1
             i += 2
         elif arg == "--lead-pane" and i + 1 < len(args):
@@ -941,13 +1017,20 @@ def watch_command(args: list[str]) -> int:
         elif arg == "--poll":
             force_poll = True
             i += 1
+        elif arg == "--turn-timeout" and i + 1 < len(args):
+            turn_timeout_minutes = int(args[i + 1])
+            i += 2
+        elif arg == "--tail-rounds" and i + 1 < len(args):
+            tail_rounds = int(args[i + 1])
+            i += 2
         elif arg in ("-h", "--help"):
             print("Usage: python -m tagteam watch [options]")
             print()
             print("Options:")
             print("  --interval N       Poll interval in seconds (default: 10)")
-            print("  --mode MODE        'notify', 'tmux', or 'iterm2'")
-            print("                     (default: auto-detect from session state)")
+            print("  --mode MODE        'notify', 'tmux', 'iterm2', or 'headless'")
+            print("                     (default: auto-detect from session state;")
+            print("                      'headless' is never auto-detected)")
             print("  --lead-pane TARGET tmux pane target for lead (default: tagteam:0.0)")
             print("  --reviewer-pane T  tmux pane target for reviewer (default: tagteam:0.2)")
             print("  --confirm          Pause for confirmation before sending commands")
@@ -956,6 +1039,11 @@ def watch_command(args: list[str]) -> int:
             print("  --retry-delay N    Seconds between retries (default: 2.0)")
             print("  --send-delay N     Seconds to wait before sending (default: 1.0)")
             print("  --poll             Force polling mode (skip watchdog event detection)")
+            print()
+            print("Headless mode (opt-in, --mode headless):")
+            print("  --turn-timeout N   Kill a spawned turn after N minutes (default: 60)")
+            print("  --tail-rounds N    Rounds of history in each turn's context (default: 3)")
+            print("  Follow the in-flight turn with: tagteam tail")
             return 0
         else:
             print(f"Unknown argument: {arg}")
@@ -965,7 +1053,7 @@ def watch_command(args: list[str]) -> int:
         mode, reason = _auto_detect_mode(".")
         _log(f"[mode] auto-detected: {mode} ({reason})")
 
-    watch(
+    started = watch(
         interval=interval,
         mode=mode,
         lead_pane=lead_pane,
@@ -976,5 +1064,7 @@ def watch_command(args: list[str]) -> int:
         retry_delay=retry_delay,
         pre_send_delay=pre_send_delay,
         force_poll=force_poll,
+        turn_timeout_minutes=turn_timeout_minutes,
+        tail_rounds=tail_rounds,
     )
-    return 0
+    return 0 if started else 1

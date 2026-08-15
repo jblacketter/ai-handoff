@@ -1,0 +1,180 @@
+"""Fake agent CLI for headless-engine tests.
+
+Installed into a temp PATH dir as ``claude`` / ``codex`` (POSIX shell
+script or Windows ``.cmd`` shim) so tests exercise the same
+``shutil.which`` + PATHEXT resolution as the real CLIs.
+
+Behaviour is driven by environment variables:
+
+  FAKE_AGENT_FLAVOR   claude | codex           (event-stream shape)
+  FAKE_AGENT_MODE     ok | no_round | nonzero | hang | grandchild_hang |
+                      malformed | stderr_noise | wrong_round | amend
+  FAKE_AGENT_CAPTURE  path: argv + stdin prompt are dumped here as JSON
+  FAKE_AGENT_PIDFILE  path: grandchild pid is written here (grandchild_hang)
+  FAKE_AGENT_SLEEP    seconds between emitted events (default 0.25)
+
+The fake reads the composed prompt from stdin, parses the CURRENT STATE
+block, and in ``ok`` mode performs the transition a real agent would by
+running ``python -m tagteam cycle add|init`` in the cwd it was spawned
+in (the project root). Events are emitted incrementally with sleeps so
+tests can assert the log grows before exit.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+
+def _emit(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def _sleep() -> None:
+    time.sleep(float(os.environ.get("FAKE_AGENT_SLEEP", "0.25")))
+
+
+def _parse_state(prompt: str) -> dict:
+    marker = "=== CURRENT STATE (handoff-state.json) ==="
+    end = "=== ROUND TAIL"
+    if marker not in prompt:
+        return {}
+    body = prompt.split(marker, 1)[1]
+    body = body.split(end, 1)[0]
+    try:
+        return json.loads(body.strip())
+    except ValueError:
+        return {}
+
+
+def _tagteam(*args: str) -> int:
+    return subprocess.call([sys.executable, "-m", "tagteam", *args],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _agent_name(prompt: str) -> str:
+    # 'You are the lead (Claude) in a tagteam...'
+    try:
+        head = prompt.split("\n", 1)[0]
+        return head.split("(", 1)[1].split(")", 1)[0]
+    except Exception:
+        return "fake"
+
+
+def _do_transition(prompt: str, state: dict, mode: str) -> None:
+    role = state.get("turn")
+    phase = state.get("phase")
+    ctype = state.get("type", "plan")
+    rnd = int(state.get("round") or 0)
+    name = _agent_name(prompt)
+    command = state.get("command") or ""
+    # start command → cycle init
+    parts = command.strip().split()
+    if len(parts) >= 3 and parts[0] == "/handoff" and parts[1] == "start":
+        slug = parts[2]
+        t = "impl" if len(parts) > 3 and parts[3] == "impl" else "plan"
+        _tagteam("cycle", "init", "--phase", slug, "--type", t,
+                 "--updated-by", name, "--content", f"fake {t} submission")
+        return
+    if role == "lead":
+        target = rnd + 1
+        if mode == "wrong_round":
+            target = rnd + 5
+        if mode == "amend":
+            _tagteam("cycle", "add", "--phase", phase, "--type", ctype,
+                     "--role", "lead", "--action", "AMEND", "--round", str(rnd),
+                     "--updated-by", name, "--content", "fake amend")
+            return
+        _tagteam("cycle", "add", "--phase", phase, "--type", ctype,
+                 "--role", "lead", "--action", "SUBMIT_FOR_REVIEW",
+                 "--round", str(target), "--updated-by", name,
+                 "--content", "fake lead submission")
+    else:
+        target = rnd if mode != "wrong_round" else rnd + 5
+        _tagteam("cycle", "add", "--phase", phase, "--type", ctype,
+                 "--role", "reviewer", "--action", "REQUEST_CHANGES",
+                 "--round", str(target), "--updated-by", name,
+                 "--content", "fake review")
+
+
+def main() -> int:
+    flavor = os.environ.get("FAKE_AGENT_FLAVOR", "claude")
+    mode = os.environ.get("FAKE_AGENT_MODE", "ok")
+    prompt = sys.stdin.read()
+    capture = os.environ.get("FAKE_AGENT_CAPTURE")
+    if capture:
+        with open(capture, "w", encoding="utf-8") as f:
+            json.dump({"argv": sys.argv, "prompt": prompt, "cwd": os.getcwd()}, f)
+    state = _parse_state(prompt)
+
+    if flavor == "claude":
+        _emit({"type": "system", "subtype": "init", "session_id": "fake-sess",
+               "model": "fake-model", "permissionMode": "acceptEdits", "tools": []})
+    else:
+        _emit({"type": "thread.started", "thread_id": "fake-thread"})
+    _sleep()
+
+    if mode == "stderr_noise":
+        sys.stderr.write("warning: something noisy on stderr\n")
+        sys.stderr.flush()
+
+    if mode == "hang":
+        _emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "hanging"}]}}
+              if flavor == "claude" else
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "hanging"}})
+        time.sleep(600)
+        return 0
+
+    if mode == "grandchild_hang":
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        pidfile = os.environ.get("FAKE_AGENT_PIDFILE")
+        if pidfile:
+            with open(pidfile, "w") as f:
+                f.write(str(child.pid))
+        _emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "spawned grandchild"}]}}
+              if flavor == "claude" else
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "spawned grandchild"}})
+        time.sleep(600)
+        return 0
+
+    if flavor == "claude":
+        _emit({"type": "assistant", "message": {"model": "fake-model", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "tagteam cycle add ..."}}]}})
+    else:
+        _emit({"type": "item.started", "item": {"type": "command_execution",
+                                                "command": "tagteam cycle add ..."}})
+    _sleep()
+
+    if mode == "nonzero":
+        sys.stderr.write("fatal: fake failure\n")
+        return 3
+
+    if mode in ("ok", "malformed", "stderr_noise", "wrong_round", "amend"):
+        _do_transition(prompt, state, mode)
+
+    _sleep()
+    if mode == "malformed":
+        sys.stdout.write("this is not json and there is no usage\n")
+        sys.stdout.flush()
+        return 0
+
+    if flavor == "claude":
+        _emit({"type": "result", "subtype": "success", "is_error": False,
+               "num_turns": 2, "session_id": "fake-sess", "total_cost_usd": 0.01,
+               "usage": {"input_tokens": 11, "output_tokens": 22,
+                         "cache_read_input_tokens": 33,
+                         "cache_creation_input_tokens": 44},
+               "result": "done"})
+    else:
+        _emit({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}})
+        _emit({"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 22,
+                                                   "cached_input_tokens": 33,
+                                                   "cache_write_input_tokens": 44}})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

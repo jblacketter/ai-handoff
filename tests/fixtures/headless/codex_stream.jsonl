@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a003f7-41c6-7ef2-87d2-2a7b6ad17b88"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll write the requested file and read it back."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo probe-ok > probe.txt && cat probe.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo probe-ok > probe.txt && cat probe.txt'","aggregated_output":"probe-ok\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"probe-ok"}}
+{"type":"turn.completed","usage":{"input_tokens":30583,"cached_input_tokens":26112,"cache_write_input_tokens":0,"output_tokens":125,"reasoning_output_tokens":0}}

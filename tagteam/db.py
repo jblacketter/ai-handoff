@@ -21,7 +21,12 @@ import sqlite3
 from pathlib import Path
 
 # Bump when the schema changes; add a migration step in `_migrate`.
-SCHEMA_VERSION = 2
+# 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
+# ONLY — new tables / nullable columns, never renames or drops — so an
+# older release can still open a newer DB after a downgrade.
+SCHEMA_VERSION = 3
+
+USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round"}
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
@@ -107,6 +112,35 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 """
 
 
+# Schema v3 (Phase 31): per-turn token usage for headless turns.
+# Recording only; surfacing is Phase 32 (`tagteam usage`) / 34 (cockpit).
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    phase         TEXT,
+    type          TEXT,
+    round         INTEGER,
+    role          TEXT,
+    agent         TEXT,
+    provider      TEXT,
+    model         TEXT,
+    status        TEXT NOT NULL,
+    exit_code     INTEGER,
+    duration_ms   INTEGER,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens  INTEGER,
+    cache_write_tokens INTEGER,
+    cost_usd      REAL,
+    num_turns     INTEGER,
+    session_id    TEXT,
+    log_path      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usage_phase ON usage(phase, type, round);
+"""
+
+
 def _resolve_db_path(project_dir: str | Path | None) -> Path:
     """Resolve where the database lives.
 
@@ -143,7 +177,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             )
         conn.execute("PRAGMA user_version = 2")
         current = 2
+    if current < 3:
+        conn.executescript(_SCHEMA_V3)
+        conn.execute("PRAGMA user_version = 3")
+        current = 3
     # Future migrations land here.
+    # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
+    # deliberately tolerated — additive-only migrations mean older code
+    # can still read/write the tables it knows about.
     if current < SCHEMA_VERSION:
         raise RuntimeError(
             f"DB schema at version {current}, code expects {SCHEMA_VERSION}. "
@@ -389,6 +430,60 @@ def add_diagnostic(conn: sqlite3.Connection, kind: str,
         (ts, kind, json.dumps(payload)),
     )
     return cur.lastrowid
+
+
+# ---------- Usage (Phase 31, headless turns) ----------
+
+_USAGE_COLS = [
+    "ts", "phase", "type", "round", "role", "agent", "provider", "model",
+    "status", "exit_code", "duration_ms", "input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens", "cost_usd", "num_turns",
+    "session_id", "log_path",
+]
+
+
+def add_usage(conn: sqlite3.Connection, **fields) -> int:
+    """Insert one per-turn usage row. `ts` and `status` are required;
+    everything else is nullable. Unknown keys raise. Commits."""
+    unknown = set(fields) - set(_USAGE_COLS)
+    if unknown:
+        raise ValueError(f"Unknown usage fields: {sorted(unknown)}")
+    if not fields.get("ts"):
+        raise ValueError("usage.ts is required")
+    status = fields.get("status")
+    if status not in USAGE_STATUSES:
+        raise ValueError(
+            f"Invalid usage.status: {status!r}. Must be one of: "
+            f"{', '.join(sorted(USAGE_STATUSES))}"
+        )
+    cols = [c for c in _USAGE_COLS if c in fields]
+    placeholders = ", ".join("?" for _ in cols)
+    cur = conn.execute(
+        f"INSERT INTO usage ({', '.join(cols)}) VALUES ({placeholders})",
+        [fields[c] for c in cols],
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_usage(conn: sqlite3.Connection, phase: str | None = None,
+              cycle_type: str | None = None,
+              limit: int | None = None) -> list[dict]:
+    """Return usage rows (oldest first), optionally filtered by phase/type."""
+    where, params = [], []
+    if phase is not None:
+        where.append("phase = ?"); params.append(phase)
+    if cycle_type is not None:
+        where.append("type = ?"); params.append(cycle_type)
+    sql = "SELECT id, " + ", ".join(_USAGE_COLS) + " FROM usage"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id"
+    if limit is not None:
+        sql += " LIMIT ?"; params.append(int(limit))
+    cur = conn.execute(sql, params)
+    names = [d[0] for d in cur.description]
+    return [dict(zip(names, row)) for row in cur.fetchall()]
 
 
 # ---------- Importer (one-way, from existing tagteam project files) ----------

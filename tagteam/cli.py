@@ -6,6 +6,7 @@ Usage:
     python -m tagteam setup [dir] - Copy framework files to a project
     python -m tagteam migrate     - Migrate legacy projects to use config
     python -m tagteam watch       - Start the watcher daemon
+    python -m tagteam tail        - Follow the in-flight headless turn log
     python -m tagteam state       - View/update orchestration state
     python -m tagteam session     - Manage orchestration sessions
     python -m tagteam serve       - Start the web dashboard server
@@ -333,9 +334,11 @@ Commands:
   setup [dir]   Copy framework files to a project directory
   session       Manage orchestration session (start/kill/attach)
   watch         Start the watcher daemon for automated orchestration
+                (--mode headless spawns each turn as a fresh agent process)
+  tail          Follow the in-flight headless turn log (or show the last one)
   state         View or update the orchestration state file
   roadmap       Query roadmap phases and build execution queue
-  cycle         Manage cycle documents (init, add, status, rounds, render)
+  cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
   serve         Start the web dashboard server
   tui           Launch the Handoff Saloon terminal UI
   migrate       Migrate legacy projects to use tagteam.yaml
@@ -349,6 +352,10 @@ Advanced setup (individual steps, from project root):
 Manual workflow fallback:
   tagteam session start --backend manual
   tagteam watch --mode notify
+
+Headless mode (opt-in; no terminals to drive, works on Windows):
+  tagteam watch --mode headless
+  tagteam tail
 """
 
 
@@ -375,6 +382,10 @@ def main() -> int:
         from tagteam.watcher import watch_command
 
         return watch_command(sys.argv[2:])
+    if command == "tail":
+        from tagteam.headless import tail_command
+
+        return tail_command(sys.argv[2:])
     if command == "roadmap":
         from tagteam.roadmap import roadmap_command
 
