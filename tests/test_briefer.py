@@ -113,6 +113,18 @@ class TestConfig:
         spec = _spec(project)
         assert not spec.enabled and any("not found" in p for p in spec.problems)
 
+    def test_invalid_timeout_never_raises_and_brief_still_reports(self, project, fake_path, capsys):
+        # resolve_briefer contract: never raises (disabled + garbage timeout)
+        cfg = {"agents": {"lead": {"name": "Claude"}, "reviewer": {"name": "Codex"}},
+               "briefer": {"enabled": False, "timeout_minutes": "nope"}}
+        spec = b.resolve_briefer(cfg, project)
+        assert not spec.enabled and spec.timeout_s == 15 * 60
+        # `tagteam brief` on an escalated cycle with invalid config reports state, no crash
+        _enable(project, "  timeout_minutes: nope\n")
+        _escalate(project)
+        assert b.brief_command([], project_root=project) == 1
+        assert "No brief yet" in capsys.readouterr().out
+
     def test_enabled_false(self, project, fake_path):
         _enable(project)
         (project / "tagteam.yaml").write_text(
@@ -510,21 +522,20 @@ class TestRunner:
         _enable(project)
         _escalate(project)
         monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
-        if stage == "setup":
-            monkeypatch.setattr(db, "set_brief_stem", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom-setup")))
-        elif stage == "compose":
-            monkeypatch.setattr(b, "compose_brief_prompt", lambda **k: (_ for _ in ()).throw(RuntimeError("boom-compose")))
-        else:
-            monkeypatch.setattr(b, "verify_brief_file", lambda p: (_ for _ in ()).throw(RuntimeError("boom-final")))
-        res = _run(project)
+        with monkeypatch.context() as m:      # scoped fault: PATH/fake agent stay in place
+            if stage == "setup":
+                m.setattr(db, "set_brief_stem", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom-setup")))
+            elif stage == "compose":
+                m.setattr(b, "compose_brief_prompt", lambda **k: (_ for _ in ()).throw(RuntimeError("boom-compose")))
+            else:
+                m.setattr(b, "verify_brief_file", lambda p: (_ for _ in ()).throw(RuntimeError("boom-final")))
+            res = _run(project)
         assert res.status == "failed" and "boom" in res.reason
         rows = _briefs(project)
         assert len(rows) == 1 and rows[0]["status"] == "failed" and "boom" in rows[0]["reason"]
         assert h.read_inflight(project) is None
         assert "briefer_failed" in _diag_kinds(project)
-        # not stranded: a manual retry can proceed
-        monkeypatch.undo()
-        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        # not stranded: a manual retry (still the fake agent) can proceed
         assert b.brief_command(["--generate"], project_root=project) == 0
 
     def test_alias_failure_does_not_change_status(self, project, fake_path, monkeypatch):
@@ -536,6 +547,9 @@ class TestRunner:
         assert res.status == "ok" and _briefs(project)[0]["status"] == "ok"
 
     def test_brief_sweep_uses_configured_timeout(self, project, fake_path, monkeypatch, capsys):
+        # hermetic process identity: the runner "100" is alive with a stable identity
+        monkeypatch.setattr(procs, "pid_alive", lambda pid: pid == 100)
+        monkeypatch.setattr(procs, "identity", lambda pid: "100:start" if pid == 100 else None)
         _enable(project, "  timeout_minutes: 120\n")
         _escalate(project)
         ev, _ = b.current_event(project)
@@ -544,7 +558,7 @@ class TestRunner:
         try:
             db.claim_brief(conn, ts=started, phase="feat-x", cycle_type="plan", round_=1,
                            cycle_state="escalated", event_key=ev.event_key, kind="manual",
-                           runner_pid=os.getpid(), runner_ident=procs.identity(os.getpid()) or "me")
+                           runner_pid=100, runner_ident="100:start")
         finally:
             conn.close()
         # 30 min old, configured timeout 120 → still running (a 15-min default would abandon it)

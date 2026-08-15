@@ -334,11 +334,15 @@ def resolve_briefer(config: dict | None, project_root: str | Path) -> BriefSpec:
     """Validate + resolve the briefer for a run. Never raises: problems are
     returned so the watcher can warn and disable."""
     config = config or {}
-    problems = validate_briefer_config(config)
-    spec = get_briefer_spec(config)
+    try:
+        problems = validate_briefer_config(config)
+        spec = get_briefer_spec(config)
+    except Exception as e:   # contract: never raise
+        return BriefSpec(False, None, None, None, BRIEFER_DEFAULT_TIMEOUT_MINUTES * 60.0,
+                         [f"briefer config unreadable: {e}"])
     if not spec["enabled"]:
         return BriefSpec(False, spec["provider"], None, None,
-                         float(spec["timeout_minutes"] or BRIEFER_DEFAULT_TIMEOUT_MINUTES) * 60, problems)
+                         float(spec["timeout_minutes"]) * 60, problems)
     if problems:
         return BriefSpec(False, spec["provider"], None, None, 0.0, problems)
     provider = spec["provider"]
@@ -825,7 +829,7 @@ def brief_command(args: list[str], project_root: str | Path | None = None, out=N
             row = db.successful_brief_for_event(conn, ev.event_key)
             if row is None:
                 cfg = read_config(Path(root) / "tagteam.yaml") or {}
-                sweep_abandoned(root, float(get_briefer_spec(cfg)["timeout_minutes"]) * 60)
+                sweep_abandoned(root, resolve_briefer(cfg, root).timeout_s)
                 rows = db.briefs_for_event(conn, ev.event_key)
                 state_txt = ", ".join(f"a{r['attempt']} {r['status']}" for r in rows) or "no attempt yet"
                 print(f"No brief yet for the current event {ev.event_key} ({state_txt}). "
