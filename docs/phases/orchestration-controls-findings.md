@@ -57,7 +57,17 @@ signalled; the engine recorded outcome **`cancelled`** 4.1 s after spawn, wrote 
 - Interjection `#1` (`--to reviewer`, by jack) was written **while round-1's reviewer turn
   was in flight**; as designed it was *not* in that prompt ("No arbiter interjections were
   attached to round 1" — Codex, r1) and stays `pending` until the round-2 reviewer turn,
-  which stamps `delivered_stem`. _Round-2 delivery evidence appended below._
+  which stamps `delivered_stem`. **Round-2 evidence:** the r2 reviewer turn's
+  `inflight.json` carried `interjection_ids: [1]`; Codex's r2 verdict opens with "I saw
+  arbiter interjection #1 in this headless prompt under `=== ARBITER INTERJECTIONS
+  (unconsumed) ===`" and then performs the audit the note asked for; after the turn's
+  `ok`, `tagteam interject --list` shows
+  `#1 … delivered → reviewer r2 (orchestration-controls-usage-surfacing-30-arc_impl_r2_reviewer_20260815T080229Z)`
+  (`delivered_role=reviewer`, `delivered_round=2`, `delivered_ts` = turn end, 2026-08-15T08:06Z).
+  The audit itself was useful: it found the retry-gate tests did not mirror the plan's
+  criteria (a)–(l) one-to-one, which round 3 fixed with the exact fixture (registered
+  pre-dirty submodule, registered nested sub-submodule, real newline-path submodule via
+  `git submodule add --name`, committed declared-only `.gitmodules`, embedded repos).
 - Real `tagteam usage` output on this repo after r1 (11 headless turns since Phase 31,
   all reviewer/codex, cost unpriced for codex):
 

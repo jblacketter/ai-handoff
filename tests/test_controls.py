@@ -643,79 +643,227 @@ class TestFingerprint:
         assert fpm.handoff_fingerprint(project, "feat-x", "plan") != b
 
 
+def _mk_source_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q")
+    (path / "tracked.txt").write_text("src\n")
+    _git(path, "add", "-A"); _git(path, "commit", "-qm", "init")
+    return path
+
+
+NL_SUB = "sub\nvendor"
+
+
+def _build_gitlink_fixture(project: Path, src_root: Path) -> dict:
+    """The approved-plan fixture for retry criteria (a)–(l):
+
+      libs/regsub          registered submodule (pre-dirty)            (h)
+      libs/regsub/inner    registered nested sub-submodule            (l)
+      sub\nvendor          registered submodule with a newline path   (k, POSIX)
+      vendor/              plain embedded repo = newline suffix lookalike (k)
+      vendor2/localrepo    untracked embedded repo, pre-dirty          (i)
+      declared/x           committed .gitmodules entry, no gitlink, nested repo (j)
+      newdir/pre.txt       already-present untracked file             (c, f)
+      tracked.txt          clean tracked file                          (d)
+      tracked2.txt         tracked file already modified               (e, g)
+    """
+    _git_init(project)
+    s2 = _mk_source_repo(src_root / "S2")
+    s1 = _mk_source_repo(src_root / "S1")
+    subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                    str(s2), "inner"], cwd=s1, check=True, capture_output=True)
+    _git(s1, "commit", "-qm", "inner")
+    s3 = _mk_source_repo(src_root / "S3")
+    (project / "tracked2.txt").write_text("two\n")
+    _git(project, "add", "-A"); _git(project, "commit", "-qm", "t2")
+    subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                    str(s1), "libs/regsub"], cwd=project, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "update",
+                    "--init", "--recursive", "-q"], cwd=project, check=True, capture_output=True)
+    has_nl = sys.platform != "win32"
+    if has_nl:
+        subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add",
+                        "--name", "nlsub", "-q", str(s3), NL_SUB],
+                       cwd=project, check=True, capture_output=True)
+    _git(project, "commit", "-qm", "submodules")
+    # declared-only .gitmodules entry (committed), no gitlink in HEAD/index
+    with open(project / ".gitmodules", "a") as f:
+        f.write('[submodule "declared"]\n\tpath = declared/x\n\turl = ./x\n')
+    _git(project, "commit", "-qam", "declare-only")
+    _mk_source_repo(project / "declared" / "x")          # nested plain repo at that path
+    _mk_source_repo(project / "vendor2" / "localrepo")   # untracked embedded repo
+    (project / "vendor2" / "localrepo" / "tracked.txt").write_text("pre-dirty\n")
+    _mk_source_repo(project / "vendor")                  # suffix lookalike of "sub\nvendor"
+    (project / "newdir").mkdir(); (project / "newdir" / "pre.txt").write_text("pre")
+    (project / "tracked2.txt").write_text("pre-modified\n")
+    (project / "libs" / "regsub" / "tracked.txt").write_text("sub pre-dirty\n")
+    return {"has_nl": has_nl}
+
+
+RETRY_CASES = {
+    "a-cycle-add":         ([{"cycle_add": True}], "handoff state changed"),
+    "b-commit":            ([{"git": ["-c", "user.email=t@t", "-c", "user.name=t", "commit",
+                                      "--allow-empty", "-qm", "x"]}], "worktree changed"),
+    "c-untracked-dir":     ([{"write": ["newdir/inner.txt", "x"]}], "worktree changed"),
+    "d-tracked-clean":     ([{"write": ["tracked.txt", "edit"]}], "worktree changed"),
+    "e-tracked-premod":    ([{"write": ["tracked2.txt", "again"]}], "worktree changed"),
+    "f-untracked-content": ([{"write": ["newdir/pre.txt", "changed"]}], "worktree changed"),
+    "g-stage-only":        ([{"git": ["add", "-A"]}], "worktree changed"),
+    "h-registered-sub":    ([{"write": ["libs/regsub/tracked.txt", "again"]}], "worktree changed"),
+    "i-embedded":          ([{"write": ["vendor2/localrepo/tracked.txt", "again"]}], "worktree changed"),
+    "j-declared-only":     ([{"write": ["declared/x/tracked.txt", "x"]}], "worktree changed"),
+    "k-newline-lookalike": ([{"write": ["vendor/tracked.txt", "x"]}], "worktree changed"),
+    "l-nested-sub":        ([{"write": ["libs/regsub/inner/tracked.txt", "x"]}], "worktree changed"),
+}
+
+
 class TestRetries:
-    def _setup(self, project, monkeypatch, tmp_path):
-        _git_init(project)
-        # tmp_path IS the project; keep the fake's counter under the ignored
-        # .tagteam/ so it is not itself a worktree change.
+    """Mirrors the approved plan's retry-gate criteria (a)–(l) one-to-one."""
+
+    def _setup(self, project, monkeypatch, tmp_path_factory, gitlinks: bool):
+        if gitlinks:
+            _build_gitlink_fixture(project, tmp_path_factory.mktemp("srcrepos"))
+        else:
+            _git_init(project)
         (project / ".tagteam").mkdir(exist_ok=True)
-        counter = project / ".tagteam" / "fake-counter"
-        monkeypatch.setenv("FAKE_AGENT_COUNTER", str(counter))
+        monkeypatch.setenv("FAKE_AGENT_COUNTER", str(project / ".tagteam" / "fake-counter"))
         return _init_cycle(project)
 
-    def test_clean_failure_retried_then_ok(self, project, fake_path, monkeypatch, tmp_path):
-        st = self._setup(project, monkeypatch, tmp_path)
+    def test_clean_failure_retried_then_ok(self, project, fake_path, monkeypatch, tmp_path_factory):
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=False)
         monkeypatch.setenv("FAKE_AGENT_MODE", "flaky")
         monkeypatch.setenv("FAKE_AGENT_FAIL_TIMES", "1")
         eng = _engine(project, retries=2)
         res = eng.run_owed_turn(st)
         assert res.outcome == "ok", (res.reason, eng._test_logs)
-        rows = _usage_rows(project)
-        assert [r["status"] for r in rows] == ["nonzero_exit", "ok"]
+        assert [r["status"] for r in _usage_rows(project)] == ["nonzero_exit", "ok"]
         assert eng.paused() is None
         logs = list(h.turns_dir(project).glob("*.log"))
         assert any("retry 1/2" in p.read_text() for p in logs)
-        assert any(l.endswith("_a2.log") for l in (p.name for p in logs))
+        assert any(p.name.endswith("_a2.log") for p in logs)
 
-    def test_retries_exhausted_pauses(self, project, fake_path, monkeypatch, tmp_path):
-        st = self._setup(project, monkeypatch, tmp_path)
-        monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
+    def test_clean_failure_retried_with_gitlinks_present(self, project, fake_path, monkeypatch,
+                                                         tmp_path_factory):
+        """A repo full of gitlinks still retries a genuinely clean failure."""
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=True)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "flaky")
+        monkeypatch.setenv("FAKE_AGENT_FAIL_TIMES", "1")
         eng = _engine(project, retries=1)
         res = eng.run_owed_turn(st)
-        assert res.outcome == "nonzero_exit"
+        assert res.outcome == "ok", (res.reason, eng._test_logs)
+        assert [r["status"] for r in _usage_rows(project)] == ["nonzero_exit", "ok"]
+
+    def test_retries_exhausted_pauses(self, project, fake_path, monkeypatch, tmp_path_factory):
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=False)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
+        eng = _engine(project, retries=1)
+        assert eng.run_owed_turn(st).outcome == "nonzero_exit"
         assert len(_usage_rows(project)) == 2 and eng.paused()
 
-    @pytest.mark.parametrize("effect,label", [
-        ([{"cycle_add": True}], "handoff state changed"),
-        ([{"git": ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "x"]}], "worktree changed"),
-        ([{"write": ["tracked.txt", "edit"]}], "worktree changed"),
-        ([{"write": ["newdir/inner.txt", "x"]}], "worktree changed"),
-        ([{"git": ["add", "-A"]}], "worktree changed"),
-    ])
-    def test_side_effects_block_retry(self, project, fake_path, monkeypatch, tmp_path, effect, label):
-        st = self._setup(project, monkeypatch, tmp_path)
-        (project / "newdir").mkdir(); (project / "newdir" / "pre.txt").write_text("pre")  # already-untracked dir
-        (project / "tracked.txt").write_text("pre-modified\n")                              # already-modified tracked
+    @pytest.mark.parametrize("case", list(RETRY_CASES))
+    def test_criteria_a_to_l_block_retry(self, project, fake_path, monkeypatch,
+                                         tmp_path_factory, case):
+        info = self._build_and_check(project, monkeypatch, tmp_path_factory, case)
+        st = info["state"]
+        effect, label = RETRY_CASES[case]
         monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
         monkeypatch.setenv("FAKE_AGENT_SIDE_EFFECT", json.dumps(effect))
         eng = _engine(project, retries=3)
         res = eng.run_owed_turn(st)
         assert res.outcome == "nonzero_exit"
-        assert len(_usage_rows(project)) == 1          # no retry
+        assert len(_usage_rows(project)) == 1, "must not retry"
         assert eng.paused()
         assert any(label in l for l in eng._test_logs), eng._test_logs
 
-    def test_pre_dirty_embedded_repo_edit_blocks_retry(self, project, fake_path, monkeypatch, tmp_path):
-        st = self._setup(project, monkeypatch, tmp_path)
-        emb = project / "vendor" / "localrepo"; emb.mkdir(parents=True); _git_init(emb)
-        (emb / "tracked.txt").write_text("dirty\n")
-        monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
-        monkeypatch.setenv("FAKE_AGENT_SIDE_EFFECT", json.dumps([{"write": ["vendor/localrepo/tracked.txt", "more"]}]))
-        eng = _engine(project, retries=2)
-        assert eng.run_owed_turn(st).outcome == "nonzero_exit"
-        assert len(_usage_rows(project)) == 1
+    def _build_and_check(self, project, monkeypatch, tmp_path_factory, case):
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=True)
+        if case == "k-newline-lookalike" and sys.platform == "win32":
+            pytest.skip("newline in path not allowed on Windows")
+        # (i)–(l): the same edit changes the fingerprint directly.
+        if case[0] in "ijkl":
+            effect, _ = RETRY_CASES[case]
+            path, content = effect[0]["write"]
+            before = fpm.repo_fingerprint(project)
+            assert before not in (None, fpm.UNSUPPORTED)
+            with open(project / path, "a") as f:
+                f.write(content)
+            after = fpm.repo_fingerprint(project)
+            assert after != before, f"{case}: fingerprint did not change"
+            with open(project / path, "a") as f:
+                f.write("")  # (no-op) keep the tree in this edited state for the engine run
+        return {"state": st}
 
-    def test_no_round_and_unsupported_never_retried(self, project, fake_path, monkeypatch, tmp_path):
-        st = self._setup(project, monkeypatch, tmp_path)
+    def test_fingerprint_fixture_shape(self, project, tmp_path_factory):
+        info = _build_gitlink_fixture(project, tmp_path_factory.mktemp("srcrepos"))
+        listing = subprocess.run(["git", "ls-files", "--stage", "-z"], cwd=project,
+                                 capture_output=True).stdout.split(b"\0")
+        gitlinks = [e.split(b"\t", 1)[1] for e in listing if e.startswith(b"160000")]
+        assert b"libs/regsub" in gitlinks
+        if info["has_nl"]:
+            assert NL_SUB.encode() in gitlinks
+        inner = subprocess.run(["git", "ls-files", "--stage", "-z"], cwd=project / "libs" / "regsub",
+                               capture_output=True).stdout
+        assert b"160000" in inner and b"inner" in inner       # registered nested sub-submodule
+        gm = (project / ".gitmodules").read_text()
+        assert "declared/x" in gm and b"declared" not in b"".join(gitlinks)   # declared-only
+        assert (project / "vendor" / ".git").exists() and (project / "vendor2" / "localrepo" / ".git").exists()
+
+    def test_no_round_never_retried(self, project, fake_path, monkeypatch, tmp_path_factory):
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=False)
         monkeypatch.setenv("FAKE_AGENT_MODE", "no_round")
         eng = _engine(project, retries=3)
         assert eng.run_owed_turn(st).outcome == "no_round"
         assert len(_usage_rows(project)) == 1
-        h.clear_pause(project)
+        assert any("never retried" in l for l in eng._test_logs)
+
+    @needs_proc_inspection
+    def test_cancelled_never_retried(self, project, fake_path, monkeypatch, tmp_path_factory, tmp_path):
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=False)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "grandchild_hang")
+        pidfile = project / ".tagteam" / "gc.pid"
+        monkeypatch.setenv("FAKE_AGENT_PIDFILE", str(pidfile))
+        eng = _engine(project, timeout_minutes=5, retries=3)
+        results = {}
+        th = threading.Thread(target=lambda: results.update(r=eng.run_owed_turn(st))); th.start()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            inf = h.read_inflight(project)
+            if inf and inf.get("pid") and inf.get("child_ident") and pidfile.exists():
+                break
+            time.sleep(0.1)
+        assert controls.cancel_turn_command(["--by", "jack"], project_root=project) == 0
+        th.join(60)
+        assert results["r"].outcome == "cancelled"
+        assert len(_usage_rows(project)) == 1
+        assert any("never retried" in l for l in eng._test_logs)
+
+    @pytest.mark.parametrize("failure", ["git", "parse", "recursion", "probe"])
+    def test_unsupported_variants_never_retried(self, project, fake_path, monkeypatch,
+                                                tmp_path_factory, failure):
+        st = self._setup(project, monkeypatch, tmp_path_factory, gitlinks=(failure == "recursion"))
+        real_git = fpm._git
+        if failure == "git":
+            def bad(cwd, *args, **kw):
+                if args and args[0] == "write-tree":
+                    raise fpm.FingerprintError("boom")
+                return real_git(cwd, *args, **kw)
+            monkeypatch.setattr(fpm, "_git", bad)
+        elif failure == "parse":
+            def bad(cwd, *args, **kw):
+                r = real_git(cwd, *args, **kw)
+                if args and args[0] == "ls-files":
+                    r.stdout = b"garbage-without-tab\0"
+                return r
+            monkeypatch.setattr(fpm, "_git", bad)
+        elif failure == "recursion":
+            monkeypatch.setattr(fpm, "_MAX_DEPTH", 0)     # first gitlink recursion is "too deep"
+        else:
+            monkeypatch.setattr(fpm, "probe_repo", lambda root: "unknown")
+        assert fpm.repo_fingerprint(project) == fpm.UNSUPPORTED
         monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
-        monkeypatch.setattr(fpm, "repo_fingerprint", lambda root: fpm.UNSUPPORTED)
+        eng = _engine(project, retries=3)
         assert eng.run_owed_turn(st).outcome == "nonzero_exit"
-        assert len(_usage_rows(project)) == 2
+        assert len(_usage_rows(project)) == 1
         assert any("UNSUPPORTED" in l for l in eng._test_logs)
 
     def test_non_git_only_spawn_failed_retried(self, project, fake_path, monkeypatch, tmp_path):
