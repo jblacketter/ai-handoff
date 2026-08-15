@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from tagteam.config import HEADLESS_PROVIDERS, get_headless_spec
+from tagteam.config import HEADLESS_PROVIDERS, get_headless_spec, validate_config
 
 # ---------------------------------------------------------------------------
 # Constants / paths
@@ -60,6 +60,7 @@ OUTCOME_OK = "ok"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_NONZERO = "nonzero_exit"
 OUTCOME_NO_ROUND = "no_round"
+OUTCOME_SPAWN_FAILED = "spawn_failed"   # OSError from Popen (bad exe, perms, ...)
 
 VARIADIC = -1  # option arity: one or more values until the next flag
 
@@ -69,6 +70,11 @@ _REVIEWER_ACTIONS = {"APPROVE", "REQUEST_CHANGES", "ESCALATE", "NEED_HUMAN"}
 
 class HeadlessConfigError(ValueError):
     """Raised at startup for unresolvable executables or invalid args."""
+
+
+class SpawnError(RuntimeError):
+    """Raised by run_process when the child could not be started at all
+    (OSError from Popen: missing/non-executable file, permissions, ...)."""
 
 
 def _now_iso() -> str:
@@ -318,14 +324,23 @@ def validate_user_args(adapter: Adapter, user_args: list[str]) -> tuple[list[str
 def resolve_executable(provider: str, configured: str | None) -> str:
     """argv[0]: ``headless.executable`` if set (resolved with which when it
     isn't a path), else ``shutil.which(provider)``. Raises when unresolvable."""
+    if configured is not None and not isinstance(configured, str):
+        raise HeadlessConfigError(
+            f"headless.executable must be a string (got {type(configured).__name__})")
     if configured:
         cand = configured
         p = Path(cand)
         if p.is_absolute() or os.sep in cand or (os.altsep and os.altsep in cand):
-            if p.exists():
-                return str(p)
-            raise HeadlessConfigError(
-                f"headless.executable {configured!r} does not exist")
+            if not p.exists():
+                raise HeadlessConfigError(
+                    f"headless.executable {configured!r} does not exist")
+            if not p.is_file():
+                raise HeadlessConfigError(
+                    f"headless.executable {configured!r} is not a file")
+            if not os.access(str(p), os.X_OK):
+                raise HeadlessConfigError(
+                    f"headless.executable {configured!r} is not executable")
+            return str(p)
         found = shutil.which(cand)
         if not found:
             raise HeadlessConfigError(
@@ -732,11 +747,14 @@ class RunOutput:
 def run_process(argv: list[str], prompt: str, cwd: str | Path, *,
                 events_path: Path, log_path: Path, provider: str,
                 timeout_s: float, on_line: Callable[[str], None] | None = None,
+                on_spawn: Callable[[int], None] | None = None,
                 env: dict | None = None) -> RunOutput:
     """Spawn ``argv`` with ``prompt`` on stdin; stream stdout (structured)
     to ``events_path`` and rendered stdout + ``[stderr]`` lines to
-    ``log_path``, both flushed per line. Kills the process tree on
-    timeout or KeyboardInterrupt (the latter is re-raised)."""
+    ``log_path``, both flushed per line. ``on_spawn(pid)`` is called right
+    after a successful Popen. Raises ``SpawnError`` if the child cannot
+    be started. Kills the process tree on timeout or KeyboardInterrupt
+    (the latter is re-raised)."""
     events_path.parent.mkdir(parents=True, exist_ok=True)
     popen_kwargs: dict = dict(
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -761,8 +779,17 @@ def run_process(argv: list[str], prompt: str, cwd: str | Path, *,
                     pass
 
         write_log(f"[tagteam] {_now_iso()} spawning: {' '.join(argv)}")
-        proc = subprocess.Popen(argv, **popen_kwargs)
+        try:
+            proc = subprocess.Popen(argv, **popen_kwargs)
+        except OSError as e:
+            write_log(f"[tagteam] spawn failed: {type(e).__name__}: {e}")
+            raise SpawnError(f"{type(e).__name__}: {e}") from e
         write_log(f"[tagteam] spawned pid {proc.pid}")
+        if on_spawn:
+            try:
+                on_spawn(proc.pid)
+            except Exception:
+                pass
 
         def feed_stdin():
             try:
@@ -912,6 +939,34 @@ def verify_transition(project_root: str | Path, ident: TurnIdentity,
             f"no {expected_role} entry with action in {sorted(allowed)} at round "
             f"{ident.target_round} for {ident.target_phase}_{ident.target_type} "
             f"(new entries: {seen or 'none'})")
+    # Per-cycle status must correspond to the matched action (plan
+    # "Outcome verification" §2): a matching entry plus stale/corrupt
+    # cycle status is NOT ok.
+    status = _read_status(root, ident.target_phase, ident.target_type) or {}
+    action = match.get("action")
+    expected_status: set[tuple[str, str | None]]
+    if action == "SUBMIT_FOR_REVIEW":
+        expected_status = {("in-progress", "reviewer")}
+    elif action == "APPROVE":
+        expected_status = {("approved", None)}
+    elif action == "REQUEST_CHANGES":
+        # auto-escalation on stale rounds turns REQUEST_CHANGES into escalated
+        expected_status = {("in-progress", "lead"), ("escalated", "human")}
+    elif action == "ESCALATE":
+        expected_status = {("escalated", "human")}
+    elif action == "NEED_HUMAN":
+        expected_status = {("needs-human", "human")}
+    else:  # pragma: no cover - guarded by allowed sets above
+        expected_status = set()
+    got = (status.get("state"), status.get("ready_for"))
+    if got not in expected_status:
+        return False, (f"cycle entry present but cycle status is "
+                       f"state={got[0]!r} ready_for={got[1]!r}; expected one of "
+                       f"{sorted(expected_status)} after {action}")
+    if int(status.get("round") or -1) != ident.target_round:
+        return False, (f"cycle entry present but cycle status round="
+                       f"{status.get('round')!r} != {ident.target_round}")
+
     state = read_state(root) or {}
     problems = []
     if str(state.get("phase") or "") != ident.target_phase:
@@ -983,14 +1038,26 @@ class HeadlessEngine:
     def validate(self) -> list[str]:
         """Resolve executables + build argv for both roles. Returns errors."""
         errors: list[str] = []
+        # Strict config validation first: a headless block that fails
+        # `validate_config` (non-list args, unknown provider, unknown
+        # keys, bad executable type) must stop startup, never be coerced.
+        for e in validate_config(self.config):
+            errors.append(f"tagteam.yaml: {e}")
+        if errors:
+            return errors  # config errors are fatal; don't build roles on top
         for role in ("lead", "reviewer"):
             spec = get_headless_spec(self.config, role)
             provider = spec["provider"]
             if provider not in ADAPTERS:
-                errors.append(
-                    f"agents.{role}: cannot determine headless provider "
-                    f"(set agents.{role}.headless.provider to one of "
-                    f"{', '.join(HEADLESS_PROVIDERS)})")
+                if provider is None:
+                    errors.append(
+                        f"agents.{role}: cannot determine headless provider "
+                        f"(set agents.{role}.headless.provider to one of "
+                        f"{', '.join(HEADLESS_PROVIDERS)})")
+                else:
+                    errors.append(
+                        f"agents.{role}: unknown headless provider {provider!r} "
+                        f"(must be one of {', '.join(HEADLESS_PROVIDERS)})")
                 continue
             adapter = ADAPTERS[provider]
             try:
@@ -1071,8 +1138,16 @@ class HeadlessEngine:
             "events_path": str(events_path), "started_at": started_at,
             "pid": None,
         }
-        inflight_path(self.project_root).write_text(
-            json.dumps(inflight, indent=2), encoding="utf-8")
+        inflight_file = inflight_path(self.project_root)
+        inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
+
+        def _on_spawn(pid: int) -> None:
+            inflight["pid"] = pid
+            try:
+                inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
+            except OSError:
+                pass
+
         self._log(f"   headless: spawning {spec.provider} for {spec.agent_name} "
                   f"({role}) — log: {log_path}")
 
@@ -1081,19 +1156,26 @@ class HeadlessEngine:
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
             env.pop(k, None)
 
+        spawn_error: str | None = None
         try:
             out = run_process(spec.argv, prompt, self.project_root,
                               events_path=events_path, log_path=log_path,
                               provider=spec.provider, timeout_s=self.timeout_s,
-                              env=env)
+                              on_spawn=_on_spawn, env=env)
+        except SpawnError as e:
+            spawn_error = str(e)
+            out = RunOutput(exit_code=None, timed_out=False, duration_ms=0)
         finally:
             try:
-                inflight_path(self.project_root).unlink()
+                inflight_file.unlink()
             except OSError:
                 pass
 
         # Outcome
-        if out.timed_out:
+        if spawn_error is not None:
+            outcome, reason = OUTCOME_SPAWN_FAILED, (
+                f"could not start {spec.provider} ({spec.executable}): {spawn_error}")
+        elif out.timed_out:
             outcome, reason = OUTCOME_TIMEOUT, (
                 f"turn exceeded {self.timeout_s / 60:.0f} min timeout")
         elif out.exit_code != 0:

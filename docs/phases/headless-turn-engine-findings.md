@@ -47,13 +47,33 @@ Set up: plan cycle approved, then `state set --turn lead --status ready --comman
   than pytest's, so its first `python -m pytest` failed and it recovered by calling
   `pytest` directly. Not a tagteam issue, but worth knowing when reading logs.
 
-### (a) Phase 31 impl-cycle turns headless (this repo)
+### (a) Phase 31 impl-cycle turns headless (this repo, 2026-08-14)
 
-_filled in below_
+The impl cycle `headless-turn-engine-30-arc_impl` was opened by the interactive lead
+and its **round-1 review was a headless Codex turn** spawned by
+`tagteam watch --mode headless` on this repo:
+
+| Turn | Provider | Outcome | Wall | in / out / cache-read | CLI turns |
+|---|---|---|---|---|---|
+| reviewer (impl r1) | codex | ok — REQUEST_CHANGES (5 blocking items) | 205.8 s | 1 688 685 / 7 554 / 1 557 248 | 1 |
+
+- The review was substantive (it reproduced two config-validation gaps, found the
+  missing PID in `inflight.json`, unhandled spawn `OSError`, and the missing per-cycle
+  status check) — evidence that a headless reviewer with only the contract + state + tail
+  in its prompt does real work against the tree.
+- **Pause marker used as intended:** while the reviewer turn was in flight, the
+  interactive lead wrote `.tagteam/headless-paused.json` ("manual hold") so the watcher
+  would not spawn a *second* Claude into the same working tree; the watcher logged
+  `PAUSED` on the flip and did not dispatch. This is exactly the shape Phase 32's
+  `tagteam pause` will formalize.
+- Round-2 review is also run headless (numbers appended when it lands).
 
 ### (b) Phase 32 plan cycle headless (this repo)
 
-_to be run when Phase 32 planning starts (after soak green-light)_
+**Revised gate (impl r2):** this item is a *soak-period* deliverable, not an impl-approval
+gate — by construction it can only run once 0.8.0 has shipped, soaked, and Jack
+green-lights Phase 32 planning (proposal §5). It stays open here and is closed when
+Phase 32's plan cycle runs under `--mode headless`.
 
 ## Downgrade proof (0.7.1 opens a v3 project) — done 2026-08-14
 
@@ -73,6 +93,8 @@ scratch project above (DB `user_version = 3`, 2 usage rows):
 ## Windows
 
 - CI: `.github/workflows/tests.yml` runs the full suite on `windows-latest`
-  (fake-agent shims via `.cmd`). Status: _pending first push_.
+  (fake-agent shims via `.cmd`). Status: **pending first push** — the lead has commit
+  permission only; the workflow runs when Jack pushes `main`. **Revised gate:** a green
+  windows-latest run gates the `v0.8.0` tag push, not impl approval.
 - Real signed-in CLI smoke on a Windows machine: **not performed** in this
   phase (no Windows host available); recorded here per the plan's Decisions §2.

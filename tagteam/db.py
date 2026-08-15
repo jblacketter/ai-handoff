@@ -26,7 +26,7 @@ from pathlib import Path
 # older release can still open a newer DB after a downgrade.
 SCHEMA_VERSION = 3
 
-USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round"}
+USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed"}
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",

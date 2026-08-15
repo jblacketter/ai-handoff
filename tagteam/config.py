@@ -363,8 +363,11 @@ def infer_headless_provider(config: dict, role: str) -> str | None:
         return None
     headless = agent.get("headless") or {}
     explicit = headless.get("provider") if isinstance(headless, dict) else None
-    if explicit in HEADLESS_PROVIDERS:
-        return explicit
+    if explicit is not None:
+        # An explicit provider is authoritative: return it even when it is
+        # not a known provider so callers report it instead of silently
+        # falling back to inference (reviewer finding, Phase 31 impl r1).
+        return explicit if isinstance(explicit, str) else str(explicit)
     candidates: list[str] = []
     command = agent.get("command")
     if isinstance(command, str) and command.strip():
@@ -383,9 +386,11 @@ def infer_headless_provider(config: dict, role: str) -> str | None:
 def get_headless_spec(config: dict, role: str) -> dict:
     """Return ``{"provider", "executable", "args"}`` for a role.
 
-    ``provider`` may be None (uninferable — the caller reports it);
-    ``executable`` is the configured string or None (caller resolves the
-    provider name via ``shutil.which``); ``args`` is always a list.
+    ``provider`` may be None (uninferable) or an unknown explicit value —
+    the caller reports either; ``executable`` is the configured value or
+    None (caller resolves the provider name via ``shutil.which``);
+    ``args`` is the raw configured value (a list when valid; anything
+    else is passed through so `headless.build_argv` can reject it) or [].
     """
     agents = config.get("agents", {}) if isinstance(config, dict) else {}
     agent = agents.get(role, {}) if isinstance(agents, dict) else {}
@@ -395,5 +400,5 @@ def get_headless_spec(config: dict, role: str) -> dict:
     return {
         "provider": infer_headless_provider(config, role),
         "executable": headless.get("executable") or None,
-        "args": list(args) if isinstance(args, list) else [],
+        "args": list(args) if isinstance(args, list) else (args if args is not None else []),
     }

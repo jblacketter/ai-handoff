@@ -241,6 +241,14 @@ class TestProviderAndExecutable:
         cfg2 = {"agents": {"lead": {"name": "Claude"}, "reviewer": {"name": "Gemini"}}}
         assert get_headless_spec(cfg2, "lead")["provider"] == "claude"    # name
         assert get_headless_spec(cfg2, "reviewer")["provider"] is None    # uninferable
+        # explicit-but-unknown provider is reported, never inferred around
+        cfg3 = {"agents": {"lead": {"name": "Claude", "headless": {"provider": "gemini"}},
+                           "reviewer": {"name": "Codex"}}}
+        assert get_headless_spec(cfg3, "lead")["provider"] == "gemini"
+        # non-list args are passed through raw so startup can reject them
+        cfg4 = {"agents": {"lead": {"name": "Claude", "headless": {"args": "--model opus"}},
+                           "reviewer": {"name": "Codex"}}}
+        assert get_headless_spec(cfg4, "lead")["args"] == "--model opus"
 
     def test_validate_config_rejects_bad_headless(self):
         base = {"agents": {"lead": {"name": "A"}, "reviewer": {"name": "B"}}}
@@ -264,6 +272,15 @@ class TestProviderAndExecutable:
             h.resolve_executable("claude", str(tmp_path / "nope" / "claude"))
         with pytest.raises(h.HeadlessConfigError, match="not found on PATH"):
             h.resolve_executable("claude", "some-missing-name")
+        with pytest.raises(h.HeadlessConfigError, match="not a file"):
+            h.resolve_executable("claude", str(tmp_path))  # a directory
+        with pytest.raises(h.HeadlessConfigError, match="must be a string"):
+            h.resolve_executable("claude", 42)  # type: ignore[arg-type]
+        if sys.platform != "win32":
+            f = tmp_path / "notexec"
+            f.write_text("#!/bin/sh\n"); f.chmod(0o644)
+            with pytest.raises(h.HeadlessConfigError, match="not executable"):
+                h.resolve_executable("claude", str(f))
 
     def test_engine_validate_reports_errors(self, project, tmp_path, monkeypatch):
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
@@ -282,6 +299,29 @@ class TestProviderAndExecutable:
         errors = eng.validate()
         assert any("reserved" in e for e in errors)
         assert any("cannot determine headless provider" in e for e in errors)
+
+    @pytest.mark.parametrize("headless_yaml,needle", [
+        ("      args: \"--model opus\"\n", "list of strings"),
+        ("      provider: gemini\n", "gemini"),
+        ("      executable: 42\n", "executable"),
+        ("      bogus: 1\n", "unknown keys"),
+    ])
+    def test_engine_and_watch_reject_invalid_headless_config(
+            self, project, fake_path, headless_yaml, needle):
+        """Reviewer finding (impl r1): invalid headless config must fail at
+        startup even though the executables resolve and the name would
+        infer a valid provider."""
+        (project / "tagteam.yaml").write_text(
+            "agents:\n"
+            "  lead:\n    name: Claude\n    headless:\n" + headless_yaml +
+            "  reviewer:\n    name: Codex\n", encoding="utf-8")
+        eng = h.HeadlessEngine(project, read_config(project / "tagteam.yaml"),
+                               lead_name="Claude", reviewer_name="Codex", log=lambda m: None)
+        errors = eng.validate()
+        assert errors and any(needle in e for e in errors), errors
+        assert "lead" not in eng.roles  # nothing was launched/configured for lead
+        from tagteam import watcher
+        assert watcher.watch_command(["--mode", "headless"]) == 1
 
     def test_engine_validate_uses_which_through_shims(self, project, fake_path):
         eng = _engine(project)
@@ -434,6 +474,51 @@ class TestVerifyTransition:
         ok, why = h.verify_transition(project, ident, "Codex")
         assert not ok and "state mismatch" in why
 
+    def test_matching_entry_but_tampered_cycle_status_is_not_ok(self, project):
+        """Reviewer finding (impl r1): a matching action entry with a stale
+        or corrupt per-cycle status must not verify."""
+        st = _init_cycle(project)  # reviewer owed at round 1
+        ident = h.snapshot_identity(project, st)
+        cycle_mod.add_round("feat-x", "plan", "reviewer", "REQUEST_CHANGES", 1, "r",
+                            str(project), updated_by="Codex")
+        ok, why = h.verify_transition(project, ident, "Codex")
+        assert ok, why
+        conn = db.connect(project_dir=str(project))
+        try:
+            # ready_for wrong for REQUEST_CHANGES
+            conn.execute("UPDATE cycles SET ready_for='reviewer' WHERE phase='feat-x'")
+            conn.commit()
+            ok, why = h.verify_transition(project, ident, "Codex")
+            assert not ok and "cycle status" in why
+            conn.execute("UPDATE cycles SET ready_for='lead', state='approved' WHERE phase='feat-x'")
+            conn.commit()
+            ok, why = h.verify_transition(project, ident, "Codex")
+            assert not ok and "cycle status" in why
+            # restore state, break round
+            conn.execute("UPDATE cycles SET state='in-progress', round=7 WHERE phase='feat-x'")
+            conn.commit()
+            ok, why = h.verify_transition(project, ident, "Codex")
+            assert not ok and "round" in why
+        finally:
+            conn.close()
+
+    def test_lead_submit_requires_ready_for_reviewer(self, project):
+        _init_cycle(project)
+        cycle_mod.add_round("feat-x", "plan", "reviewer", "REQUEST_CHANGES", 1, "fix",
+                            str(project), updated_by="Codex")
+        st = state_mod.read_state(str(project))
+        ident = h.snapshot_identity(project, st)
+        cycle_mod.add_round("feat-x", "plan", "lead", "SUBMIT_FOR_REVIEW", 2, "done",
+                            str(project), updated_by="Claude")
+        assert h.verify_transition(project, ident, "Claude")[0]
+        conn = db.connect(project_dir=str(project))
+        try:
+            conn.execute("UPDATE cycles SET ready_for='lead' WHERE phase='feat-x'"); conn.commit()
+        finally:
+            conn.close()
+        ok, why = h.verify_transition(project, ident, "Claude")
+        assert not ok and "expected one of" in why
+
     def test_start_targets_cross_phase_and_plan_to_impl(self, project):
         _init_cycle(project, phase="phase-a")
         cycle_mod.add_round("phase-a", "plan", "reviewer", "APPROVE", 1, "ok",
@@ -578,14 +663,18 @@ class TestEngineE2E:
         st = _init_cycle(project)
         eng = _engine(project)
         sizes: list[tuple[int, bool]] = []  # (log size, inflight present)
+        pids: list = []
         stop = threading.Event()
 
         def sampler():
             d = h.turns_dir(project)
             while not stop.is_set():
                 logs = [f for f in d.glob("*.log")] if d.exists() else []
+                inflight = h.read_inflight(project)
                 if logs:
-                    sizes.append((logs[0].stat().st_size, h.read_inflight(project) is not None))
+                    sizes.append((logs[0].stat().st_size, inflight is not None))
+                if inflight is not None:
+                    pids.append(inflight.get("pid"))
                 time.sleep(0.05)
 
         th = threading.Thread(target=sampler, daemon=True); th.start()
@@ -594,6 +683,10 @@ class TestEngineE2E:
         assert res.outcome == "ok", res.reason
         inflight_sizes = sorted({s for s, inflight in sizes if inflight})
         assert len(inflight_sizes) >= 2, f"log did not grow while in flight: {sizes}"
+        # Reviewer finding (impl r1): inflight.json carries the live PID.
+        live = [p for p in pids if isinstance(p, int)]
+        assert live, f"inflight.json never had an integer pid: {pids}"
+        assert all(p == live[0] for p in live)
         events = Path(res.events_path).read_text()
         log = Path(res.log_path).read_text()
         assert "warning: something noisy" not in events
@@ -641,6 +734,56 @@ class TestEngineE2E:
         st = state_mod.read_state(str(project))
         res = _engine(project).run_owed_turn(st)
         assert res.outcome == "no_round" and "was not created" in res.reason
+
+    def test_ctrl_c_kills_child_and_clears_inflight(self, project, fake_path, monkeypatch, tmp_path):
+        monkeypatch.setenv("FAKE_AGENT_MODE", "grandchild_hang")
+        pidfile = tmp_path / "gc.pid"
+        monkeypatch.setenv("FAKE_AGENT_PIDFILE", str(pidfile))
+        st = _init_cycle(project)
+        eng = _engine(project, timeout_minutes=5)
+        real_wait = h.subprocess.Popen.wait
+        seen = {}
+
+        def interrupting_wait(self_, timeout=None):
+            if "pid" in seen:  # later calls (kill-tree cleanup) behave normally
+                return real_wait(self_, timeout=timeout)
+            # let the fake start its grandchild, then simulate Ctrl-C
+            deadline = time.monotonic() + 20
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            seen["pid"] = self_.pid
+            raise KeyboardInterrupt
+        monkeypatch.setattr(h.subprocess.Popen, "wait", interrupting_wait)
+        with pytest.raises(KeyboardInterrupt):
+            eng.run_owed_turn(st)
+        monkeypatch.setattr(h.subprocess.Popen, "wait", real_wait)
+        assert h.read_inflight(project) is None
+        gpid = int(pidfile.read_text())
+        deadline = time.monotonic() + 10
+        while (_pid_alive(gpid) or _pid_alive(seen["pid"])) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert not _pid_alive(seen["pid"]) and not _pid_alive(gpid)
+
+    def test_spawn_failure_is_recorded_and_pauses(self, project, fake_path, monkeypatch):
+        """Reviewer finding (impl r1): an OSError from Popen must become a
+        recorded, paused failure — usage row, diagnostic, marker, notify."""
+        st = _init_cycle(project)
+        eng = _engine(project)
+        real_popen = h.subprocess.Popen
+
+        def boom(*a, **k):
+            raise PermissionError(13, "Permission denied", a[0][0])
+        monkeypatch.setattr(h.subprocess, "Popen", boom)
+        res = eng.run_owed_turn(st)
+        monkeypatch.setattr(h.subprocess, "Popen", real_popen)
+        assert res.outcome == "spawn_failed" and "Permission denied" in res.reason
+        assert res.exit_code is None
+        assert eng.paused()["outcome"] == "spawn_failed"
+        assert _usage_rows(project)[-1]["status"] == "spawn_failed"
+        assert "headless_turn_failed" in _diag_kinds(project)
+        assert eng._test_notes and "spawn_failed" in eng._test_notes[-1][1]
+        assert h.read_inflight(project) is None
+        assert "spawn failed" in Path(res.log_path).read_text()
 
     def test_prune_keeps_newest(self, project):
         d = h.turns_dir(project); d.mkdir(parents=True)
@@ -862,6 +1005,7 @@ class TestSchemaV3:
         assert [r["phase"] for r in rows] == ["p", "q"]
         assert db.get_usage(c, phase="q")[0]["status"] == "timeout"
         assert db.get_usage(c, phase="p", cycle_type="plan")[0]["input_tokens"] == 1
+        db.add_usage(c, ts="x", status="spawn_failed")
         with pytest.raises(ValueError):
             db.add_usage(c, ts="x", status="weird")
         with pytest.raises(ValueError):
