@@ -6,3 +6,8 @@ agents:
     name: Claude
   reviewer:
     name: Codex
+
+# Phase 33: escalation briefer (opt-in). Writes a decision brief when a
+# cycle escalates; see `tagteam brief` / `tagteam rule`.
+briefer:
+  enabled: true
