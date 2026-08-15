@@ -65,28 +65,52 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
    how long; if the marker was written by a failed turn, prints the failure
    reason + log path so the operator sees what they are resuming past. Exit 1
    if not paused (`--quiet` → 0).
-3. **`tagteam cancel-turn`** — reads `.tagteam/turns/inflight.json`; if a
-   turn is in flight, writes `.tagteam/turns/cancel-requested.json`
-   (`{stem, pid, by, ts}`) then kills the process tree (POSIX `killpg`,
-   Windows `taskkill /F /T /PID`) using the same helper as the engine
-   (`headless._kill_tree` refactored to take a pid). The engine, on child exit,
-   checks the cancel marker for its own stem → outcome **`cancelled`** (new,
-   additive status; usage row + diagnostic `headless_turn_cancelled` + pause
-   marker with `reason: "cancelled by <by>"`, notification). Exit 1 if
-   nothing in flight. Never leaves a stale cancel marker (engine removes it;
-   `cancel-turn` refuses if a marker for a *different* stem exists and says
-   so).
-4. **`tagteam interject "<note>" [--by NAME]`** — new additive table
-   `interjections` (schema v4). Provenance record (proposal Q4):
-   `id, ts, by (default: --by, else $TAGTEAM_ARBITER, else OS user), note,
+3. **`tagteam cancel-turn`** — reads `.tagteam/turns/inflight.json`, which
+   from this phase records `pid` (child), **`watcher_pid`** (the orchestrator
+   process that spawned it, `os.getpid()` in the engine) and `started_at`.
+   Before signalling anything it **binds the PID to the recorded turn**
+   (stale-inflight safety, reviewer r1):
+   - reject if `pid` is missing, equals the caller's own pid, or equals
+     `watcher_pid`;
+   - reject if the process is not alive;
+   - reject unless the process's **parent pid equals `watcher_pid`**
+     (POSIX: `ps -o ppid= -p PID`; Windows: PowerShell
+     `(Get-CimInstance Win32_Process -Filter "ProcessId=PID").ParentProcessId`;
+     lookup failure → *unverifiable → do not kill*);
+   - additionally reject if the process started before `started_at`
+     where the platform exposes it cheaply (POSIX `ps -o lstart=`), as a
+     second guard against PID reuse.
+   On rejection it prints why, **removes the stale `inflight.json`**
+   (metadata only — nothing is signalled) and exits 1. On success it writes
+   `.tagteam/turns/cancel-requested.json` (`{stem, pid, by, ts}`) and kills
+   the tree via `headless.kill_pid_tree(pid)` (POSIX `killpg`, Windows
+   `taskkill /F /T /PID`), printing the pid signalled and the marker path.
+   The engine, on child exit, checks the cancel marker for its own stem →
+   outcome **`cancelled`** (new additive status; usage row + diagnostic
+   `headless_turn_cancelled` + pause marker `reason: "cancelled by <by>"` +
+   notification); a marker for a *different* stem is logged as stale and
+   removed, never applied. Exit 1 if nothing is in flight.
+4. **`tagteam interject "<note>" [--by NAME] [--to lead|reviewer]`** — new
+   additive table `interjections` (schema v4). Provenance record (proposal
+   Q4): `id, ts, by (default: --by, else $TAGTEAM_ARBITER, else OS user),
+   note, target_role (NULL = next turn, else lead|reviewer — validated),
    phase, type, round, turn (who was owed when written), delivered_role,
    delivered_round, delivered_stem, delivered_ts` (delivery columns null
-   until consumed). Delivery:
+   until consumed). **No active owed cycle** (no state file, or status not
+   `ready`/`working`, e.g. `done`): the note is still stored — `phase/type/
+   round` from state when present, `turn` NULL — with a printed warning
+   "no turn is currently owed; the note will be delivered to the next turn
+   that starts". Delivery:
+   - **Pending selection** for a turn of role R: rows with `delivered_ts IS
+     NULL AND (target_role IS NULL OR target_role = R)`, ordered by id.
    - **Headless:** `compose_prompt` gains an
-     `=== ARBITER INTERJECTIONS (unconsumed) ===` block listing undelivered
-     notes (`[ts] by: note`); after the turn's outcome is `ok` the engine
-     stamps `delivered_*` for every note it included. Notes written *during* a
-     turn are delivered to the following turn (they were not in that prompt).
+     `=== ARBITER INTERJECTIONS (unconsumed) ===` block listing the selected
+     notes (`[ts] by (→ target or "next turn"): note`); the engine keeps the
+     **exact list of ids it rendered** and, only if the turn's outcome is
+     `ok`, stamps `delivered_*` for *those ids* (never "all pending" — a note
+     written mid-turn, or targeted at the other role, stays pending). A note
+     targeted at role X waits across the other role's `ok` turns untouched
+     and is delivered + stamped on X's next `ok` turn.
    - **Interactive:** `tagteam cycle rounds` (and `--tail`) attaches an
      additive `interjections: [...]` list to the round each note targets, so
      an agent reading its feedback sees them; SKILL.md gets a two-line note
@@ -117,14 +141,21 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
    tests).
 7. **Headless follow-ups from Phase 31 (measured):**
    - `--turn-retries N` (default 0) with a **deterministic at-least-once
-     rule**: before spawning, snapshot `git status --porcelain` (hash) of the
-     project; a failed attempt is retried only if outcome ∈
-     {`spawn_failed`, `nonzero_exit`, `timeout`} **and** the post-attempt
-     `git status --porcelain` hash equals the pre-spawn one (the attempt left
-     the tree untouched). `no_round`, `cancelled`, or any tree change →
-     pause as today. Every attempt has its own usage row / log stem; the log
-     says `[tagteam] retry k/N (tree unchanged)`. Non-git projects: retries
-     only for `spawn_failed`.
+     rule** gated on *both* repository and handoff state (reviewer r1):
+     before spawning, snapshot (a) the **repo fingerprint** = sha1 of
+     `git rev-parse HEAD` + `git status --porcelain=v1 -z
+     --untracked-files=all` (HEAD catches commit-then-fail; `--untracked-
+     files=all` catches edits under an already-untracked directory), and
+     (b) the **handoff fingerprint** = state `seq` + the target cycle's
+     entry count + `(state, ready_for, round)` from `cycle status`. A failed
+     attempt is retried only if outcome ∈ {`spawn_failed`, `nonzero_exit`,
+     `timeout`} **and both fingerprints are unchanged** after the attempt.
+     Any handoff transition (e.g. the agent's `cycle add` succeeded and it
+     then exited nonzero) → **never retry** — pause. `no_round`, `cancelled`,
+     any tree change → pause. Non-git projects: repo fingerprint is None and
+     only `spawn_failed` is retryable (handoff fingerprint still checked).
+     Every attempt has its own usage row / log stem; the log says
+     `[tagteam] retry k/N (repo + handoff fingerprints unchanged)`.
    - `agents.<role>.headless.timeout_minutes` (config; overrides
      `--turn-timeout` for that role; validated positive int).
    - **Trimmed skill contract — closed, keep full.** From Phase 31's usage
@@ -182,13 +213,19 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
 - `tagteam/notify.py` — **new**: `notify()`, per-platform backends,
   `TAGTEAM_NO_NOTIFY`.
 - `tagteam/db.py` — `SCHEMA_VERSION = 4`; `_SCHEMA_V4` (`interjections`
-  table + index); `USAGE_STATUSES += {"cancelled"}`; `add_interjection`,
-  `get_interjections(phase=None, type=None, undelivered_only=False)`,
-  `mark_interjections_delivered(ids, role, round, stem, ts)`.
+  table + index); `USAGE_STATUSES += {"cancelled"}`; `add_interjection(...,
+  target_role=None)` (validates role), `get_interjections(phase=None,
+  type=None, undelivered_only=False)`, `pending_interjections_for(role)`
+  (untargeted-or-matching, undelivered, by id),
+  `mark_interjections_delivered(ids, role, round, stem, ts)` (exact ids).
 - `tagteam/headless.py` — `_kill_tree(pid)` refactor + `kill_pid_tree(pid)`
-  public; cancel-marker detection → `OUTCOME_CANCELLED`; interjection block
-  in `compose_prompt` (new kwarg) + delivery stamping on `ok`; retries loop
-  with `git status` hash rule; per-role timeout; `notify()` via alias.
+  public; `inflight.json` gains `watcher_pid`; cancel-marker detection →
+  `OUTCOME_CANCELLED`; interjection block in `compose_prompt` (new kwarg,
+  rendered ids retained) + delivery stamping of exactly those ids on `ok`;
+  retries loop with repo + handoff fingerprints; per-role timeout;
+  `notify()` via alias. `tagteam/procs.py` (**new**, small): `pid_alive`,
+  `parent_pid`, `process_start_time` (POSIX `ps`, Windows PowerShell), used
+  by `cancel-turn`'s identity binding and by tests.
 - `tagteam/watcher.py` — pause check in `_handle_ready` for all modes (rate-
   limited log); `notify_macos = notify` alias; `--turn-retries`; help.
 - `tagteam/cycle.py` — `tail_rounds`/`_cli_rounds` attach `interjections`
@@ -218,6 +255,7 @@ CREATE TABLE IF NOT EXISTS interjections (
     ts              TEXT NOT NULL,
     by              TEXT,
     note            TEXT NOT NULL,
+    target_role     TEXT CHECK (target_role IS NULL OR target_role IN ('lead','reviewer')),
     phase           TEXT, type TEXT, round INTEGER, turn TEXT,
     delivered_role  TEXT, delivered_round INTEGER,
     delivered_stem  TEXT, delivered_ts TEXT
@@ -237,8 +275,15 @@ to 0.8.0 readers). Verified in the release checklist as in Phase 31.
 ### Cancel flow
 
 ```
-tagteam cancel-turn ──▶ write .tagteam/turns/cancel-requested.json {stem,pid,by,ts}
-                     └─▶ kill_pid_tree(pid)
+tagteam cancel-turn:
+   inflight = read inflight.json          (else: exit 1 "nothing in flight")
+   bind(pid, watcher_pid, started_at):    pid ∉ {missing, self, watcher_pid}
+                                          ∧ alive(pid)
+                                          ∧ parent_pid(pid) == watcher_pid   (unverifiable ⇒ reject)
+                                          ∧ start_time(pid) ≥ started_at    (when available)
+   if not bound: print reason; remove stale inflight.json; exit 1  (nothing signalled)
+   write .tagteam/turns/cancel-requested.json {stem,pid,by,ts}
+   kill_pid_tree(pid)
 engine (in run_owed_turn, after run_process returns):
    if cancel marker exists and marker.stem == this stem:
        outcome = cancelled; remove marker
@@ -264,17 +309,24 @@ ready state as new (re-dispatch once). Tested for notify + headless.
 ### Retries rule (deterministic at-least-once)
 
 ```
-pre = tree_hash()                     # sha1 of `git status --porcelain -z`, or None if not a git repo
+repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ `git status --porcelain=v1 -z --untracked-files=all`) or None (not a git repo)
+handoff_pre = handoff_fingerprint()   # (state.seq, target cycle entry count, cycle state/ready_for/round)
 for attempt in 0..N:
     run turn → outcome
     if outcome == ok: break
-    retryable = outcome in {spawn_failed, nonzero_exit, timeout}
-    unchanged = (pre is not None and tree_hash() == pre) or (pre is None and outcome == spawn_failed)
-    if attempt < N and retryable and unchanged: log retry; continue
+    retryable   = outcome in {spawn_failed, nonzero_exit, timeout}
+    handoff_ok  = handoff_fingerprint() == handoff_pre        # any transition ⇒ never retry
+    repo_ok     = (repo_pre is not None and repo_fingerprint() == repo_pre) \
+                  or (repo_pre is None and outcome == spawn_failed)
+    if attempt < N and retryable and handoff_ok and repo_ok: log retry; continue
     fail(outcome) ; break
 ```
 Each attempt: own stem, usage row (`attempt` is *not* a new column — the
-stem timestamp orders them; the log line names the attempt number).
+stem timestamp orders them; the log line names the attempt number). Tests
+(fake-agent modes): nonzero **after** a successful `cycle add` → no retry;
+`git commit` then nonzero → no retry; write inside an already-untracked
+directory then nonzero → no retry; clean nonzero → retried; `no_round` /
+`cancelled` → never retried.
 
 ### Notifications
 
@@ -295,10 +347,14 @@ stem timestamp orders them; the log line names the attempt number).
 ### Interject provenance & delivery
 
 `interject` writes the row with the *current* owed identity (phase, type,
-round, turn) so an auditor knows the state of the loop when the arbiter
-spoke. Delivery stamping happens only when the engine's outcome is `ok`
-(so an interjection whose turn failed remains pending and is re-delivered
-to the retry/next turn — the note was never *acted on*). `usage`/DB show
+round, turn — or NULL turn with a warning when nothing is owed) plus
+`target_role` (`--to`, default NULL = next turn) so an auditor knows the
+state of the loop when the arbiter spoke and who it was for. The engine
+selects `pending_interjections_for(role)` when composing, renders them,
+and remembers their ids; stamping happens only when the outcome is `ok`
+and only for those ids (a note whose turn failed remains pending and is
+re-delivered to the retry/next eligible turn — it was never *acted on*;
+a note targeted at the other role is not even rendered). `usage`/DB show
 `delivered_stem`, which maps 1:1 to the turn log the note went into.
 
 ### Implementation order
@@ -331,14 +387,25 @@ to the retry/next turn — the note was never *acted on*). `usage`/DB show
   (grandchild dead), the engine records outcome `cancelled` (usage row,
   `headless_turn_cancelled` diagnostic, pause marker with "cancelled by",
   notification), and the cancel marker is gone afterwards; with nothing in
-  flight it exits 1; a stale marker for another stem is reported and
+  flight it exits 1; a stale cancel marker for another stem is reported and
   removed by the engine, never applied.
-- [ ] `tagteam interject "note"` stores a row with `by/ts/phase/type/round/turn`;
-  the next headless turn's prompt contains the note under the ARBITER
-  INTERJECTIONS heading (fake-agent capture); after that turn is `ok` the row
-  has `delivered_role/round/stem/ts` set and a second turn's prompt does not
-  repeat it; a note written while a turn is in flight is delivered to the
-  following turn; a failed turn leaves the note undelivered.
+- [ ] Stale-inflight safety: a hand-written `inflight.json` whose `pid` is an
+  unrelated sleeper (parent ≠ recorded `watcher_pid`) is rejected — the
+  sleeper stays alive, the stale file is removed, exit 1 with the reason;
+  same for `pid` = self, `pid` = `watcher_pid`, missing pid, dead pid, and
+  an unverifiable parent lookup; the live child/grandchild kill test still
+  passes.
+- [ ] `tagteam interject "note" [--to R]` stores a row with
+  `by/ts/target_role/phase/type/round/turn` (`--to` validated; no owed turn →
+  stored with NULL turn + warning); the next eligible headless turn's prompt
+  contains the note under the ARBITER INTERJECTIONS heading (fake-agent
+  capture); after that turn is `ok` exactly the rendered ids have
+  `delivered_role/round/stem/ts` set and a later prompt does not repeat them;
+  a note written while a turn is in flight is delivered to the following
+  turn; a failed turn leaves the note undelivered; a note `--to reviewer`
+  written before a lead turn is absent from the lead's prompt and
+  undelivered after the lead's `ok`, then present in and stamped by the
+  reviewer's `ok` turn.
 - [ ] `tagteam cycle rounds` / `--tail N` output attaches
   `interjections: [...]` to the targeted round (empty list otherwise);
   `cycle render` shows them; the rounds JSONL and `rounds` table are
@@ -351,11 +418,13 @@ to the retry/next turn — the note was never *acted on*). `usage`/DB show
   platform with `subprocess.run` patched), never raises when the backend is
   missing or fails, honors `TAGTEAM_NO_NOTIFY=1`; existing
   `patch("tagteam.watcher.notify_macos")` tests pass unmodified.
-- [ ] `--turn-retries N`: a `nonzero_exit` fake turn that leaves the tree
-  unchanged is retried up to N times (own stems/usage rows, retry log line)
-  and succeeds when the fake starts behaving; the same failure with a dirty
-  tree pauses immediately; `no_round` and `cancelled` are never retried;
-  non-git project retries only `spawn_failed`.
+- [ ] `--turn-retries N`: a `nonzero_exit` fake turn that leaves repo and
+  handoff fingerprints unchanged is retried up to N times (own stems/usage
+  rows, retry log line) and succeeds when the fake starts behaving; the same
+  failure after (a) a successful `cycle add`, (b) a `git commit`, (c) a write
+  inside an already-untracked directory, or (d) any tracked-file edit pauses
+  immediately with no retry; `no_round` and `cancelled` are never retried;
+  a non-git project retries only `spawn_failed`.
 - [ ] `agents.<role>.headless.timeout_minutes` overrides `--turn-timeout`
   for that role (validated; non-positive → config error).
 - [ ] `tagteam rollback 0.8.0` prints the install-appropriate command +
@@ -379,26 +448,30 @@ to the retry/next turn — the note was never *acted on*). `usage`/DB show
 
 ---
 
+## Decisions (round 1, folded into the sections above)
+
+1. **`resume` re-dispatch** — exactly one automatic re-dispatch of the
+   still-ready state on the tick after the marker clears (Scope 2,
+   "Pause in all modes").
+2. **Interjection targeting** — `--to lead|reviewer` ships; `target_role`
+   column, pending selection = untargeted-or-matching the receiving role,
+   stamping of exactly the rendered ids (Scope 4, Schema, accessors,
+   criteria).
+3. **Windows notification** — WinRT toast first, `msg` fallback, both
+   best-effort; "no visible popup" is non-blocking (Scope 6, Notifications).
+4. **Rollback** — stays in scope, print-only unless `--yes` (Scope 8).
+5. **Retry gate** — repo fingerprint (HEAD + `--porcelain=v1 -z
+   --untracked-files=all`) **and** handoff fingerprint (state seq + target
+   cycle entry count + cycle status); never retry after any handoff
+   transition (Scope 7, Retries rule).
+6. **`cancel-turn` PID binding** — `inflight.json` records `watcher_pid` +
+   `started_at`; kill only a live pid whose parent is the recorded watcher
+   (and, where available, whose start time is not before `started_at`);
+   otherwise report + clean stale metadata (Scope 3, Cancel flow).
+
 ## Open Questions
 
-1. **`resume` re-dispatch semantics.** Proposed: one automatic re-dispatch
-   of the still-ready state on the tick after the marker clears. Alternative:
-   require the operator to bump state (`state set`) — safer but clunky.
-   Recommendation: auto re-dispatch (it is what the operator means by
-   "resume").
-2. **Interjection scope for reviewers.** Deliver every undelivered note to
-   whichever role is next, or let `--to lead|reviewer` target a role (note
-   waits until that role's turn)? Recommendation: ship `--to` (cheap, one
-   nullable column `target_role`), default "next turn".
-3. **Windows toast vs. `msg`.** The WinRT toast requires a registered AppId
-   for some Windows builds and may silently not render; `msg` is ugly but
-   reliable on Pro/Enterprise and absent on Home. Recommendation: toast
-   first, `msg` fallback, both best-effort — and accept "no visible popup"
-   as non-blocking since the log + `tagteam tail` remain the source of truth.
-4. **Rollback in scope?** It is optional in the proposal. Recommendation:
-   include the print-only + `--yes` version (≈60 lines) since the revert
-   recipe is part of the arc's safety story; drop if the reviewer prefers a
-   tighter phase.
+- None blocking.
 
 ## Risks
 
