@@ -84,10 +84,10 @@ Phase 34 wants to plot is already visible in three rows.
 
 ### (b) Phase 32 plan cycle headless (this repo)
 
-**Revised gate (impl r2):** this item is a *soak-period* deliverable, not an impl-approval
-gate — by construction it can only run once 0.8.0 has shipped, soaked, and Jack
-green-lights Phase 32 planning (proposal §5). It stays open here and is closed when
-Phase 32's plan cycle runs under `--mode headless`.
+**Closed 2026-08-15:** Phase 32's plan cycle (`orchestration-controls-usage-surfacing-30-arc_plan`)
+ran with every reviewer turn headless — 7 rounds, all `ok` (REQUEST_CHANGES ×6, APPROVE),
+between 90 s and 195 s each — on tagteam 0.8.0 as released. Numbers in
+`docs/phases/orchestration-controls-findings.md`.
 
 ## Downgrade proof (0.7.1 opens a v3 project) — done 2026-08-14
 
