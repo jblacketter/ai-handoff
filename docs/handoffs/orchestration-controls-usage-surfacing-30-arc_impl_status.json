@@ -1,6 +1,6 @@
 {
-  "state": "in-progress",
-  "ready_for": "reviewer",
+  "state": "approved",
+  "ready_for": null,
   "round": 3,
   "phase": "orchestration-controls-usage-surfacing-30-arc",
   "type": "impl",

@@ -80,6 +80,17 @@ By cycle:
   orchestration-controls-usage-surfacing-30-arc/impl  turns=1  in=1,587,326 out=8,584  cache_r=1,476,096 mean=307s
 ```
 
+### Impl-cycle review turns (all headless, real `codex exec`)
+
+| Round | Outcome | Wall | in / out / cache-read |
+|---|---|---|---|
+| 1 | REQUEST_CHANGES (4: fail-closed probe, test isolation, evidence, mean-duration) | 307.4 s | 1 587 326 / 8 584 / 1 476 096 |
+| 2 | REQUEST_CHANGES (2: retry tests must mirror (a)–(l), delivery evidence) — **interjection #1 delivered** | 242.7 s | 868 648 / 5 659 / 803 840 |
+| 3 | APPROVE | 251.3 s | 955 951 / 4 543 / 900 352 |
+
+Holds between rounds were `tagteam pause` / `tagteam resume` (resume printed the pause
+duration each time: 10m00s, 9m20s, 4m28s).
+
 ### Reviewer-sandbox lessons (r1)
 
 Codex's headless review ran the suite inside a sandbox that **denies `ps`** and while the
