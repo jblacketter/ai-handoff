@@ -1233,11 +1233,20 @@ class HeadlessEngine:
         events_path = d / f"{stem}.events.jsonl"
 
         from tagteam.cycle import tail_rounds as _tail
+        # The tail comes from the cycle this turn is verified against (for a
+        # `start` command that is the not-yet-existing target cycle → empty),
+        # never from a previous cycle's history.
         try:
-            tail = _tail(ident.phase, ident.type, self.tail_n, self.project_root) \
-                if ident.phase else []
+            tail = _tail(ident.target_phase, ident.target_type, self.tail_n,
+                         self.project_root) if ident.target_phase else []
         except Exception:
             tail = []
+        # Notes targeted at the *other* role must not appear anywhere in this
+        # role's prompt — strip them from the round tail's interactive view.
+        for e in tail:
+            if isinstance(e, dict) and e.get("interjections"):
+                e["interjections"] = [i for i in e["interjections"]
+                                      if i.get("target_role") in (None, role)]
         # Arbiter interjections eligible for this turn (Phase 32): the ids
         # rendered here are exactly the ids stamped as delivered on `ok`.
         notes: list[dict] = []
