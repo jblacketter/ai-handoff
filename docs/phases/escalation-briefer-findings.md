@@ -28,10 +28,48 @@ the interactive Codex in the iTerm tab reviewed and approved, and ran
 (they do not reload code); (b) `cancel-turn`'s identity binding worked when invoked by
 an agent, and the resulting `cancelled` row/marker made the situation legible.
 
-## Dogfood (impl cycle)
+## Dogfood — real briefs on the scratch project (2026-08-15)
 
-_filled in below_
+Scratch project `greet-cli`, `briefer: {enabled: true}`, a deliberately arguable plan
+(`greet-i18n`: silent English fallback vs `ValueError` for unknown locales), watcher in
+**notify** mode (the briefer is mode-independent). Branch CLI = `.venv/bin/tagteam`.
 
-## Downgrade proof (0.9.0 opens a v5 project)
+| # | Event | Trigger path | Model | Wall | in / out / cache-read | cost | Outcome |
+|---|---|---|---|---|---|---|---|
+| 1 | r2 `ESCALATE` | first-poll **bootstrap** (watcher started on an already-escalated cycle) | claude-fable-5 | 56 s | 8 / 3 622 / 114 680 | $0.67 | ok |
+| 2 | r3 `NEED_HUMAN` | new-seq `_handle_escalated` | claude-fable-5 | 48 s | 10 / 3 170 / 153 672 | $0.73 | ok |
+| 3 | r3 `NEED_HUMAN` (same round, new event after `rule answer`) | new-seq | claude-fable-5 | 49 s | 8 / 3 316 / 120 128 | $0.61 | ok |
+| 4 | r3 `NEED_HUMAN` (third same-round event) | new-seq, watcher restarted with `args: [--model, claude-haiku-4-5-20251001]` | **claude-haiku-4-5** | 87 s | 113 / 5 919 / 544 532 | **$0.15** | ok |
 
-_filled in below_
+What the briefs did (all five headings present, all `ok`):
+- Brief 1 found, on its own, that the package **already raises `ValueError` on a bad
+  name** and that the CLI already maps `ValueError` to exit 2 — evidence neither agent
+  had raised — and recommended `request-changes` (strict) with medium confidence, giving
+  three ready-to-run `tagteam rule` commands. The arbiter ran option A; the ruling landed
+  as a reviewer-role `REQUEST_CHANGES` at the same round without re-escalation, both the
+  `ESCALATE` and the ruling visible in `cycle rounds` `entries`, and the
+  `arbiter_ruling` diagnostic linked brief #1 + the event key.
+- Brief 2 (needs-human) noticed the **plan file on disk still described the old fallback**
+  and told the arbiter to make the lead fix it before approving.
+- Brief 4 (Haiku) was coherent and correctly separated the meta-point ("stop escalating on
+  wording") from the technical recommendation, at ~¼ the cost but longer wall time and
+  ~4× the cache reads (it explored more). **Q5 verdict for now: a lighter model is
+  acceptable for `needs-human` style questions; keep the default (lead's provider) for
+  genuine disputes; the knob is `briefer.args`.**
+- Same-round re-escalation produced **distinct events, files and rows** (`…_r3_<stampA>-a1.md`,
+  `…_r3_<stampB>-a1.md`, `…_r3_<stampC>-a1.md`); `tagteam brief` always showed the current
+  event; `--list` showed all four.
+- Learned: the watcher resolves the briefer spec at **startup** — editing `briefer.args`
+  in `tagteam.yaml` needs a watcher restart (documented in README). Also, by design a
+  manual `--generate` after a *successful* attempt is refused (prior success satisfies the
+  event), so model-tier comparisons need distinct events.
+
+`tagteam usage --role briefer` on the scratch project: 4 turns, 16 027 output tokens,
+$2.16 total, mean 60 s.
+
+## Downgrade proof (0.9.0 opens a v5 project) — done 2026-08-15
+
+Throwaway venv `pip install tagteam==0.9.0` (SCHEMA_VERSION 4) against a copy of the
+scratch project (DB `user_version = 5`, 4 `briefs` rows): `cycle rounds` (grouped view
+without the additive `entries` field, as expected), `usage`, `interject --list`, and
+`cycle init` all work; `user_version` stays 5 and the `briefs` rows are untouched.
