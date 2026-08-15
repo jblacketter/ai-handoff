@@ -105,20 +105,27 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
    note, target_role (NULL = next turn, else lead|reviewer — validated),
    phase, type, round, turn (who was owed when written), delivered_role,
    delivered_round, delivered_stem, delivered_ts` (delivery columns null
-   until consumed). **No active owed cycle** (no state file, or status not
-   `ready`/`working`, e.g. `done`): the note is still stored — `phase/type/
-   round` from state when present, `turn` NULL — with a printed warning
-   "no turn is currently owed; the note will be delivered to the next turn
-   that starts". Delivery:
+   until consumed). **No active owed turn** (no state file, or status not
+   `ready`/`working`, e.g. `done`/`escalated`): the note is still stored
+   with **`phase`, `type`, `round`, `turn` all NULL** (one rule, used
+   everywhere); what the CLI *observed* at write time is preserved in a
+   separate provenance column `observed_state` (JSON: the state's
+   phase/type/round/status/result, or null when no state file) so the audit
+   trail keeps the context without scoping the note to a finished cycle. A
+   warning is printed: "no turn is currently owed; the note will be
+   delivered to the first eligible turn of the next cycle". Delivery:
    - **Eligibility** for a headless turn of role R whose verification
      target is cycle `(P, T)` (reviewer r2 — no replay of historical notes):
      rows with `delivered_ts IS NULL AND retired_ts IS NULL AND (target_role
      IS NULL OR target_role = R) AND ((phase = P AND type = T) OR phase IS
      NULL)`, ordered by id. Notes are **scoped to the cycle they were
-     written for**; a note written when nothing was owed (`phase IS NULL`)
-     is eligible for the first turn of whatever cycle starts next, once.
-     Notes for another cycle, or for a cycle that has reached a terminal
-     state, are never injected.
+     written for**; a NULL-phase note (written when nothing was owed) is
+     eligible for the **first *eligible* turn** of whatever cycle starts
+     next — "eligible" includes the role filter, so a NULL-phase `--to
+     reviewer` note waits across cycle B's lead turn and lands on B's first
+     reviewer turn — and, once delivered, is stamped like any other. Notes
+     for another cycle, or for a cycle that has reached a terminal state,
+     are never injected.
    - **Retirement**: notes are append-only, but a note can be closed without
      delivery: `tagteam interject --list` shows pending/delivered/retired
      rows for the current cycle; `tagteam interject --retire ID` sets
@@ -178,16 +185,29 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
      non-ignored untracked path, hashed by git itself — so editing an
      already-modified tracked file, or changing the bytes of an already-
      present untracked file, changes the fingerprint; ordering is git's own,
-     deterministic; the temp index file is deleted afterwards). Only
-     `.gitignore`d paths remain outside the fingerprint (documented blind
-     spot). And (b) the **handoff fingerprint** = state `seq` + the target
-     cycle's entry count + `(state, ready_for, round)` from `cycle status`. A failed
+     deterministic; the temp index file is deleted afterwards) ‖ **for every
+     submodule, recursively** (paths from `git submodule --quiet foreach
+     --recursive 'echo "$displaypath"'`, in that order), the same triple
+     computed inside the submodule (its HEAD ‖ index tree ‖ temp-index tree)
+     — so a pre-existing dirty submodule that is edited again changes the
+     fingerprint. **Fail closed** (reviewer r3): if *any* git command in the
+     fingerprint fails or times out (unmerged/conflicted index, missing
+     submodule checkout, corrupt repo, git not on PATH), or the recomputed
+     fingerprint cannot be produced, `repo_fingerprint()` returns the
+     sentinel `UNSUPPORTED` and the attempt is **non-retryable** — no
+     unchanged-tree rule is ever applied silently. Only `.gitignore`d paths
+     remain outside a successful fingerprint (documented blind spot). And
+     (b) the **handoff fingerprint** = state `seq` + the target cycle's entry
+     count + `(state, ready_for, round)` from `cycle status`. A failed
      attempt is retried only if outcome ∈ {`spawn_failed`, `nonzero_exit`,
      `timeout`} **and both fingerprints are unchanged** after the attempt.
      Any handoff transition (e.g. the agent's `cycle add` succeeded and it
      then exited nonzero) → **never retry** — pause. `no_round`, `cancelled`,
-     any tree change → pause. Non-git projects: repo fingerprint is None and
-     only `spawn_failed` is retryable (handoff fingerprint still checked).
+     any tree change → pause. Non-git projects (`git rev-parse` says "not a
+     repository"): repo fingerprint is None and only `spawn_failed` is
+     retryable (nothing ran; handoff fingerprint still checked). Git repo
+     but fingerprint `UNSUPPORTED` (before or after the attempt): nothing is
+     retryable.
      Every attempt has its own usage row / log stem; the log says
      `[tagteam] retry k/N (repo + handoff fingerprints unchanged)`.
    - `agents.<role>.headless.timeout_minutes` (config; overrides
@@ -293,7 +313,8 @@ CREATE TABLE IF NOT EXISTS interjections (
     by              TEXT,
     note            TEXT NOT NULL,
     target_role     TEXT CHECK (target_role IS NULL OR target_role IN ('lead','reviewer')),
-    phase           TEXT, type TEXT, round INTEGER, turn TEXT,
+    phase           TEXT, type TEXT, round INTEGER, turn TEXT,   -- all NULL when nothing was owed
+    observed_state  TEXT,                                        -- JSON snapshot of state at write time (provenance only)
     delivered_role  TEXT, delivered_round INTEGER,
     delivered_stem  TEXT, delivered_ts TEXT,
     retired_ts      TEXT, retired_by TEXT
@@ -348,15 +369,18 @@ ready state as new (re-dispatch once). Tested for notify + headless.
 ### Retries rule (deterministic at-least-once)
 
 ```
-repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ write-tree(index) ‖ write-tree(tmp index after add -A)) or None (not a git repo)
+repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ write-tree(index) ‖ write-tree(tmp index after add -A) ‖ same triple per submodule, recursive)
+                                      # None = not a git repo; UNSUPPORTED = any git failure / unmerged index / etc. (fail closed)
 handoff_pre = handoff_fingerprint()   # (state.seq, target cycle entry count, cycle state/ready_for/round)
 for attempt in 0..N:
     run turn → outcome
     if outcome == ok: break
     retryable   = outcome in {spawn_failed, nonzero_exit, timeout}
     handoff_ok  = handoff_fingerprint() == handoff_pre        # any transition ⇒ never retry
-    repo_ok     = (repo_pre is not None and repo_fingerprint() == repo_pre) \
-                  or (repo_pre is None and outcome == spawn_failed)
+    repo_post   = repo_fingerprint()
+    repo_ok     = (repo_pre not in (None, UNSUPPORTED) and repo_post == repo_pre) \
+                  or (repo_pre is None and repo_post is None and outcome == spawn_failed)
+                  # UNSUPPORTED on either side ⇒ False (fail closed)
     if attempt < N and retryable and handoff_ok and repo_ok: log retry; continue
     fail(outcome) ; break
 ```
@@ -367,8 +391,10 @@ stem timestamp orders them; the log line names the attempt number). Tests
 directory then nonzero → no retry; **edit an already-modified tracked file**
 then nonzero → no retry; **change the contents of an already-present
 untracked file** then nonzero → no retry; `git add` (stage only) then
-nonzero → no retry; clean nonzero → retried; `no_round` / `cancelled` →
-never retried.
+nonzero → no retry; **edit inside a pre-existing dirty submodule** then
+nonzero → no retry; **unmerged index** (or git failure) → `UNSUPPORTED` →
+no retry even for a clean nonzero; clean nonzero → retried; `no_round` /
+`cancelled` → never retried.
 
 ### Notifications
 
@@ -389,7 +415,8 @@ never retried.
 ### Interject provenance & delivery
 
 `interject` writes the row with the *current* owed identity (phase, type,
-round, turn — or NULL phase/turn with a warning when nothing is owed) plus
+round, turn — or all four NULL, with `observed_state` provenance and a
+warning, when nothing is owed) plus
 `target_role` (`--to`, default NULL = next turn) so an auditor knows the
 state of the loop when the arbiter spoke and who it was for. The engine
 selects `pending_interjections_for(role, target_phase, target_type)` when
@@ -443,7 +470,8 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   passes.
 - [ ] `tagteam interject "note" [--to R]` stores a row with
   `by/ts/target_role/phase/type/round/turn` (`--to` validated; no owed turn →
-  stored with NULL turn + warning); the next eligible headless turn's prompt
+  `phase/type/round/turn` all NULL, `observed_state` filled, warning
+  printed); the next eligible headless turn's prompt
   contains the note under the ARBITER INTERJECTIONS heading (fake-agent
   capture); after that turn is `ok` exactly the rendered ids have
   `delivered_role/round/stem/ts` set and a later prompt does not repeat them;
@@ -457,10 +485,13 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   headless turn of phase B (nor into any turn after cycle A is terminal);
   the same note **is** injected exactly once into a later headless turn of
   the *same* cycle A (mode switch) with the "may already have been
-  addressed" caveat, then stamped; a NULL-phase note (written with nothing
-  owed) is injected into the first turn of the next cycle only; `interject
-  --retire ID` removes a note from eligibility and `--list` shows
-  pending/delivered/retired.
+  addressed" caveat, then stamped; **terminal state for cycle A →
+  `interject` (untargeted, and a second one `--to reviewer`) → start cycle
+  B**: the untargeted note is injected + stamped on B's first `ok` turn
+  (the lead's), the targeted one is absent from that lead turn and injected
+  + stamped on B's first reviewer `ok` turn — neither is stranded on A;
+  `interject --retire ID` removes a note from eligibility and `--list`
+  shows pending/delivered/retired.
 - [ ] `tagteam cycle rounds` / `--tail N` output attaches
   `interjections: [...]` to the targeted round (empty list otherwise);
   `cycle render` shows them; the rounds JSONL and `rounds` table are
@@ -479,10 +510,12 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   failure after (a) a successful `cycle add`, (b) a `git commit`, (c) a write
   inside an already-untracked directory, (d) any tracked-file edit, (e) a
   further edit to a tracked file that was *already modified* before spawn,
-  (f) a content change to an *already-present untracked* file, or (g) a
-  stage-only `git add`, pauses immediately with no retry; `no_round` and
-  `cancelled` are never retried; a non-git project retries only
-  `spawn_failed`.
+  (f) a content change to an *already-present untracked* file, (g) a
+  stage-only `git add`, or (h) an edit inside a *pre-existing dirty
+  submodule*, pauses immediately with no retry; a repo whose fingerprint is
+  `UNSUPPORTED` (unmerged index / git error, mocked) never retries anything;
+  `no_round` and `cancelled` are never retried; a non-git project retries
+  only `spawn_failed`.
 - [ ] `agents.<role>.headless.timeout_minutes` overrides `--turn-timeout`
   for that role (validated; non-positive → config error).
 - [ ] `tagteam rollback 0.8.0` prints the install-appropriate command +
@@ -527,12 +560,16 @@ a note targeted at the other role is not even rendered). `usage`/DB show
    `watcher_ident`; kill only when both identities match by string equality
    and the parent pid is the recorded watcher; otherwise report + clean
    stale metadata (Scope 3, Cancel flow). *(r2)*
-7. **Repo fingerprint is content-sensitive** — HEAD ‖ write-tree(index) ‖
-   write-tree(temp index after `add -A`); only ignored paths are outside it
-   (Scope 7, Retries rule). *(r2)*
+7. **Repo fingerprint is content-sensitive and recursive** — HEAD ‖
+   write-tree(index) ‖ write-tree(temp index after `add -A`), the same
+   triple per submodule recursively; any git failure/unsupported state ⇒
+   `UNSUPPORTED` ⇒ non-retryable (fail closed); only ignored paths are
+   outside a successful fingerprint (Scope 7, Retries rule). *(r2, r3)*
 8. **Interjections are cycle-scoped** — eligibility requires the receiving
-   turn's cycle (or NULL phase, once); `retired_ts` + `--list/--retire`;
-   same-cycle mode switch injects once with a caveat (Scope 4). *(r2)*
+   turn's cycle, or NULL phase (written with nothing owed: `phase/type/
+   round/turn` all NULL + `observed_state` provenance) which lands on the
+   first *eligible* turn of the next cycle; `retired_ts` + `--list/--retire`;
+   same-cycle mode switch injects once with a caveat (Scope 4). *(r2, r3)*
 
 ## Open Questions
 
@@ -548,12 +585,14 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   `taskkill /T` on the shim pid (proven in Phase 31 CI) and by labeling the
   outcome from the marker, not from the kill's success.
 - **Retry rule blind spot: `.gitignore`d paths only.** The fingerprint is
-  content-sensitive over every tracked and non-ignored untracked path (git
-  hashes the bytes via the temp-index `write-tree`), so pre-existing
-  modifications/untracked files do not mask agent edits; only ignored paths
-  (build outputs, `.tagteam/`, venvs) can change without changing it, and the
-  handoff fingerprint independently guards `.tagteam/` state. Documented in
-  README.
+  content-sensitive over every tracked and non-ignored untracked path,
+  recursively through submodules (git hashes the bytes via the temp-index
+  `write-tree`), so pre-existing modifications/untracked files/dirty
+  submodules do not mask agent edits; only ignored paths (build outputs,
+  `.tagteam/`, venvs) can change without changing it, and the handoff
+  fingerprint independently guards `.tagteam/` state. Any git failure or
+  unsupported state fails closed (`UNSUPPORTED` → non-retryable). Documented
+  in README.
 - **Interjection delivered but ignored by the agent.** The prompt marks
   them as arbiter instructions and SKILL.md says so; the audit trail shows
   delivery; enforcement is a Phase 34 cockpit concern (show
