@@ -1,7 +1,7 @@
 {
   "state": "in-progress",
   "ready_for": "reviewer",
-  "round": 3,
+  "round": 4,
   "phase": "escalation-briefer-30-arc",
   "type": "plan",
   "lead": "Claude",
