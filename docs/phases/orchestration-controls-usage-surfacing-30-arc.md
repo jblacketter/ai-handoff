@@ -193,13 +193,19 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
      fingerprint. **Embedded repositories that are not registered
      submodules** (reviewer r4): `git add -A` stages such a directory as a
      mode-160000 gitlink at its HEAD (warning, exit 0), so edits inside it
-     would be invisible. After building the temp index, `GIT_INDEX_FILE=<tmp>
-     git ls-files --stage` is scanned for `160000` entries; any gitlink path
-     that is **not** a registered submodule (`git config -f .gitmodules
-     --get-regexp '^submodule\..*\.path$'`, plus the recursive foreach
-     list) makes the fingerprint `UNSUPPORTED` — fail closed, option (b) of
-     the reviewer's choice; the retry log names the offending path so the
-     operator can register it as a submodule or remove it. **Fail closed**
+     would be invisible. Rule (reviewer r4/r5), applied **at every
+     repository level the recursion visits**: after building that level's
+     temp index, `GIT_INDEX_FILE=<tmp> git ls-files --stage` is scanned for
+     `160000` entries; the *only* accepted gitlink paths are those that the
+     recursive submodule traversal (`git submodule --quiet foreach
+     --recursive 'echo "$displaypath"'`, exit 0 with empty output when there
+     are no submodules — treated as the empty set) **actually visited and
+     fingerprinted at that level**. Any other gitlink — an unregistered
+     embedded repo, *or a path merely declared in `.gitmodules` without a
+     real submodule checkout in the traversal* — makes the fingerprint
+     `UNSUPPORTED` (fail closed); `.gitmodules` is never consulted as a
+     whitelist. The retry log names the offending path so the operator can
+     register/initialise it as a submodule or remove it. **Fail closed**
      generally (reviewer r3): if *any* git command in the fingerprint fails
      or times out (unmerged/conflicted index, missing submodule checkout,
      corrupt repo, git not on PATH), or the recomputed fingerprint cannot be
@@ -381,7 +387,8 @@ ready state as new (re-dispatch once). Tested for notify + headless.
 ```
 repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ write-tree(index) ‖ write-tree(tmp index after add -A) ‖ same triple per submodule, recursive)
                                       # None = not a git repo; UNSUPPORTED = any git failure / unmerged index /
-                                      #   unregistered embedded repo (160000 gitlink not in .gitmodules) — fail closed
+                                      #   any 160000 gitlink (at any level) not actually visited by the recursive
+                                      #   submodule traversal — fail closed (.gitmodules is not a whitelist)
 handoff_pre = handoff_fingerprint()   # (state.seq, target cycle entry count, cycle state/ready_for/round)
 for attempt in 0..N:
     run turn → outcome
@@ -404,7 +411,10 @@ then nonzero → no retry; **change the contents of an already-present
 untracked file** then nonzero → no retry; `git add` (stage only) then
 nonzero → no retry; **edit inside a pre-existing dirty submodule** then
 nonzero → no retry; **an already-present untracked embedded repository
-(not a submodule) dirtied again** → `UNSUPPORTED` → no retry; **unmerged
+(not a submodule) dirtied again** → `UNSUPPORTED` → no retry; **a path
+declared in `.gitmodules` but with no submodule checkout in the traversal,
+holding an untracked nested repo that is dirtied again** → `UNSUPPORTED`
+→ no retry; **unmerged
 index** (or git failure) → `UNSUPPORTED` → no retry even for a clean
 nonzero; clean nonzero → retried; `no_round` / `cancelled` → never
 retried.
@@ -527,9 +537,12 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   stage-only `git add`, or (h) an edit inside a *pre-existing dirty
   submodule*, pauses immediately with no retry; a repo whose fingerprint is
   `UNSUPPORTED` — (i) an already-present untracked *embedded repository that
-  is not a registered submodule* dirtied again (real nested `git init`), or
-  an unmerged index / git error (mocked) — never retries anything, and the
-  log names the reason/path;
+  is not a registered submodule* dirtied again (real nested `git init`),
+  (j) a *declared-only* `.gitmodules` path (committed entry, no gitlink in
+  HEAD/index, no checkout in the traversal) holding a nested repo dirtied
+  again, or an unmerged index / git error (mocked) — never retries anything,
+  and the log names the reason/path; a repo with no submodules at all
+  (foreach empty) still retries clean turns normally;
   `no_round` and `cancelled` are never retried; a non-git project retries
   only `spawn_failed`.
 - [ ] `agents.<role>.headless.timeout_minutes` overrides `--turn-timeout`
@@ -578,11 +591,14 @@ a note targeted at the other role is not even rendered). `usage`/DB show
    stale metadata (Scope 3, Cancel flow). *(r2)*
 7. **Repo fingerprint is content-sensitive and recursive** — final form:
    HEAD ‖ write-tree(index) ‖ write-tree(temp index after `add -A`), the
-   same triple per registered submodule recursively; any git failure,
-   unmerged index, or **unregistered embedded repository** (160000 gitlink
-   not in `.gitmodules`) ⇒ `UNSUPPORTED` ⇒ non-retryable (fail closed);
-   only ignored paths are outside a successful fingerprint (Scope 7,
-   Retries rule). *(r2, r3, r4)*
+   same triple per submodule the recursive traversal actually visits; at
+   every level, any 160000 gitlink **not visited and fingerprinted by that
+   traversal** (unregistered embedded repo, or a `.gitmodules`-declared path
+   without a real checkout — `.gitmodules` is never a whitelist), any git
+   failure, or an unmerged index ⇒ `UNSUPPORTED` ⇒ non-retryable (fail
+   closed); a repo with no submodules (foreach exit 0, empty) is the normal
+   case; only ignored paths are outside a successful fingerprint (Scope 7,
+   Retries rule). *(r2–r5)*
 8. **Interjections are cycle-scoped** — eligibility requires the receiving
    turn's cycle, or NULL phase (written with nothing owed: `phase/type/
    round/turn` all NULL + `observed_state` provenance) which lands on the
@@ -609,9 +625,10 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   submodules do not mask agent edits; only ignored paths (build outputs,
   `.tagteam/`, venvs) can change without changing it, and the handoff
   fingerprint independently guards `.tagteam/` state. Any git failure,
-  unmerged index, or *unregistered embedded repository* (gitlink not in
-  `.gitmodules`) fails closed (`UNSUPPORTED` → non-retryable, path named in
-  the log). Documented in README.
+  unmerged index, or *gitlink not actually visited by the recursive
+  submodule traversal* (unregistered embedded repo, or a `.gitmodules`
+  declaration without a real checkout) fails closed (`UNSUPPORTED` →
+  non-retryable, path named in the log). Documented in README.
 - **Interjection delivered but ignored by the agent.** The prompt marks
   them as arbiter instructions and SKILL.md says so; the audit trail shows
   delivery; enforcement is a Phase 34 cockpit concern (show
