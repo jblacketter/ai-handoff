@@ -66,7 +66,10 @@ and its **round-1 review was a headless Codex turn** spawned by
   would not spawn a *second* Claude into the same working tree; the watcher logged
   `PAUSED` on the flip and did not dispatch. This is exactly the shape Phase 32's
   `tagteam pause` will formalize.
-- Round-2 review is also run headless (numbers appended when it lands).
+- Round-2 review, also headless: **ok — REQUEST_CHANGES (2 blocking items)**, 155.0 s,
+  usage row recorded (see `usage` table, round 2). `inflight.json` showed the live PID
+  (29408) during the turn — the r1 finding verified in the real run.
+- Round-3 review is also run headless.
 
 ### (b) Phase 32 plan cycle headless (this repo)
 

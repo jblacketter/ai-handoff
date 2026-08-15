@@ -323,6 +323,55 @@ class TestProviderAndExecutable:
         from tagteam import watcher
         assert watcher.watch_command(["--mode", "headless"]) == 1
 
+    def test_documented_status_vocabulary_matches_db(self):
+        """The plan's usage.status vocabulary must stay aligned with
+        db.USAGE_STATUSES (reviewer request, impl r2)."""
+        import re
+        plan = (REPO / "docs" / "phases" / "headless-turn-engine-30-arc.md").read_text()
+        m = re.search(r"status\s+TEXT NOT NULL,\s+--\s*([a-z_ |]+)", plan)
+        assert m, "status vocabulary comment not found in plan schema block"
+        documented = {t.strip() for t in m.group(1).split("|")}
+        assert documented == set(db.USAGE_STATUSES)
+        assert documented == {h.OUTCOME_OK, h.OUTCOME_TIMEOUT, h.OUTCOME_NONZERO,
+                              h.OUTCOME_NO_ROUND, h.OUTCOME_SPAWN_FAILED}
+
+    @pytest.mark.parametrize("headless_yaml,needle", [
+        ('      args: "--model opus"\n', "list of strings"),
+        ("      provider: gemini\n", "gemini"),
+        ("      bogus: 1\n", "unknown keys"),
+    ])
+    def test_fallback_parser_startup_rejects_invalid_headless(
+            self, project, fake_path, monkeypatch, headless_yaml, needle):
+        """Reviewer finding (impl r2): the no-PyYAML fallback parser must not
+        coerce invalid headless config into something that launches."""
+        from tagteam import config as config_mod
+        monkeypatch.setattr(config_mod, "HAS_YAML", False)
+        (project / "tagteam.yaml").write_text(
+            "agents:\n"
+            "  lead:\n    name: Claude\n    headless:\n" + headless_yaml +
+            "  reviewer:\n    name: Codex\n", encoding="utf-8")
+        cfg = read_config(project / "tagteam.yaml")
+        assert cfg is not None and "headless" in cfg["agents"]["lead"]
+        assert any(needle in e for e in validate_config(cfg)), validate_config(cfg)
+        eng = h.HeadlessEngine(project, cfg, lead_name="Claude", reviewer_name="Codex",
+                               log=lambda m: None)
+        errors = eng.validate()
+        assert errors and any(needle in e for e in errors), errors
+        from tagteam import watcher
+        assert watcher.watch_command(["--mode", "headless"]) == 1
+
+    def test_fallback_parser_accepts_valid_headless(self, monkeypatch):
+        from tagteam import config as config_mod
+        cfg = config_mod._read_config_fallback(
+            "agents:\n  lead:\n    name: Claude\n    headless:\n"
+            "      provider: claude\n      executable: /x/claude\n"
+            "      args:\n        - --model\n        - opus\n"
+            "  reviewer:\n    name: Codex\n    headless:\n      args: [\"-m\", \"o3\"]\n")
+        assert cfg["agents"]["lead"]["headless"] == {
+            "provider": "claude", "executable": "/x/claude", "args": ["--model", "opus"]}
+        assert cfg["agents"]["reviewer"]["headless"] == {"args": ["-m", "o3"]}
+        assert validate_config(cfg) == []
+
     def test_engine_validate_uses_which_through_shims(self, project, fake_path):
         eng = _engine(project)
         assert eng.roles["lead"].provider == "claude"
@@ -674,7 +723,8 @@ class TestEngineE2E:
                 if logs:
                     sizes.append((logs[0].stat().st_size, inflight is not None))
                 if inflight is not None:
-                    pids.append(inflight.get("pid"))
+                    pid = inflight.get("pid")
+                    pids.append((pid, _pid_alive(pid) if isinstance(pid, int) else None))
                 time.sleep(0.05)
 
         th = threading.Thread(target=sampler, daemon=True); th.start()
@@ -684,9 +734,11 @@ class TestEngineE2E:
         inflight_sizes = sorted({s for s, inflight in sizes if inflight})
         assert len(inflight_sizes) >= 2, f"log did not grow while in flight: {sizes}"
         # Reviewer finding (impl r1): inflight.json carries the live PID.
-        live = [p for p in pids if isinstance(p, int)]
+        live = [p for p, alive in pids if isinstance(p, int)]
         assert live, f"inflight.json never had an integer pid: {pids}"
         assert all(p == live[0] for p in live)
+        assert any(alive for p, alive in pids if isinstance(p, int)), \
+            f"pid was never observed alive while in flight: {pids}"
         events = Path(res.events_path).read_text()
         log = Path(res.log_path).read_text()
         assert "warning: something noisy" not in events

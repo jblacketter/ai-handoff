@@ -149,6 +149,13 @@ def _read_config_fallback(content: str) -> dict | None:
                             headless["args"] = args_list
                             i += 1
                             continue
+                        if rest and not rest.startswith("#"):
+                            # Scalar `args: "--model opus"` — preserve the raw
+                            # string so validate_config rejects it (must be a
+                            # list); never coerce to [] here.
+                            headless["args"] = _parse_simple_value(rest)
+                            i += 1
+                            continue
                         args_indent = h_indent
                         i += 1
                         while i < len(lines):
@@ -164,6 +171,12 @@ def _read_config_fallback(content: str) -> dict | None:
                             i += 1
                         headless["args"] = args_list
                         continue
+                    # Unknown key under headless: keep it (raw) so
+                    # validate_config reports "unknown keys" instead of the
+                    # fallback parser silently discarding it.
+                    if ":" in h and not h.startswith("- "):
+                        key, val = h.split(":", 1)
+                        headless[key.strip()] = _parse_simple_value(val) if val.strip() else None
                     i += 1
                 role_data["headless"] = headless
                 continue

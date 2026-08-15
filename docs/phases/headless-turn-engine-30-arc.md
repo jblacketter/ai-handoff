@@ -94,14 +94,16 @@ sum.
      runner snapshots the owed turn's identity *before* spawning and, after
      exit, requires the **expected cycle transition** by the owed role at
      the expected round for the expected phase/type — not merely "seq
-     advanced". Anything else is `timeout` / `nonzero_exit` / `no_round`.
+     advanced". Anything else is `timeout` / `nonzero_exit` / `no_round`
+     / `spawn_failed`.
    - **Usage capture** — parse the adapter's structured events from
      `<stem>.events.jsonl` only (tokens, cache read/write, cost if
      present, model, session id, num_turns) and insert one `usage` row per
      spawned turn, including failed ones (status column). Malformed/missing usage never fails a turn that
      otherwise succeeded — the row is written with null token fields and a
      `diagnostics` entry (`kind = headless_usage_unparsed`).
-   - **Failure handling** — on any non-ok outcome: write a `diagnostics`
+   - **Failure handling** — on any non-ok outcome (`timeout`,
+     `nonzero_exit`, `no_round`, `spawn_failed`): write a `diagnostics`
      row (`kind = headless_turn_failed`), write
      `.tagteam/headless-paused.json` (reason, phase, type, round, role,
      log_path, ts), send a notification, and log the resume recipe. While
@@ -398,7 +400,7 @@ CREATE TABLE IF NOT EXISTS usage (
     agent         TEXT,                   -- name from tagteam.yaml
     provider      TEXT,                   -- claude | codex
     model         TEXT,
-    status        TEXT NOT NULL,          -- ok | timeout | nonzero_exit | no_round
+    status        TEXT NOT NULL,          -- ok | timeout | nonzero_exit | no_round | spawn_failed
     exit_code     INTEGER,
     duration_ms   INTEGER,
     input_tokens  INTEGER, output_tokens INTEGER,
@@ -465,7 +467,9 @@ child exits, the outcome is `ok` **iff all** hold:
    owed agent's name.
 
 Everything else is `no_round` (exit 0 but the expected transition is
-absent), `nonzero_exit`, or `timeout` — including: seq advanced by an
+absent), `nonzero_exit`, `timeout`, or `spawn_failed` (the CLI process
+could not be started at all — `OSError` from `Popen`, e.g. a configured
+executable that is not runnable) — including: seq advanced by an
 unrelated writer (human `state set`, watcher repair), a round written for
 the wrong phase/type, a round at the wrong round number, an AMEND where a
 SUBMIT was owed, or a concurrent human write that flipped the turn
@@ -482,6 +486,7 @@ cases and must land as `no_round`/pause, never `ok`.
 | timeout | wall clock > `--turn-timeout` | kill process tree; usage row status=timeout; pause |
 | nonzero_exit | returncode ≠ 0 (incl. CLI auth/rate-limit failures) | usage row; pause |
 | no_round | exit 0 but expected transition absent | usage row status=no_round; pause with the specific mismatch in the reason |
+| spawn_failed | `Popen` raised `OSError` (missing/non-executable file, permissions) | usage row status=spawn_failed (exit_code null); pause naming the executable + error |
 
 "Pause" = diagnostics row + `.tagteam/headless-paused.json` + notification
 + log line with the resume recipe. The turn's `<stem>` (both files) is in
@@ -575,7 +580,7 @@ desirable but not gating (Decisions §2).
 - [x] Composer adds the implement-first boundary clause exactly when the command is `/handoff start <phase> impl`; a fake lead turn on that command that creates the impl cycle at round 1 is `ok`, and one that leaves state unchanged is `no_round`.
 - [x] Start-command targets: `parse_start_command` accepts exactly `/handoff start <slug>` and `/handoff start <slug> impl` (slug alphabet enforced) and rejects everything else; a cross-phase plan start (state still on the completed previous phase, fake lead inits `<next>_plan` r1) and a plan→impl start (state.type `plan`, fake lead inits `<phase>_impl` r1) both verify `ok`; a fake lead that inits a cycle under a malformed/arbitrary command lands as `no_round`.
 - [x] `build_argv()` structural validation: bare text, `-`, `--`, `--output-format=json`, `--output-format json`, `-C dir`, `-Cdir`, `--cd=dir`, `--print`, `-p`, and a dangling value (`--model --`) in `headless.args` each fail at startup naming the token, for both adapters; accepted options land in position with the overridden default dropped; codex argv always ends with `-`; the fake agent receives the composed prompt on stdin in every accepted case.
-- [x] Each of timeout / nonzero exit / no_round produces: a usage row with the matching status, a `diagnostics` row (`headless_turn_failed`), `.tagteam/headless-paused.json` naming the specific mismatch, and no further dispatch on subsequent ticks or on restart until the marker is removed. No retry is attempted. Timeout kills the whole child process tree (verified on POSIX and Windows CI by a fake agent that spawns a grandchild).
+- [x] Each of timeout / nonzero exit / no_round / spawn_failed produces: a usage row with the matching status, a `diagnostics` row (`headless_turn_failed`), `.tagteam/headless-paused.json` naming the specific mismatch, and no further dispatch on subsequent ticks or on restart until the marker is removed. No retry is attempted. Timeout kills the whole child process tree (verified on POSIX and Windows CI by a fake agent that spawns a grandchild).
 - [x] The watchdog re-send path never fires in headless mode (unit test on `_StateProcessor.tick`).
 - [x] Ctrl-C during an in-flight turn terminates the child and removes `inflight.json`.
 - [x] Malformed/missing usage output on an otherwise-ok turn does not fail the turn; it writes a null-token usage row plus a `headless_usage_unparsed` diagnostic.
