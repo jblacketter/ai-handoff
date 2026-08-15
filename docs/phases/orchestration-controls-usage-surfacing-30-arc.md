@@ -190,13 +190,23 @@ table, `inflight.json` with PID). Source brief: `docs/tagteam-3.0-proposal.md`
      --recursive 'echo "$displaypath"'`, in that order), the same triple
      computed inside the submodule (its HEAD ‖ index tree ‖ temp-index tree)
      — so a pre-existing dirty submodule that is edited again changes the
-     fingerprint. **Fail closed** (reviewer r3): if *any* git command in the
-     fingerprint fails or times out (unmerged/conflicted index, missing
-     submodule checkout, corrupt repo, git not on PATH), or the recomputed
-     fingerprint cannot be produced, `repo_fingerprint()` returns the
-     sentinel `UNSUPPORTED` and the attempt is **non-retryable** — no
-     unchanged-tree rule is ever applied silently. Only `.gitignore`d paths
-     remain outside a successful fingerprint (documented blind spot). And
+     fingerprint. **Embedded repositories that are not registered
+     submodules** (reviewer r4): `git add -A` stages such a directory as a
+     mode-160000 gitlink at its HEAD (warning, exit 0), so edits inside it
+     would be invisible. After building the temp index, `GIT_INDEX_FILE=<tmp>
+     git ls-files --stage` is scanned for `160000` entries; any gitlink path
+     that is **not** a registered submodule (`git config -f .gitmodules
+     --get-regexp '^submodule\..*\.path$'`, plus the recursive foreach
+     list) makes the fingerprint `UNSUPPORTED` — fail closed, option (b) of
+     the reviewer's choice; the retry log names the offending path so the
+     operator can register it as a submodule or remove it. **Fail closed**
+     generally (reviewer r3): if *any* git command in the fingerprint fails
+     or times out (unmerged/conflicted index, missing submodule checkout,
+     corrupt repo, git not on PATH), or the recomputed fingerprint cannot be
+     produced, `repo_fingerprint()` returns the sentinel `UNSUPPORTED` and
+     the attempt is **non-retryable** — no unchanged-tree rule is ever
+     applied silently. Only `.gitignore`d paths remain outside a successful
+     fingerprint (documented blind spot). And
      (b) the **handoff fingerprint** = state `seq` + the target cycle's entry
      count + `(state, ready_for, round)` from `cycle status`. A failed
      attempt is retried only if outcome ∈ {`spawn_failed`, `nonzero_exit`,
@@ -370,7 +380,8 @@ ready state as new (re-dispatch once). Tested for notify + headless.
 
 ```
 repo_pre    = repo_fingerprint()      # sha1(HEAD ‖ write-tree(index) ‖ write-tree(tmp index after add -A) ‖ same triple per submodule, recursive)
-                                      # None = not a git repo; UNSUPPORTED = any git failure / unmerged index / etc. (fail closed)
+                                      # None = not a git repo; UNSUPPORTED = any git failure / unmerged index /
+                                      #   unregistered embedded repo (160000 gitlink not in .gitmodules) — fail closed
 handoff_pre = handoff_fingerprint()   # (state.seq, target cycle entry count, cycle state/ready_for/round)
 for attempt in 0..N:
     run turn → outcome
@@ -392,9 +403,11 @@ directory then nonzero → no retry; **edit an already-modified tracked file**
 then nonzero → no retry; **change the contents of an already-present
 untracked file** then nonzero → no retry; `git add` (stage only) then
 nonzero → no retry; **edit inside a pre-existing dirty submodule** then
-nonzero → no retry; **unmerged index** (or git failure) → `UNSUPPORTED` →
-no retry even for a clean nonzero; clean nonzero → retried; `no_round` /
-`cancelled` → never retried.
+nonzero → no retry; **an already-present untracked embedded repository
+(not a submodule) dirtied again** → `UNSUPPORTED` → no retry; **unmerged
+index** (or git failure) → `UNSUPPORTED` → no retry even for a clean
+nonzero; clean nonzero → retried; `no_round` / `cancelled` → never
+retried.
 
 ### Notifications
 
@@ -513,7 +526,10 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   (f) a content change to an *already-present untracked* file, (g) a
   stage-only `git add`, or (h) an edit inside a *pre-existing dirty
   submodule*, pauses immediately with no retry; a repo whose fingerprint is
-  `UNSUPPORTED` (unmerged index / git error, mocked) never retries anything;
+  `UNSUPPORTED` — (i) an already-present untracked *embedded repository that
+  is not a registered submodule* dirtied again (real nested `git init`), or
+  an unmerged index / git error (mocked) — never retries anything, and the
+  log names the reason/path;
   `no_round` and `cancelled` are never retried; a non-git project retries
   only `spawn_failed`.
 - [ ] `agents.<role>.headless.timeout_minutes` overrides `--turn-timeout`
@@ -551,20 +567,22 @@ a note targeted at the other role is not even rendered). `usage`/DB show
 3. **Windows notification** — WinRT toast first, `msg` fallback, both
    best-effort; "no visible popup" is non-blocking (Scope 6, Notifications).
 4. **Rollback** — stays in scope, print-only unless `--yes` (Scope 8).
-5. **Retry gate** — repo fingerprint (HEAD + `--porcelain=v1 -z
-   --untracked-files=all`) **and** handoff fingerprint (state seq + target
-   cycle entry count + cycle status); never retry after any handoff
-   transition (Scope 7, Retries rule).
+5. **Retry gate** — repo fingerprint **and** handoff fingerprint (state
+   seq + target cycle entry count + cycle status) must both be unchanged;
+   never retry after any handoff transition. *(The round-1 porcelain-based
+   repo fingerprint is superseded by Decision 7.)* (Scope 7, Retries rule.)
 6. **`cancel-turn` PID binding** — `inflight.json` records `watcher_pid`,
    `started_at`, and same-source creation identities `child_ident` /
    `watcher_ident`; kill only when both identities match by string equality
    and the parent pid is the recorded watcher; otherwise report + clean
    stale metadata (Scope 3, Cancel flow). *(r2)*
-7. **Repo fingerprint is content-sensitive and recursive** — HEAD ‖
-   write-tree(index) ‖ write-tree(temp index after `add -A`), the same
-   triple per submodule recursively; any git failure/unsupported state ⇒
-   `UNSUPPORTED` ⇒ non-retryable (fail closed); only ignored paths are
-   outside a successful fingerprint (Scope 7, Retries rule). *(r2, r3)*
+7. **Repo fingerprint is content-sensitive and recursive** — final form:
+   HEAD ‖ write-tree(index) ‖ write-tree(temp index after `add -A`), the
+   same triple per registered submodule recursively; any git failure,
+   unmerged index, or **unregistered embedded repository** (160000 gitlink
+   not in `.gitmodules`) ⇒ `UNSUPPORTED` ⇒ non-retryable (fail closed);
+   only ignored paths are outside a successful fingerprint (Scope 7,
+   Retries rule). *(r2, r3, r4)*
 8. **Interjections are cycle-scoped** — eligibility requires the receiving
    turn's cycle, or NULL phase (written with nothing owed: `phase/type/
    round/turn` all NULL + `observed_state` provenance) which lands on the
@@ -590,9 +608,10 @@ a note targeted at the other role is not even rendered). `usage`/DB show
   `write-tree`), so pre-existing modifications/untracked files/dirty
   submodules do not mask agent edits; only ignored paths (build outputs,
   `.tagteam/`, venvs) can change without changing it, and the handoff
-  fingerprint independently guards `.tagteam/` state. Any git failure or
-  unsupported state fails closed (`UNSUPPORTED` → non-retryable). Documented
-  in README.
+  fingerprint independently guards `.tagteam/` state. Any git failure,
+  unmerged index, or *unregistered embedded repository* (gitlink not in
+  `.gitmodules`) fails closed (`UNSUPPORTED` → non-retryable, path named in
+  the log). Documented in README.
 - **Interjection delivered but ignored by the agent.** The prompt marks
   them as arbiter instructions and SKILL.md says so; the audit trail shows
   delivery; enforcement is a Phase 34 cockpit concern (show
