@@ -1,7 +1,7 @@
 {
   "state": "in-progress",
-  "ready_for": "lead",
-  "round": 3,
+  "ready_for": "reviewer",
+  "round": 4,
   "phase": "orchestration-controls-usage-surfacing-30-arc",
   "type": "plan",
   "lead": "Claude",
