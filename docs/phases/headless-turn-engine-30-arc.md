@@ -5,8 +5,8 @@
 - [x] In Review
 - [x] Approved
 - [x] Implementation
-- [x] Implementation Review (in progress)
-- [ ] Complete
+- [x] Implementation Review (approved round 3)
+- [x] Complete (release: tag v0.8.0 after green Windows CI)
 
 ## Roles
 - Lead: Claude

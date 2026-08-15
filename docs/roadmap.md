@@ -304,7 +304,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Phase Plan:** `docs/phases/polish-pack-watcher-tokens-adopt.md` (Sub-phase C)
 
 ### Phase 31: Headless Turn Engine (3.0 arc)
-- **Status:** Implemented — in impl review (target release 0.8.0)
+- **Status:** ✅ Complete — impl approved 2026-08-14 (round 3; all review turns ran headless). Release 0.8.0: `pyproject.toml` bumped; tag push follows a green Windows CI run.
 - **Description:** Opt-in `tagteam watch --mode headless`: on turn flip, the orchestrator spawns the owed agent via its signed-in CLI (`claude -p --output-format stream-json` / `codex exec --json`) with a bounded context (skill contract + state + round tail + command) on stdin, streams structured events to `.tagteam/turns/<stem>.events.jsonl` and a human log `<stem>.log`, verifies the agent wrote the *expected* round (or new cycle for `/handoff start …`), and records per-turn token usage in the additive `usage` table (schema v3). Includes `cycle rounds --tail N`, `tagteam tail`, `agents.<role>.headless.{provider,executable,args}` config with structural argv validation, and failure handling (timeout / nonzero exit / no round → diagnostics + `.tagteam/headless-paused.json` + notification; no retries). Never auto-detected; flag-off runtime behavior unchanged from 0.7.1.
 - **Also fixed:** `dualwrite.py` imported `fcntl` at module top — every cycle write failed on Windows since Phase 28; now uses `msvcrt.locking` on Windows. New `.github/workflows/tests.yml` runs the suite on ubuntu + windows.
 - **Plan:** `docs/phases/headless-turn-engine-30-arc.md` (approved round 3). **Findings:** `docs/phases/headless-turn-engine-findings.md`.

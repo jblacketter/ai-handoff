@@ -69,7 +69,18 @@ and its **round-1 review was a headless Codex turn** spawned by
 - Round-2 review, also headless: **ok — REQUEST_CHANGES (2 blocking items)**, 155.0 s,
   usage row recorded (see `usage` table, round 2). `inflight.json` showed the live PID
   (29408) during the turn — the r1 finding verified in the real run.
-- Round-3 review is also run headless.
+- Round-3 review, headless: **ok — APPROVE**, 101.5 s.
+
+All three impl-cycle review turns for Phase 31 ran headless (this repo, real `codex exec`):
+
+| Round | Outcome | Wall | in / out / cache-read |
+|---|---|---|---|
+| 1 | REQUEST_CHANGES (5 items) | 205.8 s | 1 688 685 / 7 554 / 1 557 248 |
+| 2 | REQUEST_CHANGES (2 items) | 155.0 s | 715 789 / 5 159 / 648 960 |
+| 3 | APPROVE | 101.5 s | 282 114 / 2 471 / 248 832 |
+
+Round-over-round input tokens fell as the diff under review shrank — the churn curve
+Phase 34 wants to plot is already visible in three rows.
 
 ### (b) Phase 32 plan cycle headless (this repo)
 
