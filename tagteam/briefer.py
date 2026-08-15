@@ -340,21 +340,24 @@ def resolve_briefer(config: dict | None, project_root: str | Path) -> BriefSpec:
     except Exception as e:   # contract: never raise
         return BriefSpec(False, None, None, None, BRIEFER_DEFAULT_TIMEOUT_MINUTES * 60.0,
                          [f"briefer config unreadable: {e}"])
+    # The validated/fallback timeout is carried on EVERY return, so callers
+    # (e.g. `tagteam brief`'s abandoned sweep) never see 0.0 for a disabled
+    # or invalid block — that would abandon a live attempt after the grace.
+    timeout_s = float(spec["timeout_minutes"]) * 60
     if not spec["enabled"]:
-        return BriefSpec(False, spec["provider"], None, None,
-                         float(spec["timeout_minutes"]) * 60, problems)
+        return BriefSpec(False, spec["provider"], None, None, timeout_s, problems)
     if problems:
-        return BriefSpec(False, spec["provider"], None, None, 0.0, problems)
+        return BriefSpec(False, spec["provider"], None, None, timeout_s, problems)
     provider = spec["provider"]
     if provider not in h.ADAPTERS:
-        return BriefSpec(False, provider, None, None, 0.0,
+        return BriefSpec(False, provider, None, None, timeout_s,
                          [f"briefer provider {provider!r} unknown/uninferable — set briefer.provider"])
     try:
         exe = h.resolve_executable(provider, spec["executable"])
         argv = h.build_argv(h.ADAPTERS[provider], exe, spec["args"], project_root)
     except h.HeadlessConfigError as e:
-        return BriefSpec(False, provider, None, None, 0.0, [f"briefer: {e}"])
-    return BriefSpec(True, provider, exe, argv, float(spec["timeout_minutes"]) * 60, [])
+        return BriefSpec(False, provider, None, None, timeout_s, [f"briefer: {e}"])
+    return BriefSpec(True, provider, exe, argv, timeout_s, [])
 
 
 @dataclass
