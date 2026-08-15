@@ -173,6 +173,30 @@ tagteam usage [--json]                        # per-turn tokens; roll-ups by rol
 - **Notifications** work on macOS (osascript), Windows (toast, `msg` fallback) and Linux (`notify-send`); `TAGTEAM_NO_NOTIFY=1` silences them.
 - `tagteam rollback X.Y.Z` prints the revert recipe for your install (uv tool or pip, then `tagteam upgrade`) and runs it only with `--yes`.
 
+### Escalations: the briefer and `tagteam rule`
+
+When a cycle escalates (`ESCALATE`, `NEED_HUMAN`, or auto-escalation after 10 stale rounds) you are the arbiter. Opt in to the **escalation briefer** and the watcher will spawn one headless turn that writes you a decision brief — each side's position, the actual crux, what it checked, a recommendation with confidence, and the exact ruling commands:
+
+```yaml
+# tagteam.yaml
+briefer:
+  enabled: true              # opt-in; absent = off (0.9.0 behavior)
+  # provider: claude          # default: the lead's provider
+  # args: ["--model", "..."]  # try a lighter model; usage is recorded under role "briefer"
+  # timeout_minutes: 15
+```
+
+```bash
+tagteam brief                       # the brief for the CURRENT escalation event (never an older one)
+tagteam brief --list                # every attempt (auto/manual, status, path)
+tagteam brief --generate            # run the briefer now (manual attempt; also the retry path)
+tagteam rule approve --content "…"  # arbiter takes the reviewer's seat: closes the cycle
+tagteam rule request-changes --content "…"   # hands the turn back to the lead (no auto re-escalation)
+tagteam rule answer --to reviewer --content "…"  # for NEED_HUMAN: answer delivered as an interjection, cycle re-armed
+```
+
+Briefs land in `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (unique per escalation event and attempt; `…_latest.md` is an alias) and in the project DB. It fires **at most once automatically per escalation event** (a pre-spawn claim guarantees this even with two watchers), never retries on its own, never pauses the loop, and its tokens show up in `tagteam usage`. Everything it does is read-only except writing the brief file.
+
 ## The Saloon
 
 A graphical dashboard for monitoring and controlling handoff cycles:
@@ -214,6 +238,8 @@ tagteam cycle rounds --phase P --type plan --tail 3
 tagteam pause --reason "..." / tagteam resume / tagteam cancel-turn
 tagteam interject "note" [--to lead|reviewer] / --list / --retire ID
 tagteam usage [--json]
+tagteam brief [--list | --generate | --event KEY]
+tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]
 tagteam roadmap phases
 tagteam serve --dir .
