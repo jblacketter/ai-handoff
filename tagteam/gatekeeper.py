@@ -278,16 +278,60 @@ def gate_entries(rounds: list[dict]) -> list[dict]:
             or e.get("action") in _cycle.GATE_ACTIONS]
 
 
-def consecutive_bounces(rounds: list[dict]) -> int:
-    """Trailing GATE_BOUNCE count among the cycle's gate entries (a
-    GATE_PASS resets it)."""
+def consecutive_bounces(rounds: list[dict], decided: dict | None = None) -> int:
+    """Trailing count of APPLIED bounces among the cycle's gate entries.
+    `decided` maps `gate_event` → terminal gate-row status; an entry
+    whose row applied as `bounce` counts, an applied `pass` resets the
+    streak, and an entry whose row is `superseded` (a retained audit entry
+    from a recovery race), `error`/`abandoned` or unknown is ignored — it
+    never consumes the cap. Without `decided` (no DB), entries count by
+    action (legacy view)."""
     n = 0
     for e in reversed(gate_entries(rounds)):
+        if decided is not None:
+            row_status = decided.get(e.get("gate_event"))
+            if row_status == "bounce":
+                n += 1
+            elif row_status == "pass":
+                break
+            continue
         if e.get("action") == _cycle.GATE_BOUNCE:
             n += 1
         else:
             break
     return n
+
+
+def decided_by_event(conn, phase: str, cycle_type: str) -> dict:
+    """{event_key: 'pass'|'bounce'|'superseded'|'error'|'abandoned'|'running'}
+    for a cycle — the LATEST row per event decides (a decided row is unique
+    per event; otherwise the highest attempt)."""
+    out: dict = {}
+    for r in _db.gates_for_cycle(conn, phase, cycle_type):
+        cur = out.get(r["event_key"])
+        if cur in ("pass", "bounce"):
+            continue
+        out[r["event_key"]] = r["status"]
+    return out
+
+
+def applied_bounce_streak(project_root: str, phase: str, cycle_type: str, conn=None) -> int:
+    """`consecutive_bounces` against the canonical rounds file + gate rows."""
+    try:
+        rounds = _cycle.read_rounds_file(phase, cycle_type, project_root)
+    except Exception:
+        rounds = []
+    own = conn is None
+    try:
+        if own:
+            conn = _db.connect(project_dir=project_root)
+        decided = decided_by_event(conn, phase, cycle_type)
+    except Exception:
+        decided = None
+    finally:
+        if own and conn is not None:
+            conn.close()
+    return consecutive_bounces(rounds, decided)
 
 
 def _report_line(verdict: str, checks: list[dict]) -> str:
@@ -438,6 +482,12 @@ def reconcile_row(conn, row: dict, project_root: str) -> dict:
     Caller holds the writer lock."""
     entry = _entry_for_event(project_root, row["phase"], row["type"], row["event_key"])
     if entry is None:
+        return {"status": None}
+    # The entry names the attempt that wrote it (`gate_id`); only THAT row is
+    # completed from it — an earlier abandoned/error attempt for the same
+    # event stays what it is, and a later running attempt falls back to
+    # the normal runner policy (it will find the entry itself).
+    if entry.get("gate_id") is not None and int(entry["gate_id"]) != int(row["id"]):
         return {"status": None}
     sub = _row_sub(row)
     decision = _decision_from_entry(entry, sub, row)
@@ -685,11 +735,7 @@ def run_gate(project_root: str, *, kind: str = "auto", spec: GateSpec | None = N
             pre_entries = None
         t0 = time.monotonic()
         results = run_checks(spec, sub.phase, sub.type, project_root, log_path=log_path, log=log)
-        try:
-            rounds = _cycle.read_rounds_file(sub.phase, sub.type, project_root)
-        except Exception:
-            rounds = []
-        decision = decide(results, spec, consecutive_bounces(rounds))
+        decision = decide(results, spec, applied_bounce_streak(project_root, sub.phase, sub.type))
         decision.update({"round": sub.round, "gate_event": sub.event_key, "gate_id": row_id,
                          "gate_attempt": attempt, "submission_seq": sub.submission_seq,
                          "pre_entries": pre_entries})
@@ -753,6 +799,14 @@ def gate_status(project_root: str, phase: str | None = None, cycle_type: str | N
     rows: list[dict] = []
     running: list[dict] = []
     if phase and cycle_type:
+        # The approved contract: sweep/reconcile (owner-safe) before the
+        # read, exactly like `run` — a dead runner's row is abandoned and a
+        # row whose decision entry exists is completed, so what is shown is
+        # what is true. Best-effort: a sweep failure never hides the rows.
+        try:
+            sweep_abandoned_gates(project_root, spec)
+        except Exception:
+            pass
         try:
             conn = _db.connect(project_dir=project_root)
             try:
@@ -782,6 +836,19 @@ def last_gate_summary(project_root: str, phase: str, cycle_type: str) -> dict | 
     ents = gate_entries(rounds)
     if not ents:
         return None
+    # the most recent DECIDED entry (a retained superseded audit entry is
+    # not the last decision); no DB → the last entry by action
+    try:
+        conn = _db.connect(project_dir=str(project_root))
+        try:
+            decided = decided_by_event(conn, phase, cycle_type)
+        finally:
+            conn.close()
+        applied = [x for x in ents if decided.get(x.get("gate_event")) in ("pass", "bounce")]
+        if applied:
+            ents = applied
+    except Exception:
+        pass
     e = ents[-1]
     return {"status": "pass" if e.get("action") == _cycle.GATE_PASS else "bounce",
             "round": e.get("round"), "ts": e.get("ts"), "attempt": e.get("gate_attempt"),
@@ -851,11 +918,7 @@ def gate_command(args: list[str], project_root: str | Path | None = None, out=No
                   file=out)
         progress = (lambda m: print(m.strip(), file=sys.stderr)) if as_json else (lambda m: print(m.strip(), file=out))
         results = run_checks(spec, phase, ctype, root, log=progress)
-        try:
-            rounds = _cycle.read_rounds_file(phase, ctype, root)
-        except Exception:
-            rounds = []
-        decision = decide(results, spec, consecutive_bounces(rounds))
+        decision = decide(results, spec, applied_bounce_streak(root, phase, ctype))
         if as_json:
             print(json.dumps({"results": results, "decision": decision}, indent=2), file=out)
         else:

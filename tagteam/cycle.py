@@ -1598,19 +1598,33 @@ def ensure_gate_applied(phase: str, cycle_type: str, decision: dict, project_dir
             entry_appended = True
             _shadow_db_after_amend(project_dir, phase, cycle_type, entry)   # rounds-only mirror
         if action == GATE_PASS:
-            if entry_appended:
-                _auto_export_cycle_md(project_dir, phase, cycle_type)
+            # A RECOVERED / existing PASS (crash right after the JSONL
+            # append, before the mirror or the export) must still leave every
+            # store consistent: re-mirror the canonical rounds (the shadow
+            # write dedupes by round/role/action/ts) and re-export — never a
+            # state derive, seq untouched.
+            if existing is not None:
+                _shadow_db_after_cycle_write(project_dir, phase, cycle_type)
+            _auto_export_cycle_md(project_dir, phase, cycle_type)
             return {"entry_appended": entry_appended, "applied": "pass", "applied_seq": None, "seq": seq}
         # BOUNCE: compare-and-apply on (phase, type, round, submission_seq)
         applied_seq = decision.get("applied_seq")
         already = (same_cycle and status.get("state") == "in-progress"
                    and status.get("ready_for") == "lead"
                    and (applied_seq is not None and seq == int(applied_seq)))
-        if still_reviewer_ready:
-            status["state"] = "in-progress"
-            status["ready_for"] = "lead"
-            sp = _status_path(phase, cycle_type, project_dir)
-            sp.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
+        # Partial apply (crash between the cycle-status write and the top-
+        # level derive): the entry exists, the cycle status already says
+        # lead, the top-level state still says reviewer at exactly the
+        # submission seq → finish the derive exactly once.
+        partial = (existing is not None and same_cycle and seq == sub_seq
+                   and st.get("turn") == "reviewer"
+                   and status.get("state") == "in-progress" and status.get("ready_for") == "lead")
+        if still_reviewer_ready or partial:
+            if not partial:
+                status["state"] = "in-progress"
+                status["ready_for"] = "lead"
+                sp = _status_path(phase, cycle_type, project_dir)
+                sp.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
             _derive_top_level_state(phase, cycle_type, project_dir, updated_by="Gatekeeper")
             _shadow_db_after_cycle_write(project_dir, phase, cycle_type)
             _auto_export_cycle_md(project_dir, phase, cycle_type)
@@ -1618,11 +1632,14 @@ def ensure_gate_applied(phase: str, cycle_type: str, decision: dict, project_dir
             return {"entry_appended": entry_appended, "applied": "applied", "applied_seq": new_seq, "seq": new_seq}
         if already or (same_cycle and status.get("ready_for") == "lead" and applied_seq is None
                        and seq == sub_seq + 1):
-            if entry_appended:
-                _auto_export_cycle_md(project_dir, phase, cycle_type)
-            return {"entry_appended": entry_appended, "applied": "already", "applied_seq": seq, "seq": seq}
-        if entry_appended:
+            # fully applied earlier; still make sure the mirror + export
+            # carry the entry (crash-after-append recovery)
+            _shadow_db_after_cycle_write(project_dir, phase, cycle_type)
             _auto_export_cycle_md(project_dir, phase, cycle_type)
+            return {"entry_appended": entry_appended, "applied": "already", "applied_seq": seq, "seq": seq}
+        if existing is not None:
+            _shadow_db_after_cycle_write(project_dir, phase, cycle_type)
+        _auto_export_cycle_md(project_dir, phase, cycle_type)
         return {"entry_appended": entry_appended, "applied": "superseded", "applied_seq": None, "seq": seq}
 
 

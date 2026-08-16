@@ -552,6 +552,53 @@ class TestRunGate:
         cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", 4, "try 4", str(gated), updated_by="Claude")
         assert _run(gated).status == "bounce"
 
+    def test_superseded_bounce_entries_do_not_consume_the_cap(self, gated):
+        """A retained audit entry whose row is `superseded` never counts; only
+        consecutive APPLIED bounce rows reach max_bounces; an applied pass
+        resets the streak."""
+        _enable(gated, command=FAIL_CMD)
+        # two stale bounce entries from recovery races (rows superseded), then a real submission
+        for i in range(2):
+            sub = g.current_submission(str(gated))
+            conn = db.connect(project_dir=str(gated))
+            try:
+                rid, _ = db.claim_gate(conn, ts=g._now_iso(), phase=sub.phase, cycle_type=sub.type, round_=sub.round,
+                                       submission_seq=sub.submission_seq, event_key=sub.event_key, kind="auto",
+                                       runner_pid=1, runner_ident="x")
+            finally:
+                conn.close()
+            rp = cycle_mod._rounds_path("feat-x", "impl", str(gated))
+            with open(rp, "a") as f:
+                f.write(json.dumps({"round": sub.round, "role": "gatekeeper", "action": "GATE_BOUNCE",
+                                    "content": "GATE: BOUNCE | stale", "ts": g._now_iso(), "gate_event": sub.event_key,
+                                    "gate_id": rid, "gate_attempt": 1}) + "\n")
+            # the submission moves before the sweep → superseded
+            cycle_mod.add_round("feat-x", "impl", "reviewer", "REQUEST_CHANGES", sub.round, "no", str(gated), updated_by="Codex")
+            cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", sub.round + 1, f"again {i}", str(gated),
+                                updated_by="Claude")
+            g.sweep_abandoned_gates(str(gated), _spec(gated))
+        assert [r["status"] for r in _rows(gated)] == ["superseded", "superseded"]
+        assert len(_entries(gated)) == 2
+        assert g.applied_bounce_streak(str(gated), "feat-x", "impl") == 0
+        # legacy view (no DB) would have counted them
+        assert g.consecutive_bounces(cycle_mod.read_rounds_file("feat-x", "impl", str(gated))) == 2
+        # a failing submission now BOUNCES (streak 0), not pass-with-findings
+        res = _run(gated)
+        assert res.status == "bounce" and not res.decision["cap_hit"]
+        assert g.applied_bounce_streak(str(gated), "feat-x", "impl") == 1
+        rnd = _state(gated)["round"]
+        cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", rnd + 1, "again", str(gated), updated_by="Claude")
+        assert _run(gated).status == "bounce"
+        assert g.applied_bounce_streak(str(gated), "feat-x", "impl") == 2
+        rnd = _state(gated)["round"]
+        cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", rnd + 1, "again2", str(gated), updated_by="Claude")
+        res = _run(gated)
+        assert res.status == "pass" and res.decision["cap_hit"]                      # cap: two APPLIED bounces
+        assert g.applied_bounce_streak(str(gated), "feat-x", "impl") == 0            # an applied pass resets
+        # cockpit summary reports the applied decision, never a superseded audit entry
+        summ = g.last_gate_summary(str(gated), "feat-x", "impl")
+        assert summ["status"] == "pass"
+
     def test_manual_kind_recorded(self, gated):
         res = _run(gated, kind="manual")
         assert res.status == "pass" and _rows(gated)[0]["kind"] == "manual"
@@ -717,6 +764,92 @@ class TestFaultMatrix:
         out = g.sweep_abandoned_gates(str(gated), _spec(gated))
         assert out == {"reconciled": [], "abandoned": [], "unverifiable": []}
         assert _state(gated)["seq"] == seq + 1
+
+    def test_c2_mid_bounce_after_status_write_before_derive(self, gated):
+        """The precise middle of a BOUNCE apply: entry appended AND cycle
+        status already `ready_for: lead`, top-level state still reviewer at
+        the submission seq → the derive is finished exactly once (top-level
+        lead, seq+1, updated_by Gatekeeper); one entry; terminal bounce row
+        with applied_seq; not misclassified as superseded."""
+        sub = g.current_submission(str(gated))
+        seq = _state(gated)["seq"]
+        rid, _ = self._running_row(gated, sub, pid=self._dead_pid(), ident="gone")
+        rp = cycle_mod._rounds_path("feat-x", "impl", str(gated))
+        with open(rp, "a") as f:
+            f.write(json.dumps({"round": 1, "role": "gatekeeper", "action": "GATE_BOUNCE", "content": "GATE: BOUNCE | t",
+                                "ts": g._now_iso(), "gate_event": sub.event_key, "gate_id": rid, "gate_attempt": 1,
+                                "updated_by": "Gatekeeper"}) + "\n")
+        sp = cycle_mod._status_path("feat-x", "impl", str(gated))
+        d = json.loads(sp.read_text()); d["ready_for"] = "lead"; sp.write_text(json.dumps(d, indent=2) + "\n")
+        assert _state(gated)["turn"] == "reviewer" and _state(gated)["seq"] == seq          # split state
+        r = cycle_mod.ensure_gate_applied("feat-x", "impl", {"action": "GATE_BOUNCE", "content": "GATE: BOUNCE | t",
+                                                              "round": 1, "gate_event": sub.event_key, "gate_id": rid,
+                                                              "gate_attempt": 1, "submission_seq": sub.submission_seq},
+                                          str(gated))
+        assert r["applied"] == "applied" and r["applied_seq"] == seq + 1 and r["entry_appended"] is False
+        st = _state(gated)
+        assert st["turn"] == "lead" and st["seq"] == seq + 1 and st["updated_by"] == "Gatekeeper"
+        assert len(_entries(gated)) == 1
+        # a second call is a no-op ("already"); the sweep finishes the row
+        r2 = cycle_mod.ensure_gate_applied("feat-x", "impl", {"action": "GATE_BOUNCE", "content": "x", "round": 1,
+                                                               "gate_event": sub.event_key, "gate_id": rid,
+                                                               "gate_attempt": 1, "submission_seq": sub.submission_seq},
+                                           str(gated))
+        assert r2["applied"] == "already" and _state(gated)["seq"] == seq + 1
+        out = g.sweep_abandoned_gates(str(gated), _spec(gated))
+        assert out["reconciled"] == [rid]
+        rows = _rows(gated)
+        assert len(rows) == 1 and rows[0]["status"] == "bounce" and rows[0]["applied_seq"] == seq + 1
+        # the mirror carries the entry
+        conn = db.connect(project_dir=str(gated))
+        try:
+            assert [x["role"] for x in db.get_rounds(conn, "feat-x", "impl")].count("gatekeeper") == 1
+        finally:
+            conn.close()
+        # and through the watcher path from the same split state (fresh project)
+        # — covered by test_c (entry only) + this (entry + status): both reach the same end state.
+
+    def test_b2_pass_crash_right_after_jsonl_append_restores_parity(self, gated):
+        """Die immediately after the JSONL write (before the shadow mirror and
+        the export): the DB has no gatekeeper round and the render differs;
+        recovery must restore both without touching top-level state."""
+        sub = g.current_submission(str(gated))
+        seq = _state(gated)["seq"]
+        rid, _ = self._running_row(gated, sub, pid=self._dead_pid(), ident="gone")
+        rp = cycle_mod._rounds_path("feat-x", "impl", str(gated))
+        with open(rp, "a") as f:
+            f.write(json.dumps({"round": 1, "role": "gatekeeper", "action": "GATE_PASS", "content": "GATE: PASS | ok",
+                                "ts": g._now_iso(), "gate_event": sub.event_key, "gate_id": rid, "gate_attempt": 1,
+                                "updated_by": "Gatekeeper"}) + "\n")
+        conn = db.connect(project_dir=str(gated))
+        try:
+            assert [x["role"] for x in db.get_rounds(conn, "feat-x", "impl")] == ["lead"]        # DB is behind
+        finally:
+            conn.close()
+        out = g.sweep_abandoned_gates(str(gated), _spec(gated))
+        assert out["reconciled"] == [rid] and _rows(gated)[0]["status"] == "pass"
+        conn = db.connect(project_dir=str(gated))
+        try:
+            roles = [x["role"] for x in db.get_rounds(conn, "feat-x", "impl")]
+            assert roles == ["lead", "gatekeeper"]                                             # mirrored once
+            assert db.render_cycle(conn, "feat-x", "impl") == cycle_mod.render_cycle_from_files("feat-x", "impl", str(gated))
+        finally:
+            conn.close()
+        assert _state(gated)["seq"] == seq and _state(gated)["turn"] == "reviewer"
+        # DB-first reviewer tail sees the gate entry
+        tail = cycle_mod.tail_rounds("feat-x", "impl", 1, str(gated))
+        assert any(e.get("role") == "gatekeeper" for e in tail[-1]["entries"])
+        # idempotent: a second recovery does not duplicate
+        g.sweep_abandoned_gates(str(gated), _spec(gated))
+        cycle_mod.ensure_gate_applied("feat-x", "impl", {"action": "GATE_PASS", "content": "GATE: PASS | ok", "round": 1,
+                                                          "gate_event": sub.event_key, "gate_id": rid, "gate_attempt": 1,
+                                                          "submission_seq": sub.submission_seq}, str(gated))
+        conn = db.connect(project_dir=str(gated))
+        try:
+            assert [x["role"] for x in db.get_rounds(conn, "feat-x", "impl")].count("gatekeeper") == 1
+        finally:
+            conn.close()
+        assert len(_entries(gated)) == 1
 
     def test_d_after_row_finish_before_slot_release(self, gated):
         """decided row + entry, stale slot marker owned by a dead pid → the
@@ -1130,6 +1263,38 @@ class TestCli:
         assert j["enabled"] and j["last"]["status"] == "pass"
         assert g.gate_command(["list", "--json"], project_root=gated) == 0
         assert json.loads(capsys.readouterr().out)[0]["status"] == "pass"
+
+    def test_status_sweeps_dead_rows_and_reconciles_from_entries(self, gated, capsys):
+        sub = g.current_submission(str(gated))
+        dead = subprocess.Popen([PY, "-c", "pass"]); dead.wait()
+        conn = db.connect(project_dir=str(gated))
+        try:
+            rid, _ = db.claim_gate(conn, ts=g._now_iso(), phase=sub.phase, cycle_type=sub.type, round_=sub.round,
+                                   submission_seq=sub.submission_seq, event_key=sub.event_key, kind="auto",
+                                   runner_pid=dead.pid, runner_ident="gone")
+        finally:
+            conn.close()
+        assert g.gate_command(["status"], project_root=gated) == 0
+        out = capsys.readouterr().out
+        assert "abandoned" in out and "running" not in out.split("Last gate")[1]
+        assert _rows(gated)[0]["status"] == "abandoned"
+        # entry-first reconciliation through `status`: a running row whose entry exists is completed
+        conn = db.connect(project_dir=str(gated))
+        try:
+            rid2, _ = db.claim_gate(conn, ts=g._now_iso(), phase=sub.phase, cycle_type=sub.type, round_=sub.round,
+                                    submission_seq=sub.submission_seq, event_key=sub.event_key, kind="auto",
+                                    runner_pid=dead.pid, runner_ident="gone")
+        finally:
+            conn.close()
+        rp = cycle_mod._rounds_path("feat-x", "impl", str(gated))
+        with open(rp, "a") as f:
+            f.write(json.dumps({"round": 1, "role": "gatekeeper", "action": "GATE_PASS", "content": "GATE: PASS | ok",
+                                "ts": g._now_iso(), "gate_event": sub.event_key, "gate_id": rid2, "gate_attempt": 2}) + "\n")
+        assert g.gate_command(["status"], project_root=gated) == 0
+        out = capsys.readouterr().out
+        assert "pass" in out and _rows(gated)[-1]["status"] == "pass"
+        assert g.gate_command(["list"], project_root=gated) == 0
+        assert [r["status"] for r in _rows(gated)] == ["abandoned", "pass"]
 
     def test_run_bounce_and_disabled(self, gated, capsys):
         _enable(gated, command=FAIL_CMD)
