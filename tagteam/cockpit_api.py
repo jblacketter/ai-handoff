@@ -63,6 +63,88 @@ def web_user() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Watcher liveness (project-bound)
+# ---------------------------------------------------------------------------
+
+def _same_dir(a: str | None, b: str | Path) -> bool:
+    if not a:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
+
+
+def watcher_status(project_dir: str | Path, inflight: dict | None = None) -> dict:
+    """Is a watcher running FOR THIS PROJECT?  Signals, in order:
+
+    1. the watcher pidfile (`.tagteam/watcher.json`: pid + creation identity
+       + mode) — Tagteam's own launch shape puts no project path on argv,
+       so this is the primary binding; a dead pid / identity mismatch is
+       reported as `stale_pidfile` and never trusted;
+    2. a process scan: `tagteam … watch` processes whose argv names the
+       project OR whose cwd is the project (older watchers, no pidfile);
+    3. the in-flight pointer's watcher pid/identity (headless runner).
+
+    Returns {running, pid, mode, source, stale_pidfile}."""
+    from tagteam import procs
+    from tagteam import watcher as watcher_mod
+    root = Path(project_dir)
+    out = {"running": False, "pid": None, "mode": None, "source": None, "stale_pidfile": False}
+    rec = watcher_mod.read_pidfile(root)
+    if rec is not None:
+        pid = rec.get("pid")
+        alive = isinstance(pid, int) and pid > 0 and procs.pid_alive(pid)
+        ident_ok = True
+        if alive and rec.get("ident"):
+            now_ident = procs.identity(pid)
+            ident_ok = (now_ident is None) or (now_ident == rec.get("ident"))
+        if alive and ident_ok:
+            out.update({"running": True, "pid": pid, "mode": rec.get("mode"),
+                        "source": "pidfile", "started_at": rec.get("started_at")})
+            return out
+        out["stale_pidfile"] = True
+    # process scan
+    try:
+        r = subprocess.run(["pgrep", "-f", "tagteam.*watch"], capture_output=True, text=True, timeout=5)
+        pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        pids = []
+    me = os.getpid()
+    for pid in pids:
+        if pid == me or not procs.pid_alive(pid):
+            continue
+        argv = ""
+        try:
+            argv = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            argv = ""
+        if argv and " watch" not in f" {argv}":
+            continue
+        if (argv and str(root.resolve()) in argv) or _same_dir(procs.cwd(pid), root):
+            mode = None
+            if argv and "--mode" in argv:
+                try:
+                    mode = argv.split("--mode", 1)[1].split()[0]
+                except IndexError:
+                    mode = None
+            out.update({"running": True, "pid": pid, "mode": mode, "source": "process-scan"})
+            return out
+    # in-flight runner
+    if inflight and inflight.get("watcher_pid"):
+        wpid = inflight.get("watcher_pid")
+        try:
+            if procs.pid_alive(wpid) and (not inflight.get("watcher_ident")
+                                         or procs.identity(wpid) == inflight.get("watcher_ident")):
+                out.update({"running": True, "pid": wpid, "mode": "headless", "source": "inflight"})
+                return out
+        except Exception:
+            pass
+    return out
+
+
+# ---------------------------------------------------------------------------
 # /api/now
 # ---------------------------------------------------------------------------
 
@@ -116,22 +198,9 @@ def now_payload(project_dir: str | Path) -> dict:
         paused["age_s"] = _age_s(paused.get("ts"))
 
     try:
-        from tagteam.server import _get_watcher_status
-        watcher = _get_watcher_status(str(root))
+        watcher = watcher_status(root, inflight)
     except Exception:
-        watcher = {"running": False, "pid": None}
-    if not watcher.get("running") and inflight and inflight.get("watcher_pid"):
-        # A headless runner does not carry the project dir on its argv;
-        # the in-flight pointer's watcher identity is the better signal.
-        try:
-            from tagteam import procs
-            wpid = inflight.get("watcher_pid")
-            if procs.pid_alive(wpid) and (
-                    not inflight.get("watcher_ident")
-                    or procs.identity(wpid) == inflight.get("watcher_ident")):
-                watcher = {"running": True, "pid": wpid}
-        except Exception:
-            pass
+        watcher = {"running": False, "pid": None, "mode": None, "source": None, "stale_pidfile": False}
 
     pending_notes = 0
     try:
@@ -349,6 +418,17 @@ def usage_payload(project_dir: str | Path, phase: str | None = None,
 # /api/scope-diff
 # ---------------------------------------------------------------------------
 
+# Tagteam bookkeeping the cockpit never shows as phase work: the CLI's own
+# artifact set (docs/handoffs/, handoff-state.json, …) plus the .tagteam/
+# runtime directory, applied at FILE level after directory expansion.
+_COCKPIT_ARTIFACT_PREFIXES = (".tagteam/",)
+
+
+def is_cockpit_artifact(path: str) -> bool:
+    from tagteam.cycle import _is_tagteam_artifact
+    return _is_tagteam_artifact(path) or any(path.startswith(pre) for pre in _COCKPIT_ARTIFACT_PREFIXES)
+
+
 def _git_out(project_dir: str, *args: str, timeout: float = 30.0) -> tuple[int, str]:
     try:
         r = subprocess.run(["git", "-C", project_dir, *args], capture_output=True,
@@ -395,11 +475,28 @@ def scope_diff_payload(project_dir: str | Path, phase: str, ctype: str, *,
         return {"phase": phase, "type": ctype, "error": str(e), "paths": [],
                 "files": [], "truncated": False, "omitted_files": 0, "baseline": None}
     paths = info["paths"]
+    # Expand collapsed untracked directories (`git status --porcelain` lists
+    # `newpkg/` for a whole new tree) into the files git would add
+    # (respecting .gitignore), and drop Tagteam bookkeeping at file level.
+    file_paths: list[str] = []
+    for p in paths:
+        if p.endswith("/"):
+            rc, out = _git_out(root, "ls-files", "--others", "--exclude-standard", "-z", "--", p, timeout=20)
+            members = [m for m in out.split("\0") if m] if rc == 0 else []
+            if not members and (Path(root) / p).is_dir():
+                # tracked-but-dirty dir won't appear collapsed; be safe anyway
+                rc2, out2 = _git_out(root, "ls-files", "-z", "--", p, timeout=20)
+                members = [m for m in out2.split("\0") if m] if rc2 == 0 else []
+            file_paths.extend(members)
+        else:
+            file_paths.append(p)
+    file_paths = sorted({fp for fp in file_paths if not is_cockpit_artifact(fp)})
+
     files: list[dict] = []
     total = 0
     truncated_any = False
-    listed = paths[:max_files]
-    omitted = max(0, len(paths) - len(listed))
+    listed = file_paths[:max_files]
+    omitted = max(0, len(file_paths) - len(listed))
     if omitted:
         truncated_any = True
 
@@ -414,10 +511,17 @@ def scope_diff_payload(project_dir: str | Path, phase: str, ctype: str, *,
             tracked.append(p)
         else:
             untracked.append(p)
+    base = info["diff_base"]
+    # Status vs the baseline: added if the path is absent from the baseline
+    # tree, deleted if absent from the working tree, else modified.
+    in_base: set[str] = set()
+    if tracked:
+        rc, out = _git_out(root, "ls-tree", "-r", "--name-only", "-z", base, "--", *tracked, timeout=20)
+        if rc == 0:
+            in_base = {m for m in out.split("\0") if m}
 
     numstat: dict[str, tuple[int | None, int | None]] = {}
     patches: dict[str, str] = {}
-    base = info["diff_base"]
     if tracked:
         rc, out = _git_out(root, "diff", "--numstat", base, "--", *tracked)
         if rc == 0:
@@ -446,7 +550,15 @@ def scope_diff_payload(project_dir: str | Path, phase: str, ctype: str, *,
         adds, dels = numstat.get(p, (None, None))
         binary = (p in numstat and adds is None and dels is None)
         patch = None if binary else patches.get(p)
-        status = "untracked" if p in untracked else ("deleted" if not (Path(root) / p).exists() else "modified")
+        exists = (Path(root) / p).exists()
+        if p in untracked:
+            status = "untracked"
+        elif not exists:
+            status = "deleted"
+        elif p not in in_base:
+            status = "added"
+        else:
+            status = "modified"
         entry = {"path": p, "status": status, "binary": binary,
                  "additions": adds, "deletions": dels, "patch": None, "truncated": False,
                  "bytes": len(patch.encode("utf-8", "replace")) if patch else 0}
@@ -466,7 +578,8 @@ def scope_diff_payload(project_dir: str | Path, phase: str, ctype: str, *,
     return {
         "phase": phase, "type": ctype, "error": None,
         "baseline": info["baseline"], "diff_base": base,
-        "paths": paths, "committed": info["committed"], "uncommitted": info["uncommitted"],
+        "paths": paths, "file_paths": file_paths,
+        "committed": info["committed"], "uncommitted": info["uncommitted"],
         "files": files, "truncated": truncated_any, "omitted_files": omitted,
         "bytes": total, "max_bytes": max_bytes, "max_files": max_files,
     }
@@ -572,8 +685,28 @@ def events_signature(project_dir: str | Path) -> dict:
     sig["paused"] = h.pause_path(root).exists()
     inflight = h.read_inflight(root)
     if inflight is not None:
-        sig["inflight"] = {"stem": inflight.get("stem"), "pid": inflight.get("pid"),
+        pid = inflight.get("pid")
+        alive = None
+        try:
+            from tagteam import procs
+            alive = bool(isinstance(pid, int) and pid > 0 and procs.pid_alive(pid))
+        except Exception:
+            alive = None
+        sig["inflight"] = {"stem": inflight.get("stem"), "pid": pid, "alive": alive,
                            "age_s": int(_age_s(inflight.get("started_at")) or 0)}
+    # watcher liveness (pidfile pid alive?) — a watcher dying is a change too
+    try:
+        from tagteam import watcher as watcher_mod
+        from tagteam import procs
+        rec = watcher_mod.read_pidfile(root)
+        if rec is not None:
+            wpid = rec.get("pid")
+            sig["watcher"] = {"pid": wpid, "alive": bool(isinstance(wpid, int) and wpid > 0
+                                                          and procs.pid_alive(wpid))}
+        else:
+            sig["watcher"] = None
+    except Exception:
+        sig["watcher"] = None
     return sig
 
 

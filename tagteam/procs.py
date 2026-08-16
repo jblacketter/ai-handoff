@@ -111,6 +111,27 @@ def identity(pid: int) -> str | None:
     return f"{pid}:{lstart}" if lstart else None
 
 
+def cwd(pid: int) -> str | None:
+    """Current working directory of `pid`, or None if unavailable
+    (Linux: /proc; macOS/BSD: `lsof -a -p PID -d cwd -Fn`; Windows: None)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if sys.platform == "win32":  # pragma: no cover - Windows CI
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            return os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            return None
+    out = _run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+    if not out:
+        return None
+    for line in out.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return line[1:]
+    return None
+
+
 def kill_tree(pid: int) -> bool:
     """Kill `pid` and everything it spawned. Best-effort; returns True if a
     signal was sent."""

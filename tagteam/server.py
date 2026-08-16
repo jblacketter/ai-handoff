@@ -763,7 +763,7 @@ def make_handler(project_dir: str, *, mode: str = "legacy", token: str | None = 
                     content, content_type = result
                     self.send_response(200)
                     self.send_header("Content-Type", content_type)
-                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self._cors()
                     self.send_header("Content-Length", str(len(content)))
                     self.end_headers()
                     self.wfile.write(content)

@@ -57,10 +57,45 @@ UX-design round). Branch `phase-34-arbiter-cockpit`, release 0.11.0.
 ## Deviations / notes for the reviewer
 
 - **CORS on cockpit GETs.** The plan said "no `*` CORS on POST responses". In
-  cockpit mode the `*` header is dropped on **all** responses, including `/`
-  — the page embeds the token, so a wildcard on the HTML would let any origin
-  `fetch()` the page and read it, defeating the token. Legacy mode is
-  untouched (`*` everywhere, as in 0.10.0).
+  cockpit mode the `*` header is dropped on **all** responses — HTML, JSON,
+  SSE and (since round 2, reviewer r1) static assets too — because the page
+  embeds the token, so a wildcard on the HTML would let any origin `fetch()`
+  the page and read it, defeating the token. Legacy mode is untouched (`*`
+  everywhere, as in 0.10.0). Test asserts no wildcard on `/`, assets, JSON
+  reads and 404s in cockpit mode, and `*` on `/` and `/app.js` in legacy.
+- **Watcher liveness (round 2, reviewer r1 #1).** Tagteam's own launch shape
+  (`python -m tagteam watch --mode X` from the project cwd) puts no project
+  path on argv, so the 0.10.0 argv match never bound a watcher to a project.
+  Now: `watch()` writes `.tagteam/watcher.json` (pid + creation identity +
+  mode + argv + project_dir) for its lifetime (removed in `finally`; tests);
+  `cockpit_api.watcher_status()` binds by (1) the pidfile — dead pid or
+  identity mismatch → `stale_pidfile: true`, never trusted; (2) a process
+  scan of `tagteam … watch` processes whose argv names the project **or
+  whose cwd is the project** (`procs.cwd`: /proc on Linux, `lsof -d cwd` on
+  macOS) — this is what finds pre-pidfile watchers such as this repo's live
+  `--mode iterm2` (pid 74337, verified: `{running: True, pid: 74337, mode:
+  'iterm2', source: 'process-scan'}`); (3) the in-flight pointer's watcher
+  identity. `/api/now.watcher` = `{running, pid, mode, source, stale_pidfile}`;
+  the strip shows `watcher <mode> pid N` / `watcher gone (stale record)`.
+  The legacy `/api/watcher/status` helper is deliberately unchanged
+  (flag-off identity); the cockpit does not use it.
+- **Scope diff per file (round 2, reviewer r1 #2).** `git status --porcelain`
+  collapses a new tree to `newpkg/`; the CLI output stays exactly that
+  (byte-identical), but the cockpit payload expands collapsed untracked
+  directories via `git ls-files --others --exclude-standard` into files,
+  filters Tagteam bookkeeping **at file level** (the CLI's artifact set plus
+  `.tagteam/`), and reports real per-file `additions/deletions/patch` with
+  accurate statuses: `untracked` (new, not in the index), `added` (tracked,
+  absent from the baseline tree — via `git ls-tree` on the baseline),
+  `modified`, `deleted` (unstaged or staged), plus `binary`. `paths` (CLI
+  list) and `file_paths` (expanded) are both returned. Tests: a new package
+  with two text files + a binary, collapsed `.tagteam/` and `docs/` dirs
+  (no .gitignore), and an added / modified / deleted / binary matrix.
+- **SSE liveness signal (found in the round-2 dogfood).** When the scratch
+  watcher was killed mid-turn, the strip kept showing the in-flight turn and
+  the watcher — no file changed, so no frame fired. The signature now
+  includes `inflight.alive` (pid alive) and `watcher {pid, alive}` (pidfile),
+  and the page does a slow 30 s safety refresh in live mode.
 - **`--no-open`** was listed in the plan as "(existing)"; the server never
   auto-opened a browser and no such flag existed. Not added (adding one would
   be a no-op or a legacy behavior change).
@@ -75,8 +110,9 @@ UX-design round). Branch `phase-34-arbiter-cockpit`, release 0.11.0.
 
 ## Verification
 
-- `pytest`: **861 passed, 5 skipped** on the working tree (before the impl
-  submission commit). New: `tests/test_cockpit_api.py` (25),
+- `pytest`: **861 passed, 5 skipped** at the round-1 submission; round 2
+  adds watcher-liveness, per-file scope-diff, CORS-on-assets and SSE
+  liveness tests (see the round-2 entry). New: `tests/test_cockpit_api.py` (25),
   `tests/test_server_cockpit.py` (25: legacy identity, pages/assets, auth
   incl. the legacy four both ways, reads, writes, SSE two clients / cap /
   heartbeat / Last-Event-ID / non-blocking, serve flags + config gate),
@@ -140,7 +176,34 @@ rows):
     turn log (the r2 reviewer turn).
 12. No console errors in either tab.
 
-**Still to record during the impl cycle:** the Feed live while a headless
-reviewer turn is in flight (in-flight chip + Cancel turn in the drawer).
-The impl-cycle reviewer turns will exercise it; I will amend this section
-in the round that follows.
+### Live headless turn (round 2)
+
+This repo's impl-review turns are dispatched by Jack's `--mode iterm2`
+watcher to an interactive Codex tab (no headless turn log for impl r1), and
+starting a headless watcher beside it would double-dispatch — so the live
+headless observation was done on the scratch project with a **real** turn:
+`tagteam watch --mode headless --interval 5 --turn-timeout 10` on
+`scratchpad/proj` (lead owed after the browser ruling above), cockpit open:
+
+13. **In flight** — strip: `in flight: Claude (lead) · 29s` (pulsing),
+    `watcher headless pid 20552` (green, source `pidfile`), Needs you:
+    "Claude is on feat-x plan r1 — in flight now"; **Tail** drawer:
+    `tagteam tail · feat-x_plan_r1_lead_…log` streaming the real `claude -p`
+    session (`[claude] session … model claude-fable-5`, tool calls, the
+    lead's narration), red **Cancel turn** at the drawer's right edge.
+14. **Turn completes** (59 s, ok — `lead SUBMIT_FOR_REVIEW at round 2`) —
+    the Feed gained the r2 lead entry live; the strip flipped to `turn:
+    reviewer (Codex)`; the watcher immediately spawned the Codex reviewer
+    turn (`in flight: Codex (reviewer)`).
+15. **Rate-limit signal, real** — Usage tab: `claude five hour window:
+    allowed, resets 10:20 PM (in 3h30m) · seen Aug 15, 06:48:13 PM` from the
+    turn's `rate_limit_event`; churn point r1 lead 3,549 tokens ($0.822).
+16. **Stale states** — the watcher was then killed (SIGTERM, no `finally`)
+    with the Codex turn in flight: the strip showed `in flight: … · process
+    gone` and `watcher gone (stale record)`, Needs you showed the
+    **attention** card "In-flight pointer, but the process is gone" with
+    `Cancel turn`; confirm modal `tagteam cancel-turn --by web:jackblacketter`
+    → toast "Refusing to signal: child pid 21214 is not alive (turn already
+    ended) / Removed stale inflight.json (metadata only; nothing was
+    killed)." (the CLI's exit 1 shows as a red toast — its own message) →
+    the in-flight chip disappeared.
