@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "reviewer-panels",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-16",
+  "baseline": {
+    "sha": "c34d370def2457b560110109025c27593e99ee3a",
+    "dirty_paths": [],
+    "captured_at": "2026-08-16T23:13:04.742492+00:00",
+    "source": "plan-init"
+  }
+}
