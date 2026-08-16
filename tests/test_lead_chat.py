@@ -366,3 +366,44 @@ class TestRoadmapTerminal:
         allp = roadmap.parse_roadmap(rp)
         first_open = next(p for p in allp if not roadmap.is_terminal_status(p.status))
         assert phases[0].slug == first_open.slug
+
+
+# ------------------------------------------------ watcher: slot re-dispatch ----
+
+class TestWatcherSlotRedispatch:
+    def test_headless_watcher_redispatches_once_the_slot_frees(self, tmp_path):
+        """A conversation turn held the slot when the owed turn arrived; the
+        engine declined (slot_busy). Same seq, later tick, slot free →
+        dispatch exactly once; while still held → nothing."""
+        from tagteam.watcher import _StateProcessor
+        calls = []
+
+        class Eng:
+            slot_busy = None
+            def paused(self): return None
+            def run_owed_turn(self, state):
+                calls.append(state["seq"])
+                st = h.slot_status(tmp_path)
+                if st["held"]:
+                    self.slot_busy = {"reason": st["reason"]}
+                    return None
+                self.slot_busy = None
+                return "ran"
+        eng = Eng()
+        w = _StateProcessor(mode="headless", lead_name="Claude", reviewer_name="Codex", lead_pane="a",
+                            reviewer_pane="b", lead_session_id=None, reviewer_session_id=None, confirm=False,
+                            timeout_minutes=30, project_dir=str(tmp_path), max_retries=0, retry_delay=0,
+                            pre_send_delay=0, engine=eng)
+        state = {"seq": 5, "status": "ready", "turn": "lead", "command": "/handoff", "phase": "p", "round": 1,
+                 "updated_at": "2026-05-03T00:00:05+00:00"}
+        claim = h.claim_turn_slot(tmp_path, kind="conversation", role="lead", fields={
+            "stem": "conv", "watcher_pid": os.getpid(), "watcher_ident": procs.identity(os.getpid()), "pid": None})
+        w.tick(state)                      # first sight of seq 5 → dispatch → busy
+        assert calls == [5] and eng.slot_busy is not None
+        w.tick(state)                      # same seq, still held → no re-dispatch
+        assert calls == [5]
+        h.release_turn_slot(claim)
+        w.tick(state)                      # slot freed → dispatched again, once
+        assert calls == [5, 5] and eng.slot_busy is None
+        w.tick(state)
+        assert calls == [5, 5]
