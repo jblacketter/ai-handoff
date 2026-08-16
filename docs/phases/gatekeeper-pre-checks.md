@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics; round 3: slot-first claim order, honest dispatch semantics, consistent boundary algorithm)
+- [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics; round 3: slot-first claim order, honest dispatch semantics, consistent boundary algorithm; round 4: idempotent decision application across stores + fault-injection matrix, pre-test scope snapshot)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -88,22 +88,27 @@ state.seq changed → _handle_ready(state)
   │    row for event_key (at-most-once) → refused (decided already, or a
   │    live other runner's attempt is running) → RELEASE the slot; decided →
   │    existing behaviour (hand off); live-other → latch + return
-  ├─ run checks (subprocess test command with timeout; scope diff; plan doc)
-  ├─ under dualwrite.writer_lock:
+  ├─ run checks — ORDER MATTERS: `compute_impl_work()` is computed and FROZEN
+  │    first (before any subprocess can touch the tree), then plan-doc, then
+  │    the test command; the report shows the pre-test scope result
+  ├─ under dualwrite.writer_lock — `cycle.ensure_gate_applied(decision)`:
   │    re-read top-level state + cycle status; if the submission is no longer
   │    the same — `state.seq != gate.submission_seq`, or the cycle's
   │    round/state moved (lead AMENDed, arbiter ruled) → record the gate row
   │    'superseded', release slot, return (no cycle write)
-  │    PASS  → append entry role=gatekeeper action=GATE_PASS to the rounds
-  │             JSONL + shadow DB + auto-export ONLY — the AMEND write path:
-  │             NO `_derive_top_level_state`, NO handoff-state.json write,
-  │             `seq` unchanged (a bumped seq would make the next tick
-  │             re-dispatch the reviewer under a new event)
-  │    BOUNCE→ append entry role=gatekeeper action=GATE_BOUNCE with the
-  │             REQUEST_CHANGES transition (state=in-progress,
-  │             ready_for=lead → turn=lead, updated_by=Gatekeeper; this one
-  │             DOES derive state and bump seq, like any reviewer response)
-  ├─ finish gate row (pass/bounce/superseded/error, duration, result_json)
+  │    ENTRY-FIRST, IDEMPOTENT: (1) if a round entry with `gate_event ==
+  │    event_key` already exists → do NOT append again; (2) else append the
+  │    entry {round, role: gatekeeper, action: GATE_PASS|GATE_BOUNCE, content,
+  │    ts, gate_event, gate_id, gate_attempt}; (3) ensure the transition is
+  │    complete: PASS → nothing (rounds + shadow DB + export only, NO
+  │    `_derive_top_level_state`, NO handoff-state.json write, seq unchanged);
+  │    BOUNCE → if cycle status is not already (in-progress, ready_for=lead)
+  │    for this round, apply the REQUEST_CHANGES-shaped transition exactly
+  │    once (status → ready_for=lead; derive top-level state → turn=lead,
+  │    updated_by=Gatekeeper, seq+1); (4) finish the gate row from the entry
+  │    (status = entry action, decision id) — all inside the same lock hold
+  ├─ (finish gate row is step 4 above; a crash anywhere is repaired by the
+  │    sweep, see "Recovery")
   ├─ release slot (every exit path after the slot claim releases it —
   │    decided, superseded, refused, error, live-other; owner-token safe)
   └─ PASS → fall through to the existing reviewer hand-off *in the same
@@ -154,11 +159,41 @@ undecided. Tests: busy on the first tick / free on a later identical tick
 for each of the four modes (stub notifier / stub sender / fake engine),
 and restart mid-gate.
 
+### Recovery — decision application is idempotent across stores
+
+The rounds JSONL / cycle status / `handoff-state.json` and the SQLite
+shadow are separate durable writes, so the protocol is **entry-first +
+reconciliation**, and the round entry carries the decision identity
+(`gate_event` = event key, `gate_id` = the `gates` row id, `gate_attempt`).
+`cycle.ensure_gate_applied(decision)` (under the writer lock) is safe to
+call any number of times: it never appends a second entry for the same
+`gate_event`, and it completes whatever part of the transition is missing.
+`sweep_abandoned_gates` — run under the lock before every claim, and by
+`tagteam gate status/run` — first looks for a decision entry whose
+`gate_event` matches each `running` / `abandoned` / `error` row: if one
+exists it calls `ensure_gate_applied` with that entry (completing the row
+and any missing BOUNCE transition) and never re-runs the checks; only a row
+with **no** entry is abandoned/retried. Crash windows and their repair:
+
+| dies … | state left | repair |
+|---|---|---|
+| (a) before the entry | row `running`, no entry, slot marker owned by a dead pid | sweep: runner gone → `abandoned`; next claim = attempt+1 runs the checks again (no entry existed, so no duplicate); slot recovered by `slot_owner_gone` |
+| (b) after the entry, before the gate row finish | entry present, row `running` | sweep finds the entry → row finished from it (`pass`/`bounce`), BOUNCE transition ensured; no re-run, no second entry |
+| (c) mid-BOUNCE: entry appended, cycle status / top-level state still point at the reviewer | entry present, transition incomplete | `ensure_gate_applied` applies the lead-ready transition exactly once (status + derive + seq+1); the reviewer is never dispatched because the same-seq tick re-enters the gate path and finds the entry |
+| (d) after the row finish, before slot release / dispatch | decided row + entry, stale slot marker | slot recovery (dead owner) frees it; the tick sees the decided row + entry → PASS hands off / BOUNCE returns; nothing re-run |
+
+Fault-injection tests for (a)–(d) assert: exactly one entry per
+`gate_event`, exactly one terminal gate row, the correct `turn`/`seq`
+(PASS: seq unchanged, turn reviewer; BOUNCE: turn lead, seq +1 once), and
+no stranded slot; plus a double `ensure_gate_applied` call being a no-op.
+`uq_gates_decided` protects only terminal rows; the cross-store guarantee
+comes from the entry's `gate_event` + this idempotent apply.
+
 ### Checks (all deterministic; each yields `ok | fail | skip` + detail)
 
 | id | applies to | passes when | on `skip` |
 |---|---|---|---|
-| `tests` | types in `gatekeeper.on` (default `[impl]`) | configured `gatekeeper.tests.command` exits 0 within `timeout_minutes` (default 15) | no command configured → skip with note |
+| `tests` | types in `gatekeeper.on` (default `[impl]`) | configured `gatekeeper.tests.command` exits 0 within `timeout_minutes` (default 15) — **runs last**, after the scope snapshot is frozen, so files a test run creates can never satisfy `scope` | no command configured → skip with note |
 | `scope` | `impl` only | there is **implementation work since the implementation boundary** (below): `compute_impl_work()` is non-empty — paths that genuinely changed content (or were deleted / created) relative to the boundary snapshot, minus tagteam artifacts (`_TAGTEAM_ARTIFACT_FILES` / `_PREFIXES`, `.tagteam/`) and this phase's plan artifacts (`docs/roadmap.md`, `docs/phases/<phase>.md`) | not a git repo, or no boundary recorded (plan approved before 3.2.0 / legacy cycle) → skip with the reason (never fail on missing prerequisites); **no HEAD (unborn branch) is NOT a skip** — the hash snapshot still decides; the phase-baseline `compute_scope_diff` remains what the cockpit Diff tab shows |
 | `plan-doc` | all gated types | `docs/phases/<phase>.md` exists and is non-empty | — |
 
@@ -221,11 +256,14 @@ re-submissions after bounces still auto-escalate at 10 as today.
 ### Round entries
 
 New role `gatekeeper` (display name `Gatekeeper`) and actions
-`GATE_PASS`, `GATE_BOUNCE`. They are written by a dedicated
-`cycle.add_gate_entry(...)` — same shape as `add_ruling` (bypasses
-`VALID_ROLES`/`VALID_ACTIONS` validation of the *CLI* path, still goes
-through `writer_lock`, `_derive_top_level_state`, shadow-DB and
-auto-export). Content is a fixed, greppable format:
+`GATE_PASS`, `GATE_BOUNCE`. They are written by `cycle.ensure_gate_applied`
+(entry-first, idempotent — see Recovery), which bypasses the *CLI* path's
+`VALID_ROLES`/`VALID_ACTIONS` validation like `add_ruling` does, still
+goes through `writer_lock`, the shadow DB and auto-export, and derives
+top-level state **only for BOUNCE**. Every gate entry carries `gate_event`,
+`gate_id`, `gate_attempt` (extra keys are tolerated by every existing
+reader — the JSONL is schemaless and `parse_jsonl_rounds` copies unknown
+keys through). Content is a fixed, greppable format:
 
 ```
 GATE: PASS | tests ok (984 passed, 5 skipped, 3m38s) | scope 12 paths | plan-doc ok
@@ -336,14 +374,17 @@ block.
 ## Scope
 
 ### In
-- **A. `gatekeeper.py`** — `GateSpec`, `run_checks()` (tests / scope /
-  plan-doc), `decide()` (pass / bounce / cap-pass), `run_gate()`
-  (**slot → locked sweep+claim → checks → locked re-validate+write →
-  finish → release**, slot released on every exit path), report
-  formatting, log file.
-- **B. `cycle.py`** — `add_gate_entry()` (PASS = the AMEND write path:
-  rounds + shadow DB + export, no state derive; BOUNCE = the
-  REQUEST_CHANGES path); `GATE_PASS`/`GATE_BOUNCE` transitions;
+- **A. `gatekeeper.py`** — `GateSpec`, `run_checks()` (**scope snapshot
+  first, then plan-doc, then tests**), `decide()` (pass / bounce /
+  cap-pass), `run_gate()` (**slot → locked sweep+claim → checks → locked
+  `ensure_gate_applied` (entry-first, row finished in the same hold) →
+  release**, slot released on every exit path), report formatting, log
+  file.
+- **B. `cycle.py`** — `ensure_gate_applied()` (idempotent entry-first
+  apply keyed on `gate_event`: PASS = the AMEND write path — rounds +
+  shadow DB + export, no state derive; BOUNCE = the REQUEST_CHANGES path
+  applied exactly once; finishes the gate row in the same lock hold);
+  `GATE_PASS`/`GATE_BOUNCE` transitions;
   `ROLE_GATEKEEPER`; `_derive_top_level_state` writes `updated_by:
   Gatekeeper` on bounce; **`impl_boundary` capture on plan-cycle
   `APPROVE`** (`add_round` + `add_ruling`), propagation at impl init,
@@ -368,6 +409,12 @@ block.
   `pyproject.toml` → 3.2.0 at the end.
 - **J. Tests** — `tests/test_gatekeeper.py` (checks, decide, cap, claim
   at-most-once + concurrent claims, superseded, timeout, no-git skip,
+  **fault injection (a) before entry / (b) after entry before row finish /
+  (c) mid-bounce before state derive / (d) after row finish before slot
+  release → one entry, one terminal row, correct turn/seq, no stranded
+  slot; double `ensure_gate_applied` is a no-op; a test command that
+  creates an untracked file cannot satisfy `scope` (fails independently /
+  passes independently, scope decided pre-test)**,
   **busy-slot deferral leaves no self-owned running row and a later
   identical tick decides**, slot released on refused/decided/live-other,
   output truncation, log file; **impl-boundary matrix**: plan-only
@@ -463,7 +510,13 @@ pyproject.toml, CITATION.cff             3.2.0 (last commit)
    boundary (including a dirty-at-approval path committed unchanged) and
    passes on a real code or intentional implementation-doc change; missing
    boundary / not-git → skip with reason; no HEAD → the hash snapshot
-   decides (not a skip).
+   decides (not a skip); the scope snapshot is frozen before the test
+   subprocess runs, so files created by the tests never count.
+4d. Applying a decision is idempotent across the rounds / status / state /
+   DB stores: the fault-injection matrix (a)–(d) yields exactly one entry,
+   one terminal gate row, the correct turn/seq and no stranded slot;
+   the sweep completes a decided-but-unfinished row from its entry instead
+   of re-running the checks.
 5. After `max_bounces` consecutive bounces, the next failing submission
    passes-with-findings and reaches the reviewer.
 6. `tagteam gate check` exits 1 with the same report the gate would write;
@@ -480,6 +533,18 @@ pyproject.toml, CITATION.cff             3.2.0 (last commit)
 ## Resolved questions (round 1 → 2)
 - Default `on: [impl]` — agreed by the reviewer.
 - `max_bounces` default **2** — agreed by the reviewer.
+
+## Round-4 changes (reviewer r3)
+1. Decision application is idempotent across stores: gate entries carry
+   `gate_event` / `gate_id` / `gate_attempt`; `cycle.ensure_gate_applied`
+   (entry-first, under the lock) never appends twice, completes any missing
+   BOUNCE transition exactly once, and finishes the gate row in the same
+   hold; the sweep completes rows whose decision entry exists instead of
+   re-running; crash windows (a)–(d) documented with repairs and covered by
+   fault-injection tests (criterion 4d).
+2. `run_checks` freezes the implementation-work snapshot before the test
+   subprocess (then plan-doc, then tests); the report shows the pre-test
+   scope result; test with a test command that creates an untracked file.
 
 ## Round-3 changes (reviewer r2)
 1. Claim order is slot-first (briefer's actual order): SlotBusy → latch
