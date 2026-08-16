@@ -1,6 +1,6 @@
 {
-  "state": "in-progress",
-  "ready_for": "reviewer",
+  "state": "approved",
+  "ready_for": null,
   "round": 4,
   "phase": "cockpit-launchpad-lead-conversation-31",
   "type": "impl",
