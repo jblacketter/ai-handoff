@@ -787,3 +787,91 @@ class TestSchemaV6RateLimits:
         assert counts["rate_limits"] == 1
         assert db.latest_rate_limits(c)[0]["status"] == "allowed"
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# Schema v8 (Phase 38): gates + gatekeeper round role
+# ---------------------------------------------------------------------------
+
+class TestSchemaV8Gates:
+    def _v7_db(self, root):
+        import sqlite3
+        p = root / ".tagteam" / "tagteam.db"; p.parent.mkdir(parents=True)
+        raw = sqlite3.connect(p)
+        for ddl in (db._SCHEMA_V1, db._SCHEMA_V3, db._SCHEMA_V4, db._SCHEMA_V5, db._SCHEMA_V6, db._SCHEMA_V7):
+            raw.executescript(ddl)
+        raw.execute("PRAGMA user_version = 7")
+        raw.commit()
+        return raw
+
+    def test_v7_to_v8_rebuilds_rounds_preserving_rows_and_ids(self, tmp_path):
+        raw = self._v7_db(tmp_path)
+        raw.execute("INSERT INTO cycles (phase, type, lead, reviewer, state, ready_for, ready_for_present, round, date, created_at) "
+                    "VALUES ('p','impl','L','R','in-progress','reviewer',1,1,'d','t')")
+        cid = raw.execute("SELECT id FROM cycles").fetchone()[0]
+        raw.execute("INSERT INTO rounds (id, cycle_id, round, role, action, content, ts) VALUES (7, ?, 1, 'lead', 'SUBMIT_FOR_REVIEW', 'x', 't')", (cid,))
+        raw.execute("INSERT INTO rounds (id, cycle_id, round, role, action, content, ts) VALUES (9, ?, 1, 'reviewer', 'REQUEST_CHANGES', 'y', 't')", (cid,))
+        raw.commit(); raw.close()
+        c = db.connect(project_dir=str(tmp_path))
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 8
+        assert [tuple(r) for r in c.execute("SELECT id, role, action FROM rounds ORDER BY id")] == \
+            [(7, "lead", "SUBMIT_FOR_REVIEW"), (9, "reviewer", "REQUEST_CHANGES")]
+        assert c.execute("SELECT name FROM sqlite_master WHERE name='gates'").fetchone()
+        assert c.execute("SELECT name FROM sqlite_master WHERE name='idx_rounds_cycle'").fetchone()
+        # a third role is now accepted; the DB vocab agrees
+        rid = db.add_round(c, cid, 1, "gatekeeper", "GATE_PASS", "GATE: PASS", "t")
+        assert rid > 9                                    # AUTOINCREMENT continues past the copied ids
+        assert "gatekeeper" in db.VALID_ROLES and {"GATE_PASS", "GATE_BOUNCE"} <= db.VALID_ACTIONS
+        assert "gates" in db.NON_FILE_BACKED_TABLES
+        c.close()
+
+    def test_claim_gate_at_most_once_and_attempt_cap(self, tmp_path):
+        c = db.connect(project_dir=str(tmp_path))
+        kw = dict(phase="p", cycle_type="impl", round_=2, submission_seq=5, event_key="p/impl/r2/5",
+                  kind="auto", runner_pid=123, runner_ident="i")
+        first = db.claim_gate(c, ts="t1", **kw)
+        assert first and first[1] == 1
+        assert db.claim_gate(c, ts="t2", **kw) is None      # a running row refuses a second claim
+        db.finish_gate(c, first[0], status="abandoned", ts="t3", reason="dead")
+        second = db.claim_gate(c, ts="t4", **kw)
+        assert second and second[1] == 2                    # one automatic retry
+        db.finish_gate(c, second[0], status="error", ts="t5", reason="boom")
+        assert db.claim_gate(c, ts="t6", **kw) is None      # attempt 3 refused by default
+        third = db.claim_gate(c, ts="t7", max_attempts=3, **kw)
+        assert third and third[1] == 3
+        db.finish_gate(c, third[0], status="pass", ts="t8", result_json="{}", stem="s")
+        assert db.claim_gate(c, ts="t9", max_attempts=99, **kw) is None   # decided → never again
+        assert db.decided_gate_for_event(c, "p/impl/r2/5")["id"] == third[0]
+        assert [r["status"] for r in db.gates_for_event(c, "p/impl/r2/5")] == ["abandoned", "error", "pass"]
+        assert db.last_gate(c, "p", "impl")["status"] == "pass"
+        assert [r["status"] for r in db.unfinished_gates(c)] == ["abandoned", "error"]   # reconciliation candidates
+        assert db.running_gates(c) == []
+        with pytest.raises(ValueError):
+            db.finish_gate(c, third[0], status="running", ts="t")
+        with pytest.raises(ValueError):
+            db.claim_gate(c, ts="t", **{**kw, "kind": "weird"})
+        c.close()
+
+    def test_uq_gates_decided_blocks_a_second_decision(self, tmp_path):
+        import sqlite3
+        c = db.connect(project_dir=str(tmp_path))
+        a = db.claim_gate(c, ts="t", phase="p", cycle_type="impl", round_=1, submission_seq=1,
+                          event_key="e", kind="auto", runner_pid=1, runner_ident=None)
+        db.finish_gate(c, a[0], status="bounce", ts="t", applied_seq=2)
+        assert db.get_gate(c, a[0])["applied_seq"] == 2
+        with pytest.raises(sqlite3.IntegrityError):
+            c.execute("INSERT INTO gates (event_key, phase, type, round, submission_seq, kind, status, attempt, started_at) "
+                      "VALUES ('e','p','impl',1,1,'auto','pass',2,'t')")
+        c.close()
+
+    def test_snapshot_restore_includes_gates(self, tmp_path):
+        c = db.connect(project_dir=str(tmp_path))
+        a = db.claim_gate(c, ts="t", phase="p", cycle_type="impl", round_=1, submission_seq=1,
+                          event_key="e", kind="manual", runner_pid=1, runner_ident="x")
+        db.finish_gate(c, a[0], status="pass", ts="t")
+        snap = db.snapshot_non_file_backed(c)
+        assert len(snap["gates"]) == 2
+        c.execute("DELETE FROM gates"); c.commit()
+        assert db.restore_non_file_backed(c, snap)["gates"] == 1
+        assert db.get_gate(c, a[0])["status"] == "pass"
+        c.close()
