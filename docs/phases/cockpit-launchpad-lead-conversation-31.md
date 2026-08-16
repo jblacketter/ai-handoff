@@ -5,7 +5,7 @@
 - [x] In Review (round 2: launch-intent state machine, atomic lead-slot claim, composite idempotent Start, Codex resume argv + SSE replay/cursor, untrusted-content + id boundaries + turn lifecycle, bind-authoritative port rule, schema restore order; round 3: codex resume argv order verified against 0.147.0, persisted launch claim, existing marker keys retained + owner_token/kind, exclusive canary bind + quick-restart test; round 4: port-keyed Tagteam lease instead of the canary, fail-closed slot recovery, launch claim ownership + crash reconciliation + retry semantics, UX flow rewritten to the launch intent)
 - [x] Approved (round 5)
 - [x] Implementation
-- [x] Implementation Review (opened 2026-08-16)
+- [x] Implementation Review (approved round 4, 2026-08-16)
 - [ ] Complete (release **3.1.0** via PR)
 
 ## Roles
