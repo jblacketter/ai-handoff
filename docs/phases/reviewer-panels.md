@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: enriched-entry metadata contract on `add_round`, terminal claim policy + fallback, crash-safe interjection snapshot/delivery, tie ordering, NEED_HUMAN question)
+- [x] In Review (round 2: enriched-entry metadata contract on `add_round`, terminal claim policy + fallback, crash-safe interjection snapshot/delivery, tie ordering, NEED_HUMAN question; round 3: entry-level vs state-level attribution — `updated_by` serialised into the entry when `meta` is supplied)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -194,6 +194,25 @@ no window between "entry" and "keys"). Rules:
   `action`, `content`, `ts`, `updated_by`, `summary` (everything the entry
   already owns) are rejected with `ValueError` *before* the lock is taken —
   `meta` can add, never override. Values must be JSON-serialisable.
+- **Attribution rule (entry-level vs state-level).** Today `updated_by`
+  is a *state-level* attribution only: `add_round` uses the argument for
+  `_derive_top_level_state` / `state_history` and ordinary entries carry no
+  `updated_by` key (a plain `tagteam cycle add` writes `{round, role,
+  action, content, ts}`; readers show `updated_by: null`). This phase
+  makes the entry-level attribution explicit **only when `meta` is
+  supplied**: a non-empty `meta` **requires** an explicit non-empty
+  `updated_by` argument (else `ValueError`, before the lock, nothing
+  written), and that argument is copied into the entry
+  (`entry["updated_by"] = updated_by`) *before* `meta` is validated and
+  merged — `updated_by` stays reserved, so `meta` cannot supply a different
+  actor; entry actor and state updater are therefore always the same
+  string. Calls with `meta=None` are **byte-identical** to today (no
+  `updated_by` in the entry, inference from the roster for the state as
+  before), so flag-off behaviour and the parity corpus are unchanged. The
+  merged panel entry thus carries `updated_by: "Codex panel"` in the
+  canonical JSONL, in the DB round mirror (`rounds.updated_by` already
+  exists), in `read_rounds` / `tail_rounds` / the briefer's round input,
+  and the top-level state's `updated_by` is the same value.
 - The AMEND path, the stale-round gate, the plan-approval `impl_boundary`
   capture, `_derive_top_level_state`, `_shadow_db_after_cycle_write` and
   auto-export are unchanged: they read the entry's canonical fields only.
@@ -208,7 +227,12 @@ no window between "entry" and "keys"). Rules:
   canonical fields; export/readback (`render_cycle_from_files` ==
   `db.render_cycle`) unaffected; each reserved key raises and writes
   nothing (no entry, no status change, no seq bump); non-string / non-JSON
-  meta rejected; AMEND + ruling paths ignore meta as documented.
+  meta rejected; **meta without `updated_by` raises with nothing written**;
+  a meta entry has `updated_by` in the JSONL, in `db.get_rounds` /
+  `read_rounds` / `tail_rounds` (briefer input) and the top-level state
+  has the same updater; a `meta=None` call still writes an entry without
+  `updated_by` (byte-identical to 3.2); AMEND + ruling paths ignore meta as
+  documented.
 
 Panel meta = `panel_event` (event key), `panel_id` (row id),
 `panel_lenses` (`[{lens, outcome, verdict}]`), `panel_interjections`
@@ -525,7 +549,10 @@ pyproject.toml (package-data glob + 3.3.0), CITATION.cff
 7. Both SKILL copies updated and identical; README + HTW document the
    block; release 3.3.0 via PR from `phase-39-reviewer-panels`.
 8. `add_round(meta=)`: recovery keys survive JSONL/readback, DB and export
-   unaffected, reserved keys rejected with no write.
+   unaffected, reserved keys rejected with no write; with `meta`, the
+   entry carries the required `updated_by` (`"Codex panel"`) in JSONL, DB
+   mirror/read view and briefer input, matching the top-level updater;
+   `meta=None` calls are byte-identical to 3.2.
 9. Terminal claim policy: two failed attempts → decided `fallback` row +
    ordinary reviewer dispatched in the same tick (and on restart);
    superseded attempts never consume the budget.
@@ -538,6 +565,15 @@ pyproject.toml (package-data glob + 3.3.0), CITATION.cff
 - Default `on: [impl]` — agreed by the reviewer.
 - Sequential lenses under the one turn slot for this phase — agreed.
 - Merged entry `updated_by = "<Reviewer> panel"` — agreed.
+
+## Round-3 change (reviewer r2)
+Entry-level vs state-level attribution made explicit and achievable: a
+non-empty `meta` requires an explicit `updated_by`, which is serialised
+into the entry before meta is validated/merged (`updated_by` stays
+reserved); `meta=None` calls are byte-identical to today. Criterion 2's
+`updated_by="<Reviewer> panel"` on the entry is now guaranteed in the
+JSONL, DB mirror, read views and briefer input, and equals the state
+updater. Tests added under "Enriched entry" and criterion 8.
 
 ## Round-2 changes (reviewer r1)
 1. **Enriched entry is implementable**: `cycle.add_round(..., meta=)` — a
