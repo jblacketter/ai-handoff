@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 260" fill="none" role="img" aria-label="One tagteam cycle as a state machine: the lead submits, the reviewer requests changes or approves or escalates; the lead re-submits after changes; ten consecutive stale rounds auto-escalate; the arbiter's ruling approves or hands changes back">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8899aa"/></marker>
+    <marker id="ar-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#34d399"/></marker>
+    <marker id="ar-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#e8a838"/></marker>
+    <marker id="ar-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#f97066"/></marker>
+  </defs>
+  <!-- start -->
+  <circle cx="22" cy="80" r="7" fill="#8899aa"/>
+  <path d="M30 80 L136 80" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="82" y="70" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">SUBMIT_FOR_REVIEW</text>
+  <text x="82" y="96" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">(round 1)</text>
+  <!-- Submitted -->
+  <rect x="140" y="52" width="150" height="56" rx="10" fill="#1a2332" stroke="#0fbcbf" stroke-width="2"/>
+  <text class="node" x="215" y="86" text-anchor="middle" fill="#0fbcbf" font-family="monospace" font-size="14" font-weight="bold">Submitted</text>
+  <!-- AMEND self loop -->
+  <path d="M178 52 C168 20, 238 20, 228 50" stroke="#8899aa" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+  <text x="204" y="24" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">lead AMEND (same round)</text>
+  <!-- Changes -->
+  <rect x="140" y="176" width="150" height="56" rx="10" fill="#1a2332" stroke="#e8a838" stroke-width="2"/>
+  <text class="node" x="215" y="210" text-anchor="middle" fill="#e8a838" font-family="monospace" font-size="14" font-weight="bold">Changes</text>
+  <path d="M198 110 L198 172" stroke="#e8a838" stroke-width="1.5" marker-end="url(#ar-amber)"/>
+  <text x="192" y="146" text-anchor="end" fill="#e8a838" font-family="monospace" font-size="9">reviewer REQUEST_CHANGES</text>
+  <path d="M234 172 L234 110" stroke="#0fbcbf" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="240" y="150" fill="#8899aa" font-family="monospace" font-size="9">lead SUBMIT_FOR_REVIEW</text>
+  <text x="240" y="162" fill="#8899aa" font-family="monospace" font-size="9">(round N+1)</text>
+  <!-- Approved -->
+  <rect x="612" y="52" width="150" height="56" rx="10" fill="#1a2332" stroke="#34d399" stroke-width="2"/>
+  <text class="node" x="687" y="86" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="14" font-weight="bold">Approved</text>
+  <path d="M292 72 L608 72" stroke="#34d399" stroke-width="1.5" marker-end="url(#ar-green)"/>
+  <text x="436" y="64" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="9">reviewer APPROVE</text>
+  <circle cx="766" cy="130" r="7" fill="#8899aa"/><circle cx="766" cy="130" r="4" fill="#1a2332"/>
+  <path d="M700 110 L760 124" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <!-- Escalated -->
+  <rect x="440" y="176" width="150" height="56" rx="10" fill="#1a2332" stroke="#f97066" stroke-width="2"/>
+  <text class="node" x="515" y="210" text-anchor="middle" fill="#f97066" font-family="monospace" font-size="14" font-weight="bold">Escalated</text>
+  <path d="M292 96 L436 190" stroke="#f97066" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <text x="356" y="106" fill="#f97066" font-family="monospace" font-size="9">reviewer ESCALATE / NEED_HUMAN</text>
+  <text x="356" y="118" fill="#f97066" font-family="monospace" font-size="9">or REQUEST_CHANGES after</text>
+  <text x="356" y="130" fill="#f97066" font-family="monospace" font-size="9">10 consecutive stale rounds (auto)</text>
+  <!-- rulings -->
+  <path d="M592 194 L680 112" stroke="#34d399" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-green)"/>
+  <text x="650" y="160" text-anchor="start" fill="#34d399" font-family="monospace" font-size="9">arbiter rules approve</text>
+  <path d="M436 220 L294 220" stroke="#e8a838" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-amber)"/>
+  <text x="365" y="200" text-anchor="middle" fill="#e8a838" font-family="monospace" font-size="9">arbiter rules</text>
+  <text x="365" y="212" text-anchor="middle" fill="#e8a838" font-family="monospace" font-size="9">request-changes / answers</text>
+  <text x="600" y="250" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">a progressing cycle never auto-escalates, however long it runs</text>
+</svg>

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 260" fill="none" role="img" aria-label="Tagteam 3.0 headless architecture: the watcher spawns each turn as a fresh claude -p or codex exec process with the skill, state and last rounds; the turn writes its round and token usage to the project files and database; a turn flip wakes the watcher; the cockpit reads the files over SSE and the hub shows one row per project with each cockpit mounted; the arbiter pauses, interjects and rules through the cockpit, which runs the same CLI commands">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8899aa"/></marker>
+    <marker id="ar-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0fbcbf"/></marker>
+    <marker id="ar-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#a78bfa"/></marker>
+    <marker id="ar-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#f97066"/></marker>
+  </defs>
+  <!-- Watcher -->
+  <rect x="8" y="90" width="176" height="70" rx="10" fill="#1a2332" stroke="#0fbcbf" stroke-width="2"/>
+  <text class="node" x="96" y="118" text-anchor="middle" fill="#0fbcbf" font-family="monospace" font-size="12" font-weight="bold"><tspan x="96">Watcher</tspan> <tspan x="96" dy="16" font-weight="normal" font-size="9" fill="#e4ecf0">tagteam watch --mode headless</tspan></text>
+  <!-- Fresh turn process -->
+  <rect x="204" y="24" width="180" height="84" rx="10" fill="#1a2332" stroke="#34d399" stroke-width="2"/>
+  <text class="node" x="294" y="48" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="12" font-weight="bold"><tspan x="294">Fresh turn process</tspan> <tspan x="294" dy="16" font-weight="normal" font-size="10" fill="#e4ecf0">claude -p / codex exec</tspan> <tspan x="294" dy="15" font-weight="normal" font-size="9" fill="#8899aa">skill + state + last rounds</tspan></text>
+  <path d="M186 104 L200 72" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="150" y="70" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">spawn turn</text>
+  <!-- Files (cylinder) -->
+  <path d="M440 100 a70 12 0 0 1 140 0 v100 a70 12 0 0 1 -140 0 z" fill="#1a2332" stroke="#a78bfa" stroke-width="1.5"/>
+  <path d="M440 100 a70 12 0 0 0 140 0" stroke="#a78bfa" stroke-width="1.5"/>
+  <text class="node" x="510" y="140" text-anchor="middle" fill="#c6b5fc" font-family="monospace" font-size="10"><tspan x="510">handoff-state.json</tspan> <tspan x="510" dy="18">docs/handoffs/*.jsonl</tspan> <tspan x="510" dy="18">.tagteam/tagteam.db</tspan></text>
+  <path d="M386 62 L448 98" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="411" y="118" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">tagteam</text>
+  <text x="411" y="130" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">cycle add</text>
+  <text x="411" y="142" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">+ usage</text>
+  <path d="M440 176 L188 152" stroke="#0fbcbf" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar-teal)"/>
+  <text x="312" y="180" text-anchor="middle" fill="#0fbcbf" font-family="monospace" font-size="9">turn flip</text>
+  <!-- Arbiter -->
+  <rect x="612" y="6" width="172" height="34" rx="10" fill="#1a2332" stroke="#f97066" stroke-width="1.5"/>
+  <text class="node" x="698" y="28" text-anchor="middle" fill="#f97066" font-family="monospace" font-size="12" font-weight="bold">Arbiter (you)</text>
+  <path d="M698 42 L698 50" stroke="#f97066" stroke-width="1.5" marker-end="url(#ar-red)"/>
+  <text x="604" y="50" text-anchor="end" fill="#f97066" font-family="monospace" font-size="9">pause / interject / rule</text>
+  <!-- Cockpit -->
+  <rect x="612" y="54" width="172" height="64" rx="10" fill="#1a2332" stroke="#0fbcbf" stroke-width="2"/>
+  <text class="node" x="698" y="80" text-anchor="middle" fill="#0fbcbf" font-family="monospace" font-size="12" font-weight="bold"><tspan x="698">Cockpit</tspan> <tspan x="698" dy="16" font-weight="normal" font-size="9" fill="#e4ecf0">tagteam serve --theme cockpit</tspan></text>
+  <path d="M582 104 L608 92" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="596" y="86" text-anchor="middle" fill="#8899aa" font-family="monospace" font-size="9">SSE</text>
+  <path d="M632 120 L580 166" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="590" y="178" fill="#8899aa" font-family="monospace" font-size="9">same CLI</text>
+  <text x="590" y="190" fill="#8899aa" font-family="monospace" font-size="9">commands</text>
+  <!-- Hub -->
+  <rect x="612" y="196" width="172" height="54" rx="10" fill="#1a2332" stroke="#a78bfa" stroke-width="1.5"/>
+  <text class="node" x="698" y="218" text-anchor="middle" fill="#c6b5fc" font-family="monospace" font-size="12" font-weight="bold"><tspan x="698">Hub</tspan> <tspan x="698" dy="16" font-weight="normal" font-size="9" fill="#e4ecf0">tagteam hub</tspan></text>
+  <path d="M698 194 L698 122" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-violet)"/>
+  <text x="705" y="142" fill="#a78bfa" font-family="monospace" font-size="9">one row</text>
+  <text x="705" y="154" fill="#a78bfa" font-family="monospace" font-size="9">per project,</text>
+  <text x="705" y="166" fill="#a78bfa" font-family="monospace" font-size="9">cockpit at /p/id/</text>
+  <!-- caption -->
+  <text x="8" y="250" fill="#8899aa" font-family="monospace" font-size="10">no idle detection, no send-keys: each turn is born fresh with a bounded context</text>
+</svg>

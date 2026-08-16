@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 240" fill="none" role="img" aria-label="Tagteam modes as a ladder rising left to right: Manual (you paste /handoff between two agents), Watched (tagteam watch drives your terminals), Headless (each turn is a fresh claude -p or codex exec process), plus Cockpit and Hub (watch and steer from the browser)">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8899aa"/></marker></defs>
+  <text x="20" y="26" fill="#8899aa" font-family="monospace" font-size="10">same loop, same files — you choose how much runs by itself</text>
+  <!-- Step 1: Manual -->
+  <rect x="20" y="146" width="176" height="80" rx="10" fill="#1a2332" stroke="#8899aa" stroke-width="1.5"/>
+  <text class="node" x="36" y="172" fill="#e4ecf0" font-family="monospace" font-size="15" font-weight="bold"><tspan x="36">Manual</tspan> <tspan x="36" dy="20" font-size="11" font-weight="normal" fill="#8899aa">you paste /handoff</tspan> <tspan x="36" dy="16" font-size="11" font-weight="normal" fill="#8899aa">between two agents</tspan></text>
+  <path d="M198 186 L214 186" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <!-- Step 2: Watched -->
+  <rect x="216" y="104" width="176" height="80" rx="10" fill="#1a2332" stroke="#34d399" stroke-width="1.5"/>
+  <text class="node" x="232" y="130" fill="#34d399" font-family="monospace" font-size="15" font-weight="bold"><tspan x="232">Watched</tspan> <tspan x="232" dy="20" font-size="11" font-weight="normal" fill="#e4ecf0">tagteam watch drives</tspan> <tspan x="232" dy="16" font-size="11" font-weight="normal" fill="#e4ecf0">your terminals</tspan></text>
+  <path d="M394 144 L410 144" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <!-- Step 3: Headless -->
+  <rect x="412" y="62" width="176" height="80" rx="10" fill="#1a2332" stroke="#0fbcbf" stroke-width="2"/>
+  <text class="node" x="428" y="88" fill="#0fbcbf" font-family="monospace" font-size="15" font-weight="bold"><tspan x="428">Headless</tspan> <tspan x="428" dy="20" font-size="11" font-weight="normal" fill="#e4ecf0">each turn is a fresh</tspan> <tspan x="428" dy="16" font-size="11" font-weight="normal" fill="#e4ecf0">claude -p / codex exec</tspan></text>
+  <path d="M590 102 L606 102" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
+  <!-- Step 4: + Cockpit & Hub -->
+  <rect x="608" y="20" width="176" height="80" rx="10" fill="#1a2332" stroke="#a78bfa" stroke-width="1.5"/>
+  <text class="node" x="624" y="46" fill="#c6b5fc" font-family="monospace" font-size="15" font-weight="bold"><tspan x="624">+ Cockpit &amp; Hub</tspan> <tspan x="624" dy="20" font-size="11" font-weight="normal" fill="#e4ecf0">watch and steer</tspan> <tspan x="624" dy="16" font-size="11" font-weight="normal" fill="#e4ecf0">from the browser</tspan></text>
+  <!-- footers -->
+  <text x="20" y="236" fill="#8899aa" font-family="monospace" font-size="9">zero setup</text>
+  <text x="216" y="236" fill="#8899aa" font-family="monospace" font-size="9">notify · iterm2 · tmux</text>
+  <text x="412" y="236" fill="#8899aa" font-family="monospace" font-size="9">unattended · Windows</text>
+  <text x="608" y="236" fill="#8899aa" font-family="monospace" font-size="9">one project · all projects</text>
+</svg>

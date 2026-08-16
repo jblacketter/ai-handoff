@@ -4,19 +4,36 @@
 
 # Tagteam
 
-A collaboration framework for structured AI-to-AI handoffs with human oversight. One AI leads, another reviews, and you arbitrate — the whole cycle runs phase by phase from a roadmap.
+**Two AIs hand off the work, one human breaks the tie.** One AI agent leads, a second reviews, and you arbitrate — phase by phase, from a roadmap, with every round on the record.
 
-## How it works
+## The loop
 
-- **Lead** (one AI agent) plans each phase and implements the approved plan.
-- **Reviewer** (a second AI agent) reviews both the plan and the implementation.
-- **Arbiter** (you, the human) breaks ties and approves phases.
+```mermaid
+flowchart LR
+    R["Roadmap<br/>next phase"] --> P["Lead writes<br/>the plan"]
+    P --> PR["Reviewer reviews<br/>the plan"]
+    PR -- "request changes" --> P
+    PR -- "approve" --> I["Lead implements"]
+    I --> IR["Reviewer reviews<br/>the implementation"]
+    IR -- "request changes" --> I
+    IR -- "approve" --> R
+    PR -. "escalate" .-> A["Arbiter (you)<br/>rules"]
+    IR -. "escalate" .-> A
+    A -. "ruling" .-> P
+    A -. "ruling" .-> I
+```
 
-Work progresses phase by phase. Each phase is listed in `docs/roadmap.md` and goes through two review cycles: plan, then implementation. If the two agents can't make progress in 10 rounds, control escalates to the human arbiter.
+- **Lead** (one AI agent) plans each phase, then implements the approved plan.
+- **Reviewer** (a second AI agent) reviews both — the plan, then the implementation — and approves, requests changes, or escalates.
+- **Arbiter** (you) enters only when the two cannot settle it: an escalation, a question only a human can answer, or a cycle that stopped making progress.
 
-State is tracked in `handoff-state.json` (current turn) and `docs/handoffs/<phase>_<type>_rounds.jsonl` + `_status.json` (per-cycle rounds). Either agent can pick up where the other left off at any time.
+Each phase in `docs/roadmap.md` goes through two cycles — **plan**, then **impl** — and each cycle is a sequence of **rounds** (one lead submission, one reviewer response). Every round is appended to `docs/handoffs/`, and `handoff-state.json` says whose turn it is; either agent can pick up where the other left off.
 
-## Quick Start
+## Why
+
+An AI grading its own work rarely catches its own blind spots; a second model with a different training does. Long agent sessions drift and get expensive; short, bounded turns don't. And a human who has to relay every message is the bottleneck — the loop should run by itself and call you only when it needs a decision. Tagteam is the smallest structure that gets all three: a lead, a reviewer, and a record.
+
+## Try it
 
 ```bash
 pip install tagteam
@@ -24,23 +41,21 @@ cd ~/projects/myproject
 tagteam quickstart
 ```
 
-You'll be prompted for your two agent names, then quickstart sets up the workspace and starts a handoff session. It auto-detects the best terminal backend available on your machine:
+You'll be prompted for your two agent names, then quickstart sets up the workspace and starts a session. It auto-detects the best terminal backend available on your machine:
 
 - **iTerm2** (macOS, default when iTerm2 is installed) — opens three labeled tabs in a single window, auto-launching iTerm2 if it isn't already running.
 - **tmux** (Linux, WSL, or macOS without iTerm2) — creates one `tmux` session with three labeled panes.
 - **manual** (anywhere else, including Windows without WSL) — prints the three commands for you to run in terminals you open yourself.
 
-When quickstart finishes it prints what to paste into the Lead and Reviewer agents to kick off the first handoff. Override the auto-detection with `--backend iterm2|tmux|manual` if you need a specific one.
+When quickstart finishes it prints what to paste into the Lead and Reviewer agents to kick off the first phase. Override the auto-detection with `--backend iterm2|tmux|manual` if you need a specific one.
 
-## Running a handoff
-
-**Single phase** — start a plan review, let the watcher handle the back-and-forth, and stop when the phase completes.
+**Single phase** — start a plan cycle, let the watcher handle the back-and-forth, and stop when the phase completes:
 
 ```text
 /handoff start my-phase
 ```
 
-**Full roadmap** — run all incomplete phases end-to-end.
+**Full roadmap** — run all incomplete phases end-to-end:
 
 ```text
 /handoff start --roadmap
@@ -50,17 +65,11 @@ When quickstart finishes it prints what to paste into the Lead and Reviewer agen
 | Command                         | Purpose                                         | Who  |
 | ------------------------------- | ----------------------------------------------- | ---- |
 | `/handoff`                      | Auto-detects role + state, does the right thing | Both |
-| `/handoff start [phase]`        | Begin a new phase (plan + review cycle)         | Lead |
-| `/handoff start [phase] impl`   | Begin implementation review for a phase         | Lead |
+| `/handoff start [phase]`        | Begin a new phase (plan cycle)                  | Lead |
+| `/handoff start [phase] impl`   | Begin the implementation cycle for a phase      | Lead |
 | `/handoff status`               | Orientation, status check, drift reset          | Both |
 
-**Human-in-the-loop** — add `--confirm` to pause for approval before each automatic send.
-
-```bash
-tagteam watch --mode notify --confirm
-```
-
-## Other platforms
+**Human-in-the-loop** — add `--confirm` to pause for approval before each automatic send: `tagteam watch --mode notify --confirm`.
 
 <details>
 <summary>tmux (explicit invocation)</summary>
@@ -78,7 +87,7 @@ Creates one `tmux` session named `tagteam` with three labeled panes (Lead, Watch
 
 On Windows without WSL, terminal automation (iTerm2/tmux) isn't available. You have two options:
 
-1. **Headless mode** (recommended, fully automated) — no terminals to drive at all; each turn is a fresh `claude -p` / `codex exec` process. See [Headless mode](#headless-mode-opt-in) below.
+1. **Headless mode** (recommended, fully automated) — no terminals to drive at all; each turn is a fresh `claude -p` / `codex exec` process. See [Headless](#headless-fresh-process-per-turn) below.
 2. **Manual fallback** — quickstart prints the commands for you to run yourself in three terminals:
 
 ```bash
@@ -111,49 +120,68 @@ Options:
 - `tagteam session start --backend <name>` — force a specific backend
 - `tagteam session kill` — close the current session
 
-> **Manual mode:** you can always run handoffs without any automation by pasting `/handoff` output between agents yourself.
+> **Manual mode:** you can always run the loop without any automation by pasting `/handoff` output between agents yourself.
 
 </details>
 
-## Headless mode (opt-in)
+## One cycle
 
-Instead of typing commands into long-lived agent terminals, the watcher can spawn each turn as a **fresh process** through the agent's own signed-in CLI (`claude -p` for Claude, `codex exec` for Codex — subscription auth, no API keys):
+```mermaid
+stateDiagram-v2
+    [*] --> Submitted: lead SUBMIT_FOR_REVIEW (round 1)
+    Submitted --> Submitted: lead AMEND (same round)
+    Submitted --> Changes: reviewer REQUEST_CHANGES
+    Changes --> Submitted: lead SUBMIT_FOR_REVIEW (round N+1)
+    Submitted --> Approved: reviewer APPROVE
+    Submitted --> Escalated: reviewer ESCALATE / NEED_HUMAN
+    Submitted --> Escalated: REQUEST_CHANGES after 10 consecutive stale rounds (auto)
+    Escalated --> Approved: arbiter rules approve
+    Escalated --> Changes: arbiter rules request-changes / answers
+    Approved --> [*]
+```
+
+A cycle ends when the reviewer approves. It comes to you when the reviewer escalates, asks a question only a human can answer, or when the lead has re-submitted unchanged content for **10 consecutive stale rounds** — a cycle that is still making progress can go well beyond ten rounds without escalating. When it does come to you, `tagteam brief` gives you a decision brief (each side's position, the crux, a recommendation, the exact commands) and `tagteam rule approve|request-changes|answer` puts your ruling on the record — or do both from the cockpit's **Needs you** card. Details: [escalations and the briefer](docs/how-tagteam-works.md#escalations).
+
+## Choose how much runs by itself
+
+```mermaid
+flowchart LR
+    M["Manual<br/>you paste /handoff<br/>between two agents"] --> W["Watched<br/>tagteam watch drives<br/>your terminals"]
+    W --> H["Headless<br/>each turn is a fresh<br/>claude -p / codex exec"]
+    H --> C["+ Cockpit & Hub<br/>watch and steer<br/>from the browser"]
+```
+
+Every rung is the same loop and the same files; only the automation changes. **Manual** costs nothing to set up. **Watched** (`tagteam watch --mode notify|iterm2|tmux`) types the next command into the right terminal for you. **Headless** is for running unattended, on Windows, or whenever long-lived agent sessions become the problem.
+
+### Headless: fresh process per turn
+
+```mermaid
+flowchart LR
+    W["Watcher<br/>tagteam watch --mode headless"]
+    T["Fresh turn process<br/>claude -p / codex exec<br/>skill + state + last rounds"]
+    F[("handoff-state.json<br/>docs/handoffs/*.jsonl<br/>.tagteam/tagteam.db")]
+    C["Cockpit<br/>tagteam serve --theme cockpit"]
+    HUB["Hub<br/>tagteam hub"]
+    A["Arbiter (you)"]
+    W -- "spawn turn" --> T
+    T -- "tagteam cycle add<br/>+ token usage" --> F
+    F -- "turn flip" --> W
+    F -- "SSE" --> C
+    HUB -- "one row per project,<br/>cockpit at /p/id/" --> C
+    A -- "pause / interject / rule" --> C
+    C -- "same CLI commands" --> F
+```
+
+Instead of typing commands into long-lived agent terminals, the watcher can spawn each turn as a **fresh process** through the agent's own signed-in CLI (`claude -p` for Claude, `codex exec` for Codex — subscription auth, no API keys). Every turn gets a bounded context (the handoff skill contract + `handoff-state.json` + the last few rounds), writes its own round with `tagteam cycle add`, and its token usage is recorded. Nothing runs headless unless you ask:
 
 ```bash
 tagteam watch --mode headless          # never auto-detected; explicit opt-in only
 tagteam tail                           # follow the in-flight turn like CI logs
 ```
 
-On every turn flip the orchestrator composes a bounded context (the handoff skill contract + `handoff-state.json` + the last 3 rounds), pipes it to the agent on stdin, streams the agent's structured output to `.tagteam/turns/<phase>_<type>_r<N>_<role>_<ts>.log` (human-readable) and `.events.jsonl` (raw), and — because the agent still writes its own round with `tagteam cycle add` — verifies that the expected round landed before dispatching the other agent. Per-turn token usage is recorded in the project DB (`usage` table) for later phases to surface.
+**When something goes wrong** (a turn times out, exits nonzero, exits without writing its round, or the CLI cannot start), the watcher pauses dispatch, writes `.tagteam/headless-paused.json` with the reason and log path, and notifies you. It never retries silently. Per-role options (`provider`, `executable`, `args`, `timeout_minutes`) live under `agents.<role>.headless` in `tagteam.yaml`; opt-in retries re-run a turn only when it provably did nothing. Details, defaults and the validation rules: [headless mode](docs/how-tagteam-works.md#headless).
 
-**When something goes wrong** (turn timeout — 60 min by default; nonzero exit; the agent exited without writing its round; or the CLI could not be started at all), the watcher pauses dispatch, writes `.tagteam/headless-paused.json` with the reason and log path, and sends a notification. It never retries silently. To resume: read the log, fix anything needed, delete the marker; the watcher picks up on its next tick.
-
-```bash
-tagteam watch --mode headless --turn-timeout 90 --tail-rounds 5 --confirm
-tagteam cycle rounds --phase my-phase --type plan --tail 2   # last 2 entries only
-```
-
-Per-role options live under `agents.<role>.headless` in `tagteam.yaml` (all optional):
-
-```yaml
-agents:
-  lead:
-    name: Claude
-    headless:
-      provider: claude                # claude | codex (inferred from command/name if omitted)
-      executable: /opt/bin/claude     # default: `claude` on PATH
-      args: ["--model", "opus"]       # a YAML list; validated — no positionals, no reserved flags
-  reviewer:
-    name: Codex
-    headless:
-      args: ["-c", "approval_policy=untrusted"]
-```
-
-Defaults are the least-privileged unattended settings that still let the agent edit the repo and run the cycle CLI: Claude runs with `--permission-mode acceptEdits --allowedTools Bash Read Edit Write Glob Grep`; Codex with `--sandbox workspace-write -c approval_policy=never`. Anything you put in `args` is checked against a per-provider option table so a stray token can never become the prompt or override tagteam's own flags.
-
-Interactive modes are unchanged — headless is a peer mode. It is also the path for **Windows**: it needs only `subprocess`, and the test suite runs on `windows-latest` in CI (a real signed-in CLI smoke on Windows is best-effort; see the Phase 31 findings doc).
-
-### Arbiter controls (any watcher mode)
+**Arbiter controls (any watcher mode):**
 
 ```bash
 tagteam pause --reason "reviewing by hand"    # every watcher mode holds dispatch
@@ -165,78 +193,36 @@ tagteam interject --retire 3                  # close a note without delivering 
 tagteam usage [--json]                        # per-turn tokens; roll-ups by role, by cycle, totals
 ```
 
-- **pause/resume** use the same marker file the engine writes on a failed turn (`.tagteam/headless-paused.json`), so `resume` also tells you what failed and where the log is.
-- **cancel-turn** never signals a PID it cannot bind to the recorded turn: it checks the child's and the watcher's creation identities (recorded at spawn) and the parent pid, and if anything is stale or unverifiable it just removes the stale metadata and says so.
-- **interject** notes are stored with provenance (who, when, which cycle/round/turn was owed) in the project DB and go into the *next eligible* turn's prompt under an `ARBITER INTERJECTIONS` heading (headless) or show up as `interjections` on `tagteam cycle rounds` (interactive). A note is scoped to the cycle it was written for; delivery is stamped only when the receiving turn succeeds. `--to reviewer` waits for the reviewer's turn.
-- **Retries** (`tagteam watch --mode headless --turn-retries N`, default 0) re-run a failed turn only when it provably did nothing: the outcome is `spawn_failed`/`nonzero_exit`/`timeout` **and** a content-sensitive repo fingerprint (HEAD + index + worktree, recursively through every gitlink) **and** the handoff state are unchanged. `no_round`/`cancelled` are never retried; any git failure or unmerged index fails closed. Only `.gitignore`d paths are outside the fingerprint.
-- Per-role turn timeouts: `agents.<role>.headless.timeout_minutes`.
-- **Notifications** work on macOS (osascript), Windows (toast, `msg` fallback) and Linux (`notify-send`); `TAGTEAM_NO_NOTIFY=1` silences them.
-- `tagteam rollback X.Y.Z` prints the revert recipe for your install (uv tool or pip, then `tagteam upgrade`) and runs it only with `--yes`.
+How each of these behaves (pause markers, cancel-turn identity checks, interjection scoping, retries, notifications, `tagteam rollback`): [arbiter controls](docs/how-tagteam-works.md#controls).
 
-### Escalations: the briefer and `tagteam rule`
+## Watch and steer
 
-When a cycle escalates (`ESCALATE`, `NEED_HUMAN`, or auto-escalation after 10 stale rounds) you are the arbiter. Opt in to the **escalation briefer** and the watcher will spawn one headless turn that writes you a decision brief — each side's position, the actual crux, what it checked, a recommendation with confidence, and the exact ruling commands:
-
-```yaml
-# tagteam.yaml
-briefer:
-  enabled: true              # opt-in; absent = off (0.9.0 behavior)
-  # provider: claude          # default: the lead's provider
-  # args: ["--model", "..."]  # try a lighter model; usage is recorded under role "briefer"
-  # timeout_minutes: 15
-```
-
-```bash
-tagteam brief                       # the brief for the CURRENT escalation event (never an older one)
-tagteam brief --list                # every attempt (auto/manual, status, path)
-tagteam brief --generate            # run the briefer now (manual attempt; also the retry path)
-tagteam rule approve --content "…"  # arbiter takes the reviewer's seat: closes the cycle
-tagteam rule request-changes --content "…"   # hands the turn back to the lead (no auto re-escalation)
-tagteam rule answer --to reviewer --content "…"  # for NEED_HUMAN: answer delivered as an interjection, cycle re-armed
-```
-
-Briefs land in `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (unique per escalation event and attempt; `…_latest.md` is an alias) and in the project DB. It fires **at most once automatically per escalation event** (a pre-spawn claim guarantees this even with two watchers), never retries on its own, never pauses the loop, and its tokens show up in `tagteam usage`. Everything it does is read-only except writing the brief file.
-
-## The Cockpit
-
-A browser dashboard built around the arbiter's actual job — *does anything need me?* then *is it healthy and what is it doing?* — over the data the headless engine, controls and briefer record:
+**The Cockpit** — a browser dashboard for one project, built around the arbiter's actual job: *does anything need me?* then *is it healthy and what is it doing?*
 
 ```bash
 tagteam serve --theme cockpit --dir ~/projects/myproject      # http://localhost:8080
 ```
 
-- **Now** strip — phase / type / round, whose turn and for how long, the in-flight headless turn (with a `tagteam tail` drawer), the pause hold, watcher liveness, queued notes, and the connection mode (**Live** via SSE / **Polling** fallback / Disconnected).
-- **Needs you** — one card per thing only the human can do: an escalation with its Phase 33 brief and **Approve / Request changes**, a needs-human question with **Answer**, a hold with **Resume**, a missing/failed brief with **Generate brief**, a stale in-flight or missing watcher with the CLI to run. Empty when nothing needs you — and it says so.
-- **Watch** tabs — **Feed** (live round stream: entries, rulings, interjections, briefs), **Diff** (scope-diff of the current submission, per file, capped), **Usage** (round-over-round churn with the round-10 line, burn by role / cycle / process, and the Claude subscription-window signal), **Notes** (interjections: queue one, retire one).
+<p align="center"><img src="docs/media/screenshots/cockpit-needs-you.png" alt="Cockpit: the Now strip (phase, turn, watcher, connection), a Needs-you card for an escalated plan cycle with its decision brief and Approve / Request changes buttons, and the Watch tabs" width="100%"></p>
 
-The Now strip's watcher chip is project-bound: with `serve.theme: cockpit` in `tagteam.yaml` (or `tagteam watch --pidfile`) the watcher keeps an identity-checked `.tagteam/watcher.json` for its lifetime; otherwise the cockpit finds the watcher by process scan (cwd = the project) and the in-flight turn's runner identity. A bare `tagteam watch` writes nothing new.
+The **Now** strip (phase / type / round, whose turn and for how long, the in-flight turn, the pause hold, watcher liveness, connection mode); **Needs you** — one card per thing only the human can do, each with the buttons and the exact CLI they run; **Watch** tabs — Feed, Diff, Usage, Notes. Every button is the CLI command with the same effect, recorded as `by = web:<user>`. Cockpit mode binds **127.0.0.1** by default and guards every POST with a per-run page token; `--host 0.0.0.0` exposes it on the network and is your call. Zones, watcher liveness and the security model in full: [the cockpit](docs/how-tagteam-works.md#cockpit).
 
-Every button is the CLI command with the same effect (`tagteam pause`, `resume`, `interject`, `cancel-turn`, `brief --generate`, `rule …`) — final actions confirm by showing the exact CLI line the server will run, and every action reports the CLI's own message. Recorded as `by = web:<user>`. Set `serve: {theme: cockpit}` in `tagteam.yaml` to make it the default for a project.
-
-**Security note.** Cockpit mode binds **127.0.0.1** by default; a per-run token is embedded in the page and required as `X-Tagteam-Token` on every POST (`Origin`/`Referer` must match the server; no `*` CORS). That stops cross-site POSTs and non-browser clients that have not read the page — it is not remote-access authentication. `--host 0.0.0.0` deliberately exposes the server on the network; the page token is then the only guard, so do that only on a network you trust.
-
-### The Hub (all your projects)
+**The Hub** — every project you've set up, in one list ranked by what needs you.
 
 ```bash
 tagteam hub                     # http://localhost:8090 — every registered project, ranked by what needs you
 tagteam hub --list [--json]     # the same triage as text
 ```
 
-One surface over every project `tagteam setup` registered (`~/.tagteam/projects.json`), ranked by intent: **Needs you** (escalations, questions, paused-after-failure — one **Open** per row), **Waiting** (turns owed to agents, oldest first; **stale** when nothing is dispatching, **abandoned?** past a day — with the CLI to run), **Quiet** (done / idle, collapsed to a count). The strip shows how many are live, burn across projects (24 h / 7 d) and the shared subscription window (newest signal per provider/kind across *every* registered project — the subscription is one pool, so hidden projects count too; burn totals are for the visible projects only). **Open** takes you into that project's cockpit, mounted by the hub at `/p/<id>/` — same token, same loopback default — so ruling, pausing or interjecting anywhere is two clicks away.
+<p align="center"><img src="docs/media/screenshots/hub.png" alt="Hub: three registered projects — one under Needs you (escalated, brief ready, Open), one under Waiting (reviewer owed for hours, stale, with the CLI to run), one under Quiet — with burn and the shared subscription window in the top strip" width="100%"></p>
 
-The hub is read-only: it never migrates a project database (`mode=ro`), never rewrites the registry (`tagteam registry list` / `tagteam registry unregister PATH` are the only registry commands, and only `unregister` writes). Missing dirs, scratch paths and dirs without `tagteam.yaml` are hidden by default (`--all` / "show hidden").
+**Needs you** → **Waiting** (turns owed to agents; **stale** when nothing is dispatching) → **Quiet**, with burn across projects and the shared subscription window in the strip. **Open** takes you into that project's cockpit, mounted at `/p/<id>/`. The hub is read-only: it never migrates a project database and never rewrites the registry (`tagteam registry list|unregister PATH`). Details: [the hub](docs/how-tagteam-works.md#hub).
 
-### The Saloon (theme)
+**The Saloon** — the original western-themed dashboard survives as a theme: bare `tagteam serve` is unchanged, and in cockpit mode it lives at `/?theme=saloon`. [More](docs/how-tagteam-works.md#saloon).
 
-The original western-themed dashboard survives as a theme — bare `tagteam serve` (no `--theme`, no config key) is unchanged from 0.10.0: the Saloon at `/`, all interfaces, no token, no cockpit endpoints. In cockpit mode it lives at `/?theme=saloon` (and works there, token included).
+## Reference
 
-```bash
-tagteam serve --dir ~/projects/myproject           # legacy Saloon (0.10.0-identical)
-```
-
-## Configuration
-
-Agents are defined in `tagteam.yaml`:
+**Configuration** — agents are defined in `tagteam.yaml`:
 
 ```yaml
 agents:
@@ -248,7 +234,7 @@ agents:
     command: codex
 ```
 
-## CLI Reference
+**CLI reference:**
 
 ```bash
 tagteam quickstart                     # Setup + init + session start
@@ -258,6 +244,7 @@ tagteam session start --no-launch      # Create terminals, skip agent launch
 tagteam session kill
 tagteam init
 tagteam setup
+tagteam migrate                        # migrate a legacy project to tagteam.yaml
 tagteam state
 tagteam state diagnose
 tagteam watch --mode notify
@@ -276,9 +263,17 @@ tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]
 tagteam roadmap phases
 tagteam serve --dir .
-tagteam upgrade
+tagteam tui                            # optional Textual TUI (pip install 'tagteam[tui]')
+tagteam upgrade                        # re-copy framework files into every registered project
 tagteam --help
 ```
+
+**More:**
+
+- [How tagteam works](docs/how-tagteam-works.md) — the long version of every section above, plus the files tagteam writes and where.
+- [Showcase](docs/showcase.md) — the problem, the loop and the numbers from this repository's own use of tagteam.
+- [Diagrams and screenshots](docs/media/README.md) — the SVGs in this README as standalone assets.
+- [Roadmap](docs/roadmap.md), [3.0 proposal](docs/tagteam-3.0-proposal.md), per-phase plans and findings under `docs/phases/`.
 
 ## License
 
