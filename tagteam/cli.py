@@ -344,6 +344,7 @@ Commands:
   rollback      Print (or with --yes run) the revert recipe for a given version
   brief         Show the escalation decision brief for the current event (--list, --generate)
   gate          Gatekeeper pre-checks: check (lead pre-flight) | run | status | list
+  panel         Reviewer panel: run | status | list | lenses | preview --lens L
   rule          Rule on an escalation: approve | request-changes | answer (--to lead|reviewer)
   state         View or update the orchestration state file
   roadmap       Query roadmap phases and build execution queue
@@ -380,6 +381,8 @@ Escalations (opt-in briefer: `briefer: {enabled: true}` in tagteam.yaml):
   tagteam brief                                 tagteam rule approve --content "..."
 Gatekeeper (opt-in: `gatekeeper: {enabled: true, tests: {command: "..."}}`):
   tagteam gate check                            tagteam gate status
+Reviewer panel (opt-in: `panel: {enabled: true}`; 2–3 lens reviews merged into one reviewer entry):
+  tagteam panel lenses                          tagteam panel status
 """
 
 
@@ -442,6 +445,10 @@ def main() -> int:
         from tagteam.gatekeeper import gate_command
 
         return gate_command(sys.argv[2:])
+    if command == "panel":
+        from tagteam.panel import panel_command
+
+        return panel_command(sys.argv[2:])
     if command == "rule":
         from tagteam.controls import rule_command
 

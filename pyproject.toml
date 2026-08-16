@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tagteam"
-version = "3.2.0"
+version = "3.3.0"
 description = "A collaboration framework for structured AI-to-AI handoffs with human oversight"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -53,5 +53,6 @@ tagteam = [
     "data/web/*.html",
     "data/web/*.css",
     "data/web/*.js",
+    "data/panels/*.md",
     "tui/sounds/*.wav",
 ]

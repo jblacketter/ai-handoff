@@ -868,6 +868,7 @@ SLOT_KIND_CYCLE = "cycle"
 SLOT_KIND_CONVERSATION = "conversation"
 SLOT_KIND_BRIEFER = "briefer"
 SLOT_KIND_GATE = "gate"          # Phase 38: gatekeeper pre-checks
+SLOT_KIND_PANEL = "panel"        # Phase 39: reviewer panel (lens turns)
 
 
 class SlotBusy(Exception):

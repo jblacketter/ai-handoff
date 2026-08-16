@@ -725,3 +725,89 @@ class TestExtractLastRoundWithProjectDir:
                                     step_type="plan", project_dir=project)
         assert result is not None
         assert result["action"] == "APPROVE"
+
+
+# ---------------------------------------------------------------------------
+# Phase 39: add_round(meta=) — enriched entries for satellites
+# ---------------------------------------------------------------------------
+
+from tagteam import cycle  # noqa: E402  (Phase 39 tests use the module namespace)
+
+
+class TestAddRoundMeta:
+    def _cycle(self, tmp_path, monkeypatch):
+        from tagteam import state as state_mod
+        (tmp_path / "tagteam.yaml").write_text("agents:\n  lead:\n    name: Claude\n  reviewer:\n    name: Codex\n")
+        (tmp_path / "docs" / "handoffs").mkdir(parents=True)
+        monkeypatch.setattr(state_mod, "_cached_project_root", None, raising=False)
+        monkeypatch.chdir(tmp_path)
+        cycle.init_cycle("p", "impl", "Claude", "Codex", "impl v1", str(tmp_path), updated_by="Claude")
+        return tmp_path
+
+    def test_meta_survives_jsonl_db_and_readers_with_entry_attribution(self, tmp_path, monkeypatch):
+        from tagteam import db, state as state_mod
+        root = self._cycle(tmp_path, monkeypatch)
+        meta = {"panel_event": "p/impl/r1/3", "panel_id": 7, "panel_lenses": [{"lens": "scope", "verdict": "APPROVE"}]}
+        cycle.add_round("p", "impl", "reviewer", "REQUEST_CHANGES", 1, "PANEL: …", str(root),
+                        updated_by="Codex panel", meta=meta)
+        # canonical JSONL: meta + entry-level attribution
+        e = cycle.read_rounds_file("p", "impl", str(root))[-1]
+        assert e["panel_event"] == "p/impl/r1/3" and e["panel_id"] == 7 and e["panel_lenses"][0]["lens"] == "scope"
+        assert e["updated_by"] == "Codex panel" and e["role"] == "reviewer" and e["action"] == "REQUEST_CHANGES"
+        # DB mirror: one round, canonical columns incl. updated_by; read views carry it
+        conn = db.connect(project_dir=str(root))
+        try:
+            rows = db.get_rounds(conn, "p", "impl")
+            assert [r["role"] for r in rows] == ["lead", "reviewer"] and rows[-1]["updated_by"] == "Codex panel"
+            assert db.render_cycle(conn, "p", "impl") == cycle.render_cycle_from_files("p", "impl", str(root))
+        finally:
+            conn.close()
+        assert cycle.read_rounds("p", "impl", str(root))[-1]["updated_by"] == "Codex panel"
+        tail = cycle.tail_rounds("p", "impl", 1, str(root))
+        assert any(x.get("updated_by") == "Codex panel" for x in tail[-1]["entries"])   # briefer input
+        # state-level attribution equals the entry's
+        st = state_mod.read_state(str(root))
+        assert st["updated_by"] == "Codex panel" and st["turn"] == "lead"
+
+    def test_meta_none_is_byte_identical(self, tmp_path, monkeypatch):
+        root = self._cycle(tmp_path, monkeypatch)
+        cycle.add_round("p", "impl", "reviewer", "REQUEST_CHANGES", 1, "plain", str(root), updated_by="Codex")
+        e = cycle.read_rounds_file("p", "impl", str(root))[-1]
+        assert set(e) == {"round", "role", "action", "content", "ts"}          # no updated_by key on the entry
+        cycle.add_round("p", "impl", "lead", "SUBMIT_FOR_REVIEW", 2, "again", str(root), updated_by="Claude", meta={})
+        assert set(cycle.read_rounds_file("p", "impl", str(root))[-1]) == {"round", "role", "action", "content", "ts"}
+
+    @pytest.mark.parametrize("meta,needle", [
+        ({"round": 9}, "reserved"), ({"role": "lead"}, "reserved"), ({"action": "APPROVE"}, "reserved"),
+        ({"content": "x"}, "reserved"), ({"ts": "t"}, "reserved"), ({"updated_by": "someone"}, "reserved"),
+        ({"summary": "s"}, "reserved"), ({1: "x"}, "strings"), ({"obj": object()}, "JSON"), ("nope", "dict"),
+    ])
+    def test_invalid_meta_writes_nothing(self, tmp_path, monkeypatch, meta, needle):
+        from tagteam import state as state_mod
+        root = self._cycle(tmp_path, monkeypatch)
+        before_rounds = cycle.read_rounds_file("p", "impl", str(root))
+        before_state = state_mod.read_state(str(root))
+        before_status = cycle.read_status("p", "impl", str(root))
+        with pytest.raises(ValueError) as ei:
+            cycle.add_round("p", "impl", "reviewer", "REQUEST_CHANGES", 1, "x", str(root), updated_by="Codex panel", meta=meta)
+        assert needle in str(ei.value)
+        assert cycle.read_rounds_file("p", "impl", str(root)) == before_rounds
+        assert state_mod.read_state(str(root)) == before_state
+        assert cycle.read_status("p", "impl", str(root)) == before_status
+
+    def test_meta_requires_updated_by_and_rejects_amend(self, tmp_path, monkeypatch):
+        from tagteam import state as state_mod
+        root = self._cycle(tmp_path, monkeypatch)
+        before = state_mod.read_state(str(root))
+        with pytest.raises(ValueError, match="updated_by"):
+            cycle.add_round("p", "impl", "reviewer", "REQUEST_CHANGES", 1, "x", str(root), meta={"k": 1})
+        with pytest.raises(ValueError, match="updated_by"):
+            cycle.add_round("p", "impl", "reviewer", "REQUEST_CHANGES", 1, "x", str(root), updated_by="  ", meta={"k": 1})
+        with pytest.raises(ValueError, match="AMEND"):
+            cycle.add_round("p", "impl", "lead", "AMEND", 1, "x", str(root), updated_by="Claude", meta={"k": 1})
+        assert state_mod.read_state(str(root)) == before
+        assert len(cycle.read_rounds_file("p", "impl", str(root))) == 1
+        # rulings never pass meta (signature unchanged) — plain entry
+        cycle.add_round("p", "impl", "reviewer", "ESCALATE", 1, "stuck", str(root), updated_by="Codex")
+        cycle.add_ruling("p", "impl", "REQUEST_CHANGES", "no", "Jack", str(root))
+        assert "updated_by" not in cycle.read_rounds_file("p", "impl", str(root))[-1]
