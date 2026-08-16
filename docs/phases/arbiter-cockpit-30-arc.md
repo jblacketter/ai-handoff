@@ -4,6 +4,7 @@
 - [x] Planning
 - [x] In Review
 - [x] Approved (round 2; reviewer turns headless)
+- [ ] UX review round (round 3 — IA/feedback revisions to Scope 5)
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
@@ -18,15 +19,20 @@
 **What:** Redesign the web dashboard around the human's actual job —
 arbitration and monitoring — on top of the data Phases 31–33 now record.
 The cockpit is a plain-JS, framework-free page served by the existing
-hand-rolled server, organised as: **Now** (state, owed turn, in-flight
-process with a live tail), **Inbox** (escalations and needs-human questions
-with the Phase 33 brief and in-browser rulings), **Blockers** (pause, pending
-interjections, abandoned briefs, watcher/turn liveness), **Feed** (live round
-stream via SSE — entries, rulings, interjections, briefs as they happen),
-**Diff** (scope-diff of the current submission with a capped `git diff`),
-and **Usage** (burn by role / cycle / process from the `usage` table, a
-round-over-round churn curve, and the subscription-window signal the CLI
-reports). Controls from Phase 32/33 (`pause`/`resume`/`interject`/
+hand-rolled server, organised by the arbiter's questions, in order (see
+"UX review (round 3)" below): a persistent **Now** strip (state, owed turn
+and how long it has been owed, in-flight process with a live tail, pause,
+watcher liveness, connection mode); **Needs you** — the single primary
+region — one card per item only the human can act on (escalation with the
+Phase 33 brief and in-browser ruling, needs-human question with in-browser
+answer, pause hold, failed/abandoned brief, stale in-flight / no watcher);
+and **Watch** — tabs for everything else: **Feed** (live round stream via
+SSE — entries, rulings, interjections, briefs as they happen), **Diff**
+(scope-diff of the current submission with a capped per-file `git diff`),
+**Usage** (churn curve for the current cycle with the round-10 line, burn
+by role / cycle / process from the `usage` table, and the
+subscription-window signal the CLI reports), **Notes** (interjections:
+queued / delivered / retired). Controls from Phase 32/33 (`pause`/`resume`/`interject`/
 `cancel-turn`/`brief --generate`/`rule`) become buttons over new POST
 endpoints. The Saloon survives as an optional theme (`?theme=saloon` / a
 toggle) — not the information architecture.
@@ -90,8 +96,11 @@ PR at the end. **Release:** 0.11.0.
    - `GET /api/scope-diff/<cycle>` — the scope-diff path list from a new
      programmatic `cycle.compute_scope_diff(phase, type)` (extracted from
      `_cli_scope_diff`, CLI keeps its output byte-identical) plus a **capped**
-     unified `git diff` for those paths (≤ 200 KB, ≤ 400 files; truncation
-     flagged); binary files listed, not diffed.
+     `git diff` for those paths, **structured per file** so the UI can show
+     a file list first and expand on demand (round 3):
+     `files: [{path, status, binary, additions, deletions, patch}]`, caps
+     ≤ 200 KB total patch text, ≤ 400 files (truncation flagged per file
+     and overall); binary files listed with `patch: null`.
    - `GET /api/tail?lines=N` — last N lines of the in-flight turn log (or the
      most recent), same resolution as `tagteam tail --no-follow`.
    - `GET /api/events` — **SSE stream** (Scope 3).
@@ -131,14 +140,58 @@ PR at the end. **Release:** 0.11.0.
    four legacy POST routes through the served pages' contract in both
    modes: legacy mode without token → accepted; cockpit mode without token
    → 403; cockpit mode with the embedded token (as the Saloon and cockpit
-   JS send it) → accepted. Panels: Now / Inbox / Blockers / Feed / Diff / Usage as
-   described in the Summary; keyboard-free, single page, responsive enough
-   for a laptop split screen; every control confirms destructive actions
-   (`cancel-turn`, `rule approve/request-changes`) with the exact CLI it
-   is about to run. No JS unit-test framework exists in the repo: the
+   JS send it) → accepted.
+
+   **Layout (round 3 — see "UX review"):** three zones, not six peer panels.
+   - **Now strip** (persistent, top, one line + optional drawer): phase /
+     type / round; owed role and *how long it has been owed* (from
+     `updated_at`); in-flight (agent, role, elapsed, pid) with a "tail"
+     drawer (`/api/tail`); pause badge; watcher liveness; queued-notes
+     count; and the **connection mode** — `live` (SSE) / `polling` /
+     `disconnected, retrying`. Pause ⇄ Resume is a single state-reflecting
+     toggle here (reversible → no confirmation).
+   - **Needs you** (primary region; the one visually distinct block when
+     non-empty): a queue of typed cards, one item = one card = one primary
+     action — *escalation* (brief rendered by section, `Approve` /
+     `Request changes` with inline textarea), *question* (`Answer` with
+     inline textarea + `to lead|reviewer`), *hold* (pause marker: reason,
+     by, since → `Resume`), *brief failed / abandoned / missing*
+     (`Generate brief`), *stale in-flight / no watcher* (guidance + the
+     CLI to run; `Cancel turn` when bindable). Empty state: "Nothing needs
+     you — <role> is on r<N> (<age>)" linking to the Feed.
+   - **Watch** (tabs, secondary; content loaded when the tab is opened):
+     **Feed** (default; newest first; type chips lead / reviewer / ruling /
+     interjection / brief; summary line, expand for full content),
+     **Diff** (file list with +/- and binary flags, per-file expand,
+     "expand all", truncation banner), **Usage** (rate-limit line at the
+     top; churn curve for the current cycle with the round-10 escalation
+     line marked; role / cycle / process tables collapsed below), **Notes**
+     (interjections queued / delivered / retired, `Interject` textarea +
+     optional `to`, `Retire` on queued items).
+   - **Feedback contract:** every control goes pending (disabled + spinner)
+     → the server's `{ok, message}` shown as a toast (`ok:false` inline,
+     red, non-blocking); SSE `change` re-fetches only affected zones (no
+     full re-render jump); a `Live / Polling / Disconnected` indicator is
+     always visible.
+   - **Safety:** `Approve`, `Request changes`, `Answer`, `Cancel turn`
+     confirm with the exact CLI line the server will run *including the
+     content*; `Cancel turn` and `Approve` are visually distinct and placed
+     apart from safe actions; `Interject`, `Retire`, `Generate brief`,
+     `Pause`/`Resume` are reversible or additive and do not confirm.
+   - **Empty / first-run states** teach: no `tagteam.yaml` → link to the
+     Saloon setup (`/?theme=saloon`) and the CLI; no active cycle → the
+     `tagteam cycle init …` hint; no watcher → `tagteam watch --mode
+     headless` hint; no usage rows → "no headless turns recorded yet".
+   - **Vocabulary:** buttons use CLI verbs verbatim (Pause, Resume,
+     Interject, Retire, Cancel turn, Generate brief, Approve, Request
+     changes, Answer); zone names per the glossary below.
+   Keyboard-free, single page, responsive enough for a laptop split screen
+   (two columns → one). No JS unit-test framework exists in the repo: the
    frontend is covered by (a) an HTML/asset smoke test (page and referenced
-   assets served, token embedded), (b) endpoint tests, and (c) a real
-   browser dogfood pass recorded in findings.
+   assets served, token embedded, the three zones and four tab anchors
+   present), (b) endpoint tests, and (c) a real browser dogfood pass
+   recorded in findings (including the empty state and each feedback
+   state).
 6. **Subscription-window signal**: Phase 31's Claude event stream contains
    `rate_limit_event {status, resetsAt, rateLimitType}`. The headless
    runner and briefer will store the **latest** such event per provider in
@@ -166,7 +219,7 @@ PR at the end. **Release:** 0.11.0.
 9. **Dogfood**: this repo's `tagteam serve` used during the impl cycle
    (Feed live while the headless reviewer runs; Usage over real rows;
    pause/resume from the browser as the hold); a scratch-project escalation
-   ruled from the browser (`/api/rule` → brief inbox); two-tab SSE.
+   ruled from the browser (`/api/rule` from a Needs-you card); two-tab SSE.
 
 ### Out of Scope (explicitly)
 - Cross-project views (Phase 35 hub) — the cockpit is one project.
@@ -299,16 +352,55 @@ The client re-fetches the panels it cares about on `change` (cheap, local).
   `rate_limits` survives `repair.rebuild_db_from_files_and_verify` (test);
   0.10.0 opens a v6 project (release checklist).
 - [ ] Frontend: in cockpit mode `/` serves the cockpit with the token
-  embedded and all referenced assets resolve (smoke test); `/?theme=saloon`
-  serves the Saloon (only change: `tagteamFetch()`); in legacy mode `/`
-  serves the Saloon exactly as 0.10.0; the cockpit works with SSE and falls back to polling
-  when `EventSource` is unavailable (manual dogfood, recorded).
+  embedded and all referenced assets resolve (smoke test asserts the Now
+  strip, the Needs-you region and the four Watch tab anchors are present);
+  `/?theme=saloon` serves the Saloon (only change: `tagteamFetch()`); in
+  legacy mode `/` serves the Saloon exactly as 0.10.0; the cockpit works
+  with SSE and falls back to polling when `EventSource` is unavailable
+  (manual dogfood, recorded).
+- [ ] UX contract (round 3, dogfood-recorded with screenshots or described
+  flows): the connection indicator shows live / polling / disconnected;
+  each control shows pending then the server message; an `ok:false`
+  response is shown inline without a page error; the Needs-you empty state
+  and each card type render; the Diff tab shows a file list first and
+  expands per file; `/api/scope-diff` returns the per-file structure with
+  truncation flags.
 - [ ] Docs + findings: README cockpit section and security note; findings
   record the browser dogfood — live Feed during a headless reviewer turn,
   a ruling made from the browser on a scratch escalation (row + brief
   link), pause/resume from the browser used as the hold, Usage panel over
   the real rows, two-tab SSE.
 - [ ] Released as 0.11.0 via PR → merge → tag (post-approval; CI green).
+
+## UX review (round 3)
+
+Audit of the round-2 plan against interaction-design principles (skill:
+`ux-design-guide`), before implementation. User and task: the arbiter,
+opening the page with two questions in order — *does anything need me?*
+then *is it healthy and what is it doing?* — and occasionally *what is it
+costing?*. Governing principles: **IA by intent**, **visual hierarchy /
+Von Restorff**, **progressive disclosure**, **visibility of system
+status**.
+
+| Finding | Principle | Severity | Change |
+|---|---|---|---|
+| Six peer panels, each ≈ one endpoint, no stated hierarchy or focal point | IA by intent; Von Restorff | blocker | Three zones: Now strip → Needs you (primary) → Watch tabs (Scope 5) |
+| Inbox vs Blockers overlap; "pending interjections" are outbound notes, not blockers; abandoned briefs belong to their escalation | Feature consolidation; consistent language; mental models | friction | Merged into Needs-you cards; interjections get the Notes tab + a badge |
+| No visible feedback contract (connection mode, action ack, `ok:false`) | Visibility of status; Doherty | friction | Feedback contract in Scope 5 + a UX success criterion |
+| Diff rendered as one ≤200 KB blob | Progressive disclosure | friction | Per-file payload; file list first, expand per file, load on tab open |
+| Confirmations specified only for "destructive"; free-text via prompts unspecified | Error prevention; Fitts; user control | friction | Inline textareas; confirm shows CLI *with content*; Approve / Cancel turn separated; reversible actions do not confirm |
+| Empty states undefined although "nothing needs you" is the common state | Empty states teach | polish | Teaching empty states with CLI hints |
+| Panel nouns invented alongside CLI verbs | Match the real world; recognition | polish | Buttons use CLI verbs verbatim; glossary below |
+| Usage panel: three views, no lead | Visual hierarchy | polish | Churn curve with round-10 line leads; tables collapsed |
+
+**Glossary (same word everywhere — UI, README, findings):**
+*Now* — the strip: current state and what is running. *Needs you* — items
+only the human can act on. *Watch* — the tabs: *Feed* (round stream),
+*Diff* (current submission), *Usage* (tokens / cost / rate-limit signal),
+*Notes* (interjections). *Ruling* — Approve / Request changes / Answer.
+*Hold* — the pause marker.
+
+Backend scope is unchanged except the per-file `/api/scope-diff` shape.
 
 ## Decisions (round 1)
 
