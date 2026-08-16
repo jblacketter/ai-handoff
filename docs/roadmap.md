@@ -363,6 +363,10 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Options considered and rejected:** Apache-2.0 (adds patent grant + "state your changes" clause — revisit only if stronger attribution language becomes necessary); AGPL/GPL (deters commercial forks but also the internal adoption that builds reputation); private or private-shared (kills portfolio value without retracting published versions).
 - **Open follow-up:** bump `version` / `date-released` in `CITATION.cff` as part of each release (consider folding into the release checklist).
 
+### CI: take the Windows job out of the per-PR gate
+- **Status:** Not started — noted 2026-08-16 (Phase 37 PR)
+- **Motivation:** `pytest (windows-latest)` takes ~7–9 min per PR vs ~2 min for Ubuntu and Windows is not a current priority. Options: run it on `workflow_dispatch` / nightly / on `v*` tags only, or keep it non-required. Verify Windows separately once macOS/Ubuntu are green. Keep the Windows code paths (procs, headless, watcher pidfile, port-lease fallback) — this is about per-PR cost, not support.
+
 ### Terminal.app backend (macOS, optional)
 - **Status:** Not started
 - **Motivation:** Terminal.app ships with every Mac, so a `terminal` backend would remove the iTerm2 install step for new macOS users. Default stays `iterm2` (richer scripting); Terminal.app is opt-in via `--backend terminal`.
