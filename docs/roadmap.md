@@ -354,12 +354,17 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/gatekeeper-pre-checks.md`
 - **Source:** 3.0 proposal §4 candidate; promoted 2026-08-16 as the first post-arc phase (best value-to-risk of the four candidates).
 
+### Phase 39: Reviewer Panels (3.3)
+- **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-39-reviewer-panels` (PR at the end). Release **3.3.0** after impl approval.
+- **Description:** opt-in panel that takes the reviewer's turn as 2–3 independent lens reviews (correctness / scope / verification by default; each a fresh reviewer process with a lens brief, writing a structured verdict) merged deterministically into exactly one reviewer entry — one `REQUEST_CHANGES` with findings grouped by lens, or `APPROVE` only when every lens approves; any lens failure with no objection → fallback to the ordinary reviewer turn (never a partial approval). Runs after the gate at the watcher's reviewer seam in every mode; at-most-once per submission (`panels` claim row, schema v9, shared `_claim_satellite` with the gate); `tagteam panel run|status|list|lenses|preview`. No cockpit work.
+- **Plan:** `docs/phases/reviewer-panels.md`
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
 - **Status:** Not started — deliberately kept out of the 3.0 arc to protect focus; see `docs/tagteam-3.0-proposal.md` §4 "Candidate later phases"
 - ~~Gatekeeper pre-checks~~ → promoted to Phase 38 (2026-08-16)
-- Reviewer panels (2–3 lenses merged into one `REQUEST_CHANGES`; opt-in per phase)
+- ~~Reviewer panels~~ → promoted to Phase 39 (2026-08-16)
 - Roadmap as DAG (`depends_on`, parallel phases in worktrees)
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
