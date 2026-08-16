@@ -368,6 +368,10 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Status:** Not started — noted 2026-08-16 (Phase 37 PR)
 - **Motivation:** `pytest (windows-latest)` takes ~7–9 min per PR vs ~2 min for Ubuntu and Windows is not a current priority. Options: run it on `workflow_dispatch` / nightly / on `v*` tags only, or keep it non-required. Verify Windows separately once macOS/Ubuntu are green. Keep the Windows code paths (procs, headless, watcher pidfile, port-lease fallback) — this is about per-PR cost, not support.
 
+### Saloon rethink — archetype cast & theme packs
+- **Status:** Not started — brainstorm in `docs/saloon-rethink.md` (2026-08-16)
+- **Description:** Recast the fun theme around the loop's real roles (Host, Lead, Reviewer, Turn-keeper, Round clock, You-as-Arbiter) instead of feature mascots; three-beat first-run flow (init agents → start watcher → hand the user the kickoff message); every element bound to real state. Make the engine theme-driven so up to five settings can be trialed (saloon revised, alien spaceship, pirate ship, mission control, restaurant kitchen). Cockpit remains the serious surface; theme is a skin.
+
 ### Terminal.app backend (macOS, optional)
 - **Status:** Not started
 - **Motivation:** Terminal.app ships with every Mac, so a `terminal` backend would remove the iTerm2 install step for new macOS users. Default stays `iterm2` (richer scripting); Terminal.app is opt-in via `--backend terminal`.
