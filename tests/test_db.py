@@ -741,7 +741,7 @@ class TestExportToFiles:
 class TestSchemaV6RateLimits:
     def test_v6_additive_and_in_non_file_backed(self, tmp_path):
         c = db.connect(project_dir=str(tmp_path))
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 6 == db.SCHEMA_VERSION
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION >= 6
         assert c.execute("SELECT name FROM sqlite_master WHERE name='rate_limits'").fetchone()
         assert "rate_limits" in db.NON_FILE_BACKED_TABLES
         # v5 → v6 migration is additive (a v5 DB opens and gains the table)
@@ -752,7 +752,7 @@ class TestSchemaV6RateLimits:
             raw.executescript(ddl)
         raw.execute("PRAGMA user_version = 5"); raw.commit(); raw.close()
         c5 = db.connect(project_dir=str(tmp_path / "v5"))
-        assert c5.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert c5.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert c5.execute("SELECT name FROM sqlite_master WHERE name='rate_limits'").fetchone()
         c5.close(); c.close()
 

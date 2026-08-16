@@ -83,15 +83,42 @@ def parse_roadmap(roadmap_path: Path) -> list[RoadmapPhase]:
     return phases
 
 
+# Phase 37: terminal dispositions. A status line like "✅ Complete — impl
+# approved …", "Complete (2026-05-03).", "Absorbed — see …", "Deferred (…)",
+# "Superseded by …" all mean "nothing left to run here". Matched on the
+# normalized prefix (emoji/decoration stripped, case-folded) so free-text
+# after the word does not matter, and only on the *first* word so
+# "Not started" and "In progress" stay actionable.
+_TERMINAL_STATUS_WORDS = ("complete", "completed", "done", "absorbed", "deferred",
+                          "superseded", "shipped", "closed", "decided")
+_STATUS_DECORATION_RE = re.compile(r"^[^A-Za-z]+")
+
+
+def normalize_status(status: str | None) -> str:
+    text = (status or "").strip()
+    text = _STATUS_DECORATION_RE.sub("", text)      # strip emoji / bullets / spaces
+    return text.casefold()
+
+
+def is_terminal_status(status: str | None) -> bool:
+    """True when the roadmap disposition means "not actionable"."""
+    norm = normalize_status(status)
+    if not norm:
+        return False
+    first = re.split(r"[^a-z]+", norm, maxsplit=1)[0]
+    return first in _TERMINAL_STATUS_WORDS
+
+
 def get_incomplete_phases(roadmap_path: Path) -> list[RoadmapPhase]:
-    """Parse roadmap and return only incomplete phases.
+    """Parse roadmap and return only actionable phases (any disposition
+    that is not terminal — see `is_terminal_status`).
 
     Raises:
         FileNotFoundError: If roadmap_path does not exist.
         ValueError: If no phases found, or all phases are complete.
     """
     all_phases = parse_roadmap(roadmap_path)
-    incomplete = [p for p in all_phases if p.status != "Complete"]
+    incomplete = [p for p in all_phases if not is_terminal_status(p.status)]
 
     if not incomplete:
         raise ValueError(
