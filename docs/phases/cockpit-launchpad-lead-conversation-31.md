@@ -360,8 +360,10 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   `launches` join `NON_FILE_BACKED_TABLES` **in parent-before-child order**
   (`…, "conversations", "conversation_turns", "launches"`) so `snapshot_non_file_backed` /
   `restore_non_file_backed` (state repair) preserve them; tests: v6 → v7
-  opens and migrates, repair round-trip preserves both tables and the
-  usage `kind` column, `mode=ro` hub reads still work.
+  opens and migrates, repair round-trip preserves **all three tables** —
+  including a populated `launches` row with its ownership (`owner_pid`,
+  `owner_ident`), `attempt`, watcher/turn references and `partial` state —
+  and the usage `kind` column, `mode=ro` hub reads still work.
 - Endpoints (cockpit-mode only, token-guarded like all POSTs):
   `GET /api/lead` (list + active), `GET /api/lead/<cid>` (messages),
   `POST /api/lead/new`, `POST /api/lead/<cid>/send {text}` → `{turn_n}`,
@@ -411,8 +413,17 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   warning is extended to say the page can now run agent turns and launch
   processes.
 
-**D. Hub** — idle/done rows: "Start next phase →" (`/p/<id>/#start`);
-Needs-you rows unchanged; hub stays read-only (no new hub POSTs).
+**D. Hub** — the hub payload calls the same `launch_intent()` per visible
+project (read-only: state file, cycle status, roadmap) and carries
+`intent` on the row; the row shows **`Start →`** (label
+"plan" / "implementation" from `intent.type`) **only when `intent.command`
+exists** — a done plan cycle links to that phase's implementation, a done
+impl cycle to the next actionable phase; an exhausted, in-progress,
+escalated, needs-human or paused project gets **no** launch link. The link
+opens that project's cockpit Start card (`/p/<id>/#start`); the hub adds
+no POSTs and stays read-only. Tests: hub payload + rendered row for
+plan-approved (label implementation), impl-approved (next phase), roadmap
+exhausted (no link), active cycle (no link).
 
 **E. Docs** — README: "Watch and steer" → "Talk to the lead, launch, watch
 and steer"; ladder ③ label "+ Cockpit & Hub / talk to the lead, launch /
@@ -442,7 +453,12 @@ for the capture); showcase untouched. Files table: `.tagteam/conversations/`.
   identical POSTs → one watcher + one lead message (barrier), watcher
   early-exit reported as not started, partial state (watcher up, slot
   busy) → 409 with guidance, observed-state mismatch → 409 "state
-  changed".
+  changed", retry after response loss, failed/partial then `retry: true`
+  (atomic failed→pending, attempt+1, no duplicate watcher or message), and
+  the three pending-launch crash windows — owner killed after claim/before
+  watcher, after watcher/before turn, after turn creation/before
+  finalization — each reconciled truthfully from the persisted references
+  and retryable without duplication.
 - actions: `watch.start` spawns detached + refuses when running (fake
   watcher via pidfile), `session.start` with backend `manual` returns
   commands (no terminals in CI), `phase.start` = a conversation send;
@@ -471,7 +487,8 @@ for the capture); showcase untouched. Files table: `.tagteam/conversations/`.
   oversize.
 - `tagteam lead` CLI: send/list, exit codes, `--json`.
 - schema v7 additive: v6 DB opens, columns nullable, `snapshot/restore`
-  covers the new tables; `tagteam usage` splits kinds.
+  covers all three new tables (populated `launches` row round-trips with
+  ownership/attempt/references/partial); `tagteam usage` splits kinds.
 - docs: coverage test picks up `lead`; drift test for ③ label; new
   screenshot in the manifest + PNG safety.
 - Windows: everything subprocess-based uses the same paths as headless
@@ -523,6 +540,16 @@ check through `scripts/upgrade_smoke.py --python <3.1.0 venv>
   is the alternative. No queueing.
 - **Q3** `phase.start` stays a visible conversation message — now inside
   the composite, idempotent `launch` operation.
+
+## Round-5 changes (reviewer r4)
+1. Scope D: the hub consumes `launch_intent` and shows `Start →` only when
+   `intent.command` exists (plan-approved → implementation, impl-approved
+   → next actionable phase; exhausted/active/escalated/needs-human/paused
+   → no link); hub payload/render tests for those four states.
+2. Persistence: repair round-trip preserves all three new tables including
+   a populated `launches` row with ownership/attempt/references/partial;
+   Scope F's launch-composite test list now includes the three crash
+   windows and the retry transition.
 
 ## Round-4 changes (reviewer r3)
 1. Port: the two-socket canary was unrealizable (a second non-reuse bind on
