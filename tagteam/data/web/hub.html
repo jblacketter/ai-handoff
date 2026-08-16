@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tagteam Hub</title>
+<link rel="stylesheet" href="/cockpit.css">
+<link rel="stylesheet" href="/hub.css">
+</head>
+<body>
+
+<!-- Top strip: how many, how many live, burn, the shared window, connection -->
+<header class="now" id="now">
+  <div class="now-row">
+    <div class="brand">
+      <span class="brand-name">Tagteam</span>
+      <span class="brand-sub">Hub</span>
+      <span class="project" id="hub-registry" title="registry file">…</span>
+    </div>
+    <div class="now-chips" id="hub-chips">
+      <span class="chip" id="chip-count">—</span>
+      <span class="chip" id="chip-live" title="watcher running or a turn in flight">—</span>
+      <span class="chip" id="chip-burn" title="tokens across visible projects">—</span>
+      <span class="chip" id="chip-window" title="shared subscription window (newest signal per provider/kind across projects)">window: —</span>
+    </div>
+    <div class="now-actions">
+      <label class="toggle"><input type="checkbox" id="show-all"> show hidden</label>
+      <span class="conn" id="conn" data-mode="connecting"><span class="conn-dot"></span><span id="conn-text">Connecting…</span></span>
+    </div>
+  </div>
+</header>
+
+<main class="hub">
+  <section class="zone needs" id="needs-you" aria-label="Needs you">
+    <h2 class="zone-title">Needs you <span class="count" id="needs-count"></span></h2>
+    <div class="rows" id="needs-rows"></div>
+    <div class="empty" id="needs-empty"><div class="empty-title">Nothing needs you.</div><div class="empty-body" id="needs-empty-body">Loading…</div></div>
+  </section>
+
+  <section class="zone" id="waiting" aria-label="Waiting">
+    <h2 class="zone-title">Waiting <span class="count" id="waiting-count"></span><span class="spacer"></span><span class="muted small" id="waiting-meta"></span></h2>
+    <div class="rows" id="waiting-rows"></div>
+    <div class="empty small hidden" id="waiting-empty">No turns owed anywhere.</div>
+  </section>
+
+  <section class="zone quiet" id="quiet" aria-label="Quiet">
+    <h2 class="zone-title"><button class="link-btn zone-toggle" id="quiet-toggle">▸ Quiet <span class="count" id="quiet-count"></span></button><span class="spacer"></span><span class="muted small">done / idle, by last activity</span></h2>
+    <div class="rows hidden" id="quiet-rows"></div>
+  </section>
+
+  <section class="zone hidden-zone hidden" id="hidden" aria-label="Hidden">
+    <h2 class="zone-title">Hidden <span class="count" id="hidden-count"></span><span class="spacer"></span><span class="muted small">missing dirs, scratch paths, dirs without tagteam.yaml — <code>tagteam registry unregister PATH</code> removes one</span></h2>
+    <div class="rows" id="hidden-rows"></div>
+  </section>
+
+  <div class="empty" id="registry-empty" style="display:none">
+    <div class="empty-title">No projects registered.</div>
+    <div class="empty-body"><code>tagteam setup</code> in a project registers it (<code>~/.tagteam/projects.json</code>).</div>
+  </div>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/hub.js"></script>
+</body>
+</html>

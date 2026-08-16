@@ -89,7 +89,8 @@ WATCH_ARGV_RE = _re.compile(
     r")\s+watch(?:\s|$)")
 
 
-def watcher_status(project_dir: str | Path, inflight: dict | None = None) -> dict:
+def watcher_status(project_dir: str | Path, inflight: dict | None = None,
+                   procs_snapshot: list[tuple[int, str]] | None = None) -> dict:
     """Is a watcher running FOR THIS PROJECT?  Signals, in order:
 
     1. the watcher pidfile (`.tagteam/watcher.json`: pid + creation identity
@@ -120,7 +121,11 @@ def watcher_status(project_dir: str | Path, inflight: dict | None = None) -> dic
         out["stale_pidfile"] = True
     # process scan (Linux: /proc, no subprocess; macOS/BSD: one `ps -axo`)
     me = os.getpid()
-    for pid, argv in procs.list_processes(WATCH_ARGV_RE.pattern):
+    if procs_snapshot is None:
+        procs_snapshot = procs.list_processes(WATCH_ARGV_RE.pattern)
+    for pid, argv in procs_snapshot:
+        if not WATCH_ARGV_RE.search(argv):
+            continue
         if pid == me or not procs.pid_alive(pid):
             continue
         names_project = any(_same_dir(tok.rstrip("/\\"), root) for tok in argv.split()

@@ -21,8 +21,10 @@
     document.addEventListener('DOMContentLoaded', function() {
       var conn = document.querySelector('.conn-status');
       if (!conn) return;
+      var baseMeta = document.querySelector('meta[name="tagteam-base"]');
+      var base = baseMeta ? (baseMeta.getAttribute('content') || '').replace(/\/$/, '') : '';
       var a = document.createElement('a');
-      a.href = '/'; a.textContent = 'Cockpit \u2197'; a.className = 'cockpit-link';
+      a.href = base + '/'; a.textContent = 'Cockpit \u2197'; a.className = 'cockpit-link';
       a.style.marginLeft = '12px'; a.style.color = 'inherit'; a.style.opacity = '0.8';
       conn.appendChild(a);
     });

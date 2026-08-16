@@ -35,6 +35,19 @@ def _write_registry(paths: list[str]) -> None:
     )
 
 
+def registry_path() -> Path:
+    """Where the registry lives (`~/.tagteam/projects.json`)."""
+    return REGISTRY_FILE
+
+
+def read_registry_raw() -> list[str]:
+    """Phase 35: the registry as written — no pruning, no rewrite. The hub
+    and `tagteam registry list` use this so a read never mutates the file
+    (`get_registered_projects()` prunes missing dirs and rewrites; it is
+    left as-is for `upgrade`/`rollback`)."""
+    return list(_read_registry())
+
+
 def register_project(project_dir: str) -> None:
     """Add a project directory to the registry (idempotent)."""
     resolved = str(Path(project_dir).resolve())

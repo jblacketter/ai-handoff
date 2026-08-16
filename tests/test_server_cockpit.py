@@ -94,9 +94,9 @@ class Served:
 class SSEReader:
     """Raw socket SSE consumer (frames + comments), non-blocking-ish."""
 
-    def __init__(self, port: int, headers: dict | None = None):
+    def __init__(self, port: int, headers: dict | None = None, path: str = "/api/events"):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=10)
-        req = "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n"
+        req = f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n"
         for k, v in (headers or {}).items():
             req += f"{k}: {v}\r\n"
         req += "\r\n"

@@ -215,6 +215,17 @@ Every button is the CLI command with the same effect (`tagteam pause`, `resume`,
 
 **Security note.** Cockpit mode binds **127.0.0.1** by default; a per-run token is embedded in the page and required as `X-Tagteam-Token` on every POST (`Origin`/`Referer` must match the server; no `*` CORS). That stops cross-site POSTs and non-browser clients that have not read the page — it is not remote-access authentication. `--host 0.0.0.0` deliberately exposes the server on the network; the page token is then the only guard, so do that only on a network you trust.
 
+### The Hub (all your projects)
+
+```bash
+tagteam hub                     # http://localhost:8090 — every registered project, ranked by what needs you
+tagteam hub --list [--json]     # the same triage as text
+```
+
+One surface over every project `tagteam setup` registered (`~/.tagteam/projects.json`), ranked by intent: **Needs you** (escalations, questions, paused-after-failure — one **Open** per row), **Waiting** (turns owed to agents, oldest first; **stale** when nothing is dispatching, **abandoned?** past a day — with the CLI to run), **Quiet** (done / idle, collapsed to a count). The strip shows how many are live, burn across projects (24 h / 7 d) and the shared subscription window (newest signal per provider/kind across projects). **Open** takes you into that project's cockpit, mounted by the hub at `/p/<id>/` — same token, same loopback default — so ruling, pausing or interjecting anywhere is two clicks away.
+
+The hub is read-only: it never migrates a project database (`mode=ro`), never rewrites the registry (`tagteam registry list` / `tagteam registry unregister PATH` are the only registry commands, and only `unregister` writes). Missing dirs, scratch paths and dirs without `tagteam.yaml` are hidden by default (`--all` / "show hidden").
+
 ### The Saloon (theme)
 
 The original western-themed dashboard survives as a theme — bare `tagteam serve` (no `--theme`, no config key) is unchanged from 0.10.0: the Saloon at `/`, all interfaces, no token, no cockpit endpoints. In cockpit mode it lives at `/?theme=saloon` (and works there, token included).
@@ -258,6 +269,8 @@ tagteam pause --reason "..." / tagteam resume / tagteam cancel-turn
 tagteam interject "note" [--to lead|reviewer] / --list / --retire ID
 tagteam usage [--json]
 tagteam serve [--theme cockpit] [--host H] [--port N] [--max-sse N]   # dashboard; cockpit is opt-in
+tagteam hub [--list [--json]] [--all] [--port 8090]                   # all registered projects; cockpits at /p/<id>/
+tagteam registry list [--json] | unregister PATH
 tagteam brief [--list | --generate | --event KEY]
 tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]

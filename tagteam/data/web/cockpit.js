@@ -13,6 +13,12 @@
   var $ = function (id) { return document.getElementById(id); };
   var tokenMeta = document.querySelector('meta[name="tagteam-token"]');
   var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : null;
+  // Phase 35: when the hub mounts this cockpit at /p/<id>/, the server
+  // injects <meta name="tagteam-base"> and every API / EventSource /
+  // navigation URL is prefixed with it. Standalone: absent → '' (identical).
+  var baseMeta = document.querySelector('meta[name="tagteam-base"]');
+  var BASE = baseMeta ? (baseMeta.getAttribute('content') || '').replace(/\/$/, '') : '';
+  function url(path) { return BASE + path; }
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -28,7 +34,8 @@
   function fmtAge(s) {
     if (s == null || isNaN(s)) return '?';
     s = Math.max(0, Math.floor(s));
-    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (d) return d + 'd' + String(h).padStart(2, '0') + 'h';
     if (h) return h + 'h' + String(m).padStart(2, '0') + 'm';
     if (m) return m + 'm' + String(sec).padStart(2, '0') + 's';
     return sec + 's';
@@ -47,15 +54,15 @@
     if (line.length > (n || 160)) line = line.slice(0, (n || 160) - 1) + '…';
     return line;
   }
-  function getJSON(url) {
-    return fetch(url, { cache: 'no-store' }).then(function (r) {
+  function getJSON(path) {
+    return fetch(url(path), { cache: 'no-store' }).then(function (r) {
       return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; });
     });
   }
-  function postJSON(url, data) {
+  function postJSON(path, data) {
     var headers = { 'Content-Type': 'application/json' };
     if (TOKEN) headers['X-Tagteam-Token'] = TOKEN;
-    return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(data || {}) })
+    return fetch(url(path), { method: 'POST', headers: headers, body: JSON.stringify(data || {}) })
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (b) {
           return { ok: r.ok && b.ok !== false, status: r.status, body: b };
@@ -361,7 +368,8 @@
     // First-run states
     if (!n.agents || !n.agents.lead) {
       var fc = cardShell('stale', 'No tagteam.yaml yet', '');
-      var fb = el('div', 'hint'); fb.innerHTML = 'Set up the two agents in the <a href="/?theme=saloon">Saloon</a> (the Mayor walks you through it) or run <code>tagteam init</code>.';
+      var fb = el('div', 'hint'); fb.innerHTML = BASE ? 'Run <code>tagteam init</code> in the project (or <code>tagteam serve</code> there and use the Saloon setup).'
+        : 'Set up the two agents in the <a href="/?theme=saloon">Saloon</a> (the Mayor walks you through it) or run <code>tagteam init</code>.';
       fc.appendChild(fb); wrap.appendChild(fc); cards++;
     }
 
@@ -652,7 +660,7 @@
   function connectSSE() {
     // `?nosse=1` forces the polling path (dogfood / debugging the fallback).
     if (!window.EventSource || /[?&]nosse=1/.test(location.search)) { startPolling(); return; }
-    try { es = new EventSource('/api/events'); } catch (e) { startPolling(); return; }
+    try { es = new EventSource(url('/api/events')); } catch (e) { startPolling(); return; }
     es.addEventListener('open', function () { sseAttempts = 0; stopPolling(); setConn('live'); });
     es.addEventListener('change', function () { refreshAll('sse'); });
     es.addEventListener('error', function () {
@@ -671,6 +679,17 @@
   }
 
   // ---------- boot ----------
+  if (BASE) {
+    // Mounted by the hub: a way back, placed with the other navigation.
+    var hubLink = el('a', 'theme-link', '\u2190 Hub'); hubLink.href = '/'; hubLink.title = 'the cross-project hub';
+    hubLink.id = 'hub-link';
+    var actions = document.querySelector('.now-actions');
+    if (actions) actions.insertBefore(hubLink, actions.firstChild);
+    // The Saloon's own JS talks to root-relative /api/… (a per-project
+    // server); it is not offered under a hub mount.
+    var saloon = document.querySelector('.theme-link[href$="theme=saloon"]');
+    if (saloon) saloon.remove();
+  }
   try { var saved = localStorage.getItem('tagteam.cockpit.tab'); if (saved && $('tab-' + saved)) showTab(saved); } catch (e) { /* ignore */ }
   refreshAll('boot');
   connectSSE();
