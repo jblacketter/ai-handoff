@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: launch-intent state machine, atomic lead-slot claim, composite idempotent Start, Codex resume argv + SSE replay/cursor, untrusted-content + id boundaries + turn lifecycle, bind-authoritative port rule, schema restore order; round 3: codex resume argv order verified against 0.147.0, persisted launch claim, existing marker keys retained + owner_token/kind, exclusive canary bind + quick-restart test)
+- [x] In Review (round 2: launch-intent state machine, atomic lead-slot claim, composite idempotent Start, Codex resume argv + SSE replay/cursor, untrusted-content + id boundaries + turn lifecycle, bind-authoritative port rule, schema restore order; round 3: codex resume argv order verified against 0.147.0, persisted launch claim, existing marker keys retained + owner_token/kind, exclusive canary bind + quick-restart test; round 4: port-keyed Tagteam lease instead of the canary, fail-closed slot recovery, launch claim ownership + crash reconciliation + retry semantics, UX flow rewritten to the launch intent)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -78,45 +78,58 @@ Cockpit vs "Dashboard"; the terminal has a capability the UI lacks);
    busy/idle, and "what happens when I click" (the exact CLI) are always
    on screen; the CLI banner says the same thing the page does.
 3. **Smart defaults / Tesler** — bare `serve` gives the good surface; the
-   next phase, the launch mode (headless if configured, else interactive)
-   and the project are inferred; the user names none of them.
+   *launch intent* (which phase, plan or impl, or nothing) is derived from
+   the recorded state and the roadmap, headless is offered only when the
+   two-role headless configuration actually validates, and the project is
+   the cwd; the user names none of them.
 4. **Recognition over recall + one primary action (Von Restorff)** — every
    card shows its buttons and the command they run; exactly one primary
    per state (Start · Send · Resume · Rule).
 
-**Flow (idle project → talking → in a session → phase closed):**
+**Flow (idle project → talking → in a session → phase closed).** Every
+Start surface renders the exact `launch_intent` (Scope B), never a guess:
 
 ```
 0. `tagteam serve` (no flags) → cockpit for the cwd's project.
    Banner: "Tagteam cockpit — <name> — <phase · type · rN · state | no active cycle>
-            → http://127.0.0.1:8080". Port held by tagteam? "8080 is serving
-   <other project> — use --port 8081" and exit 2.                  [defaults, error prevention]
-1. Needs you shows the START card (no cycle, or last cycle approved):
-   "No cycle in progress. Next: <phase> (docs/roadmap.md)."
-   primary [Start headless] — starts the watcher (headless, pidfile) and sends
-      the lead "/handoff start <phase>" as the first Lead-panel message;
-   secondary [Launch terminals] — `tagteam session start` (three tabs/panes,
-      agents launched) + "paste into the Lead: /handoff start <phase>" [Copy];
-   not set up (no tagteam.yaml / roadmap)? → the card says so: `tagteam quickstart`.
-                                                                  [empty states, recognition]
-2. LEAD panel (a Watch tab, promoted next to Feed): the transcript of your
-   conversation with the lead; a composer at the bottom; Send is the one
-   primary. Each message runs one lead turn (claude -p / codex exec, resumed
-   session), streams live, ends with the lead's reply. The lead can run
-   `tagteam …` itself (same tools as headless turns), so "/handoff start x",
-   "please change y", "close out the phase" all work as in the terminal.
-   Composer states: idle · sending (elapsed, [Cancel]) · lead busy on its cycle
-   turn (rN) → Send disabled with why + [Interject instead].          [status, Doherty]
-3. Watcher chip: "no watcher · [Start]" (headless if agents.*.headless/briefer
-   configured, else notify) — same click-runs-CLI pattern.           [recognition]
-4. Approved-cycle state: "Phase X approved · Next: Y [Start next phase]" plus the
-   Lead panel for follow-up ("ship it", feedback).                    [hint, then out of the way]
-5. Hub: idle/done rows get "Start next phase →" linking into that project's
-   cockpit Start card (`/p/<id>/#start`); the hub itself stays read-only.
+            → http://127.0.0.1:8080". Port held by tagteam? "8080 is held by
+   tagteam cockpit for <other project> — use --port 8081", exit 2.  [defaults, error prevention]
+1. Needs you shows the START card only when launch_intent has a command:
+   - no state / no cycle      → "Start: <next actionable phase> — plan"
+   - plan approved            → "Start: <same phase> — implementation"   (/handoff start <p> impl)
+   - impl approved            → "Start: <next actionable phase after it> — plan"
+   - a cycle in progress / escalated / needs-human / paused → NO Start card
+     (Needs-you shows what it shows today; the intent's reason is in the strip)
+   - roadmap exhausted / not set up → the card states the reason
+     ("no actionable phase in docs/roadmap.md" / "run tagteam quickstart"), no button.
+   Buttons: primary [Start headless] ONLY when HeadlessEngine.validate() passes
+     (else it is absent and the validation reason is shown); it runs the composite
+     launch: ensure watcher (headless, pidfile) + send the intent's command as the
+     first Lead-panel message. [Launch terminals] (primary when headless is not
+     offered): `tagteam session start` + "paste into the Lead: <intent.command>" [Copy].
+                                                              [empty states, recognition]
+2. LEAD panel (Watch tab, first): the transcript of your conversation with the
+   lead; composer; Send is the one primary. Each message = one lead turn
+   (claude -p / codex exec, resumed session), streamed live, replayable from a
+   cursor. The lead can run `tagteam …` itself (same tools as headless turns),
+   so "/handoff start x", "please change y", "close out the phase" work as in
+   the terminal. Composer states: idle · sending (elapsed, [Cancel]) · lead busy
+   on its cycle turn (rN) → Send disabled with why + [Interject instead] ·
+   error (CLI message + log path).                                  [status, Doherty]
+3. Watcher chip: "no watcher · [Start]" — headless only when validate() passes,
+   otherwise notify — same click-runs-CLI pattern; [Stop] when identity verifies.
+                                                                    [recognition]
+4. Approved-cycle state renders the same intent: plan approved → "Plan approved ·
+   [Start implementation]"; impl approved → "Phase X approved · Next: <next
+   actionable phase> [Start]" or "no actionable phase left"; plus the Lead panel
+   for follow-up ("ship it", feedback).                   [hint, then out of the way]
+5. Hub: rows whose project has a launch intent get "Start →" linking into that
+   project's cockpit Start card (`/p/<id>/#start`); the hub stays read-only.
 ```
 
 Deferred to Advanced: theme, host, port, max-sse, conversation retention.
-Absorbed by inference: next phase (roadmap), launch mode, project (cwd),
+Absorbed by inference: the launch intent (state + roadmap), whether
+headless is offered (`HeadlessEngine.validate()`), project (cwd),
 provider/executable/args (from `agents.lead.headless`).
 
 ## Scope
@@ -130,29 +143,37 @@ provider/executable/args (from `agents.lead.headless`).
 - Banner: `Tagteam cockpit — <basename> — <phase · type · rN · state>` or
   `— no active cycle` (from `cockpit_api.now_payload`), then the URL. Saloon
   keeps its current banner.
-- Port collision — **bind-authoritative.** The bind result decides:
-  `OSError` (`EADDRINUSE`) → refuse, exit 2. To avoid the loopback-vs-
-  wildcard shadow (a `127.0.0.1` listener and a `0.0.0.0` listener can
-  coexist on macOS/Linux) **without** giving up quick restarts, the
-  listening socket keeps `allow_reuse_address` (TIME_WAIT-friendly, as
-  today) and the server additionally holds an **exclusive canary**: a
-  second socket bound with `SO_REUSEADDR` off (`SO_EXCLUSIVEADDRUSE` on
-  Windows) to the *connectable* form of the requested host (wildcard →
-  `127.0.0.1`) at the same port, never listened on, kept for the server's
-  lifetime. Any live listener on that port — loopback or wildcard, ours or
-  another program's, started before or after a probe — makes the canary
-  bind fail, so exclusion does not depend on timing; a normal shutdown
-  leaves no TIME_WAIT on the canary (it never accepted connections), so
-  an immediate same-port restart works. The identity probe (`GET
-  /api/info` on the connectable address, 300 ms) only improves the
-  message: the other project is named **only when a verified Tagteam
-  identity** (`{"app": "tagteam", "project": …}` — `app` added to cockpit
-  + hub info) was obtained; otherwise "port <p> is in use on <addr> — use
-  --port <p+1>". Tests (macOS/Linux/Windows CI): same-port immediate
-  restart after normal shutdown; two live servers cannot coexist —
-  loopback-then-wildcard and wildcard-then-loopback; an unrelated listener
-  → generic message; the post-probe race (listener appears between probe
-  and bind) → still refused via the canary.
+- Port exclusion — **real bind + Tagteam port lease.** The listening
+  socket keeps `allow_reuse_address` (immediate restarts as today) and the
+  actual bind stays authoritative for *unrelated* occupants (`EADDRINUSE`
+  → refuse, exit 2). Tagteam-vs-Tagteam exclusion — including the
+  loopback-vs-wildcard shadow that a bind alone cannot see — comes from a
+  **project-independent, port-keyed lease** `~/.tagteam/ports/<port>.json`
+  (`{pid, ident, host, port, project, kind: cockpit|hub|saloon,
+  started_at}`) claimed atomically (`O_CREAT|O_EXCL`, then fsync) before
+  binding and removed on normal shutdown; a lease whose `pid` is dead, or
+  whose recorded non-null `ident` definitively mismatches the live process,
+  is stale and is replaced (logged); a live-but-unverifiable holder is
+  treated as **held** (fail closed, message says so). *Guarantee:* two live
+  Tagteam servers can never hold the same port number on this machine,
+  regardless of bind host or start order — the loser prints "port <p> is
+  held by tagteam <kind> for <project> (pid N) — use --port <p+1>" and
+  exits 2 without binding. *Unrelated listeners:* the bind result decides
+  for identical addr:port; for the wildcard/loopback shadow a pre-bind
+  connect probe of the connectable address (wildcard → `127.0.0.1`,
+  300 ms) refuses when something answers ("port <p> is in use on <addr>
+  — use --port <p+1>"); the residual race between probe and bind is
+  accepted for non-Tagteam processes and stated. The identity probe
+  (`/api/info` → `{"app": "tagteam", "project": …}`, added to cockpit +
+  hub info) is used only to enrich the message when no lease exists (e.g.
+  a pre-3.1 Tagteam server). Tests (macOS/Linux/Windows): immediate
+  same-port restart after normal shutdown (lease removed) and after a
+  crash (stale lease, dead pid → recovered); two Tagteam servers,
+  loopback-then-wildcard and wildcard-then-loopback → second refused by
+  the lease naming the first; live-but-unverifiable lease → refused,
+  fail closed; unrelated listener → generic message; lease + bind race
+  (listener appears between probe and bind on the identical address →
+  `EADDRINUSE` path, same message shape).
 
 **B. Launchpad** (`cockpit_api.py`, `server.py`, `cockpit.html|css|js`)
 - **Launch intent (state machine, one function, one consumer set).**
@@ -205,20 +226,38 @@ provider/executable/args (from `agents.lead.headless`).
     lock stays short:** under `dualwrite.writer_lock` (a few ms) the
     server revalidates intent + `observed`, then inserts a `launches` row
     (schema v7: `id`, `key = sha256(intent.command + observed)` UNIQUE,
-    `status ∈ pending|succeeded|failed`, `conversation_id`, `turn_n`,
-    `watcher_pid`, `created_at`, `finished_at`, `error`) — the claim — and
-    releases the lock **before** any side effect. Watcher spawn/readiness
-    wait (≤ 5 s) and the conversation turn happen outside the lock; the
-    row is finalized `succeeded` (with the turn reference) or `failed`
-    (with the reason and whatever partial state exists: `watcher: started,
-    lead: slot busy (r3)`). A repeated / double-clicked / retried-after-
-    response-loss POST with the same key finds the row: `pending` → 202
-    "in progress" (poll the turn), `succeeded` → 200 `{launched: false,
-    existing: turn_ref}`, `failed` → the stored partial-state message and
-    a fresh attempt only with `retry: true` (which supersedes the row).
-    Concurrent identical POSTs: exactly one inserts (UNIQUE), the rest see
-    the row. Tests: double-click, concurrent POSTs (barrier), retry after
-    response loss, failed/partial then retry, observed-state drift → 409. `phase.start` alone
+    `status ∈ pending|succeeded|failed`, `attempt` (starts 1),
+    `owner_pid`, `owner_ident` (the server or `tagteam lead` process that
+    holds the claim), `watcher_pid`, `watcher_ident`, `conversation_id`,
+    `turn_n`, `created_at`, `updated_at`, `finished_at`, `error`,
+    `partial` JSON) — the claim — and releases the lock **before** any
+    side effect. Watcher spawn/readiness wait (≤ 5 s) and the conversation
+    turn happen outside the lock; each step's reference is written to the
+    row as soon as it exists (`watcher_pid`+ident after spawn,
+    `conversation_id`/`turn_n` right after the turn row is created); the
+    row is finalized `succeeded` or `failed` (reason + truthful `partial`,
+    e.g. `watcher: started (pid N alive), lead: slot busy (r3)`).
+    **Crash recovery:** on server start and whenever a request hits a
+    `pending` row, if the row's `owner_pid` is dead (or its non-null
+    `owner_ident` definitively mismatches) the row is reconciled: inspect
+    the persisted references — is `watcher_pid` alive (identity-checked)?
+    does the turn row exist and what is its status? — and mark the launch
+    `failed` with that partial state; a live-but-unverifiable owner is left
+    pending (fail closed, reported as such). Repeated / double-clicked /
+    retried-after-response-loss POST with the same key: `pending` (owner
+    alive) → 202 "in progress"; `succeeded` → 200 `{launched: false,
+    existing: turn_ref}`; `failed` → the stored partial state; **`retry:
+    true`** = an atomic `UPDATE … SET status='pending', attempt=attempt+1,
+    owner=<me>` where `status='failed'` (no second insert under the UNIQUE
+    key), after which only the *missing* steps run: an alive recorded
+    watcher is reused (never a second one), an existing turn reference is
+    returned (never a second `/handoff start`). Concurrent identical POSTs:
+    exactly one inserts, the rest see the row. Tests: double-click,
+    concurrent POSTs (barrier), retry after response loss, failed/partial
+    then retry (no duplicate watcher/message), observed-state drift → 409,
+    and crashes (owner killed) after claim/before watcher, after
+    watcher/before turn, after turn creation/before finalization — each
+    reconciled truthfully and retryable without duplication. `phase.start` alone
     (no watcher) is the same operation with `ensure_watcher=false` for the
     interactive path.
   - `watch.stop` (chip): SIGTERM the pidfile'd watcher only when identity
@@ -273,10 +312,15 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   `claim_turn_slot(root, *, owner: str, kind, role, ...) -> Claim | Busy`
   and `release_turn_slot(root, claim)`. Under the project's cross-process
   **writer lock** (`dualwrite.writer_lock`, held only for the claim): read
-  the marker; if present and its owner is live (pid + creation identity
-  verifiable, same rule as `cancel-turn`) → `Busy(marker)`; if present but
-  stale (dead pid / identity mismatch / unverifiable) → treat as free and
-  log the recovery; else write the marker **keeping the existing field
+  the marker; if present → `Busy(marker)` **unless the owner is
+  definitively gone**: recover only when the owner `pid` is dead, or when
+  the marker's recorded **non-null** identity definitively mismatches the
+  identity of the live pid; a live pid whose identity cannot be looked up
+  right now, or a legacy marker with no recorded identity, stays **Busy**
+  (fail closed; the reason — "owner alive but unverifiable" / "legacy
+  marker without identity" — is surfaced to the caller and the UI, and
+  `cancel-turn` remains the human's tool). Recovery is logged. Otherwise
+  write the marker **keeping the existing field
   contract exactly** — `stem`, `role`, `phase`, `type`, `round`,
   `started_at`, `log_path`, `events_path`, `pid` (child, set once
   spawned), `child_ident`, `watcher_pid` (the runner: watcher process, or
@@ -296,8 +340,11 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   server) is never reported as a watcher merely because it has a runner
   pid. Tests: a barrier race (thread/process pair: watcher dispatch vs
   Send) → exactly one child spawns, the loser gets `Busy` / HTTP 409, and
-  the loser cannot erase the winner's marker; stale-owner recovery; cancel
-  → marker removed only by the owner; briefer path unchanged.
+  the loser cannot erase the winner's marker; stale-owner recovery (dead
+  pid; definitive identity mismatch); **fail-closed cases**: identity
+  lookup unavailable for a live pid, and a legacy marker without identity
+  fields → still Busy, neither the marker nor the owner token is replaced;
+  cancel → marker removed only by the owner; briefer path unchanged.
 - Policy: if the lead's *cycle* turn holds the slot, Send is refused with
   the reason ("lead is on round N — wait, or Interject") — no queueing;
   reviewer turns are unaffected; pause does not block conversation turns
@@ -380,9 +427,10 @@ for the capture); showcase untouched. Files table: `.tagteam/conversations/`.
 `test_server_cockpit.py`, `test_cockpit_api.py`, `test_docs_story.py`)
 - serve default: bare → cockpit; `--theme saloon` byte-identical to the
   pre-flip bare page (the existing identity test retargeted); banner text
-  both states; port exclusion: canary (both orders, unrelated listener,
-  post-probe race), identity-named message only on verified Tagteam
-  identity, immediate same-port restart after shutdown.
+  both states; port exclusion per Scope A (lease: both orders,
+  live-but-unverifiable → refused, stale → recovered, immediate restart
+  after shutdown and after crash; unrelated listener → generic message;
+  probe/bind race → `EADDRINUSE` path).
 - `launch_intent` matrix (table above) incl. plan-approved → same-phase
   impl, impl-approved → next phase by name skipping the "In progress"
   just-approved entry, roadmap exhausted, terminal-status normalization
@@ -408,15 +456,13 @@ for the capture); showcase untouched. Files table: `.tagteam/conversations/`.
   by referring to the 1st): new conversation → send → events stream →
   transcript.md + DB rows + usage row `kind=conversation`; resume argv
   (`--session-id` first, `--resume` after) asserted via the fake's argv
-  log; Codex resume argv shape (`exec resume <id> --json … -`) with the
-  same sandbox/approval defaults asserted; resume-unsupported → transcript
-  replay on stdin; resume-supported-but-failed → turn `failed`, surfaced,
-  not replayed; `thread.started.thread_id` persisted; SSE fast-finish and
-  reconnect (`Last-Event-ID`) with exact ids;
-  lead lock: send while a lead cycle turn is inflight → 409 with reason;
-  a running conversation turn writes inflight `kind=conversation` and the
-  watcher's headless dispatch skips (unit-level: the engine's inflight
-  check) — plus cancel; conversation while paused allowed.
+  log; Codex resume argv (`exec --json -C root <policy>
+  --skip-git-repo-check resume <id> -`) with the same sandbox/approval
+  tokens as the first turn + parser smoke test when the CLI is present;
+  resume-unsupported → transcript replay on stdin; resume-supported-but-
+  failed → turn `failed`, surfaced, not replayed; `thread.started.thread_id`
+  persisted; SSE fast-finish and reconnect (`Last-Event-ID`) with exact
+  ids; conversation while paused allowed.
 - lifecycle + boundaries: orphaned `running` row reconciled on server
   start; failed conversation turn does not write the pause marker; hostile
   agent reply (`<img onerror>`, `<script>`) rendered as text (Playwright)
@@ -454,8 +500,10 @@ for the capture); showcase untouched. Files table: `.tagteam/conversations/`.
    Feed unaffected. Send while a headless lead turn is in flight is refused
    with the reason; a conversation turn blocks the watcher's lead dispatch
    until it ends (test + one real observation).
-3. Port collision refused with the other project's name; `--theme saloon`
-   identical to today's bare serve (test).
+3. Two live Tagteam servers can never share a port (lease; the loser
+   names the holder's project); unrelated occupants refused by the bind /
+   probe with the generic message; immediate restart works; `--theme
+   saloon` identical to today's bare serve (test).
 4. `pytest` green (macOS + CI Ubuntu/Windows); the flag-off statement
    holds: `--theme saloon` byte-identical; v6 DBs open under v7 with no
    behaviour change for existing turns; hub read-only tests unchanged.
@@ -476,6 +524,30 @@ check through `scripts/upgrade_smoke.py --python <3.1.0 venv>
 - **Q3** `phase.start` stays a visible conversation message — now inside
   the composite, idempotent `launch` operation.
 
+## Round-4 changes (reviewer r3)
+1. Port: the two-socket canary was unrealizable (a second non-reuse bind on
+   the same addr:port fails in-process too — reproduced); replaced by the
+   real bind (authoritative for unrelated occupants) + a project-
+   independent, port-keyed Tagteam **lease** (`~/.tagteam/ports/<port>.json`,
+   pid + identity, atomic create, stale recovery, fail-closed when
+   unverifiable) held for the server lifetime; guarantees stated for
+   Tagteam-vs-Tagteam and unrelated listeners; tests aligned.
+2. Lead slot recovery fails closed: recover only on a dead pid or a
+   definitive identity mismatch of a recorded non-null identity;
+   live-but-unverifiable and legacy-without-identity stay Busy with the
+   reason; tests prove neither marker nor owner token is replaced.
+3. Launch claim gains owner pid/identity, attempt counter and per-step
+   references; orphaned `pending` reconciled on start/request from the
+   persisted references with truthful partial state; `retry: true` is an
+   atomic failed→pending transition (attempt+1) that reruns only missing
+   steps (reuse alive watcher, return existing turn); crash tests at the
+   three points.
+4. UX flow and principle 3 rewritten to render the exact `launch_intent`
+   (plan approved → same-phase impl; impl approved → next actionable phase;
+   in-progress/terminal → no Start; headless only when
+   `HeadlessEngine.validate()` passes); Scope F duplicate/stale lines
+   removed.
+
 ## Round-3 changes (reviewer r2)
 The round-2 decisions are now in the normative sections (the earlier
 submission had described them without the file being written). Plus:
@@ -489,9 +561,9 @@ submission had described them without the file being written). Plus:
 3. Marker keeps the existing keys (`pid`, `child_ident`, `watcher_pid`,
    `watcher_ident`, parent) + `owner_token`, `kind`, conversation fields;
    readers/binders enumerated and tested for both kinds.
-4. Port exclusion via an exclusive canary bind (listener keeps
-   `allow_reuse_address`); quick-restart test on all three OSes; probe only
-   for the message.
+4. Port exclusion via an exclusive canary bind — *superseded in round 4*
+   (unrealizable); the listener keeps `allow_reuse_address` and the probe
+   is only for the message, both retained.
 
 ## Round-2 changes (reviewer r1)
 1. Launch-intent state machine (`launch_intent`) with the tested matrix
