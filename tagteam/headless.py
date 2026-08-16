@@ -379,6 +379,55 @@ def build_argv(adapter: Adapter, executable: str, user_args: list[str],
     return argv
 
 
+def build_conversation_argv(adapter: Adapter, executable: str, user_args: list[str],
+                            project_root: str | Path, *, session_id: str,
+                            resume: bool) -> list[str]:
+    """Phase 37 (lead conversation): the same deterministic argv as
+    ``build_argv`` plus the continuity tokens tagteam owns.
+
+    * claude — first turn ``--session-id <uuid>`` (so the id is known before
+      the stream), later turns ``--resume <id>``; both are reserved for
+      user args, only the engine sets them.
+    * codex — first turn is ``build_argv``; a resumed turn keeps every parent
+      option in front of the subcommand (``--sandbox``, ``-C``, ``-c`` are
+      ``exec`` options, so ``exec resume <id> --sandbox …`` fails on
+      0.147.0): ``[exe, exec, --json, -C, root, <defaults + validated
+      args>, --skip-git-repo-check, resume, <thread_id>, -]``.
+    """
+    base = build_argv(adapter, executable, user_args, project_root)
+    if adapter.provider == "claude":
+        return base + (["--resume", session_id] if resume else ["--session-id", session_id])
+    if adapter.provider == "codex":
+        if not resume:
+            return base
+        assert base[-1] == "-", "codex argv must end with the stdin marker"
+        return base[:-1] + ["resume", session_id, "-"]
+    return base
+
+
+_RESUME_PROBE: dict[str, bool] = {}
+
+
+def codex_resume_supported(executable: str, *, run=None) -> bool:
+    """Probe once per executable whether ``codex exec resume`` exists
+    (0.147.0 has it; there is no stable public contract, so we check
+    before ever relying on it). ``run`` is injectable for tests."""
+    if executable in _RESUME_PROBE:
+        return _RESUME_PROBE[executable]
+    ok = False
+    try:
+        runner = run or (lambda argv: subprocess.run(argv, capture_output=True, text=True,
+                                                     timeout=8, encoding="utf-8",
+                                                     errors="replace"))
+        r = runner([executable, "exec", "resume", "--help"])
+        out = (getattr(r, "stdout", "") or "") + (getattr(r, "stderr", "") or "")
+        ok = getattr(r, "returncode", 1) == 0 and "resume" in out.lower()
+    except Exception:
+        ok = False
+    _RESUME_PROBE[executable] = ok
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # Event rendering + usage parsing
 # ---------------------------------------------------------------------------
@@ -798,6 +847,137 @@ def read_inflight(project_root: str | Path) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Turn slot (Phase 37): ONE atomic owner of `.tagteam/turns/inflight.json`
+# ---------------------------------------------------------------------------
+#
+# Every spawner of an agent process for this project — the headless engine's
+# cycle turns, the briefer, and lead conversation turns — claims the slot
+# before spawning and releases it after. The claim is decided under the
+# project's cross-process writer lock (held only for the claim itself),
+# so two spawners can never overwrite each other's marker; a release only
+# unlinks a marker that still carries the releaser's own owner token.
+#
+# Recovery FAILS CLOSED: a marker is treated as free only when its owner
+# process (the runner recorded as `watcher_pid`) is dead, or when its
+# recorded, non-null identity definitively mismatches the live process. A
+# live pid whose identity cannot be looked up, or a legacy marker with no
+# recorded identity, is BUSY — `tagteam cancel-turn` stays the human's tool.
+
+SLOT_KIND_CYCLE = "cycle"
+SLOT_KIND_CONVERSATION = "conversation"
+SLOT_KIND_BRIEFER = "briefer"
+
+
+class SlotBusy(Exception):
+    """The slot is held by a live (or unverifiable) owner."""
+
+    def __init__(self, marker: dict, reason: str):
+        super().__init__(reason)
+        self.marker = marker
+        self.reason = reason
+
+
+@dataclass
+class SlotClaim:
+    token: str
+    marker: dict
+    path: Path
+    root: Path
+    recovered_from: dict | None = None   # a stale marker that was replaced
+
+
+def slot_owner_gone(marker: dict) -> tuple[bool, str]:
+    """(gone, reason). Definitive only: dead pid, or a recorded non-null
+    identity that mismatches the live pid. Anything unverifiable → not gone."""
+    rpid = marker.get("watcher_pid")
+    if not isinstance(rpid, int) or rpid <= 0:
+        return False, "legacy marker without a runner pid (fail closed)"
+    if not procs.pid_alive(rpid):
+        return True, f"owner pid {rpid} is dead"
+    rec = marker.get("watcher_ident")
+    if not rec:
+        return False, f"owner pid {rpid} alive; legacy marker without identity (fail closed)"
+    now = procs.identity(rpid)
+    if now is None:
+        return False, f"owner pid {rpid} alive but identity unavailable (fail closed)"
+    if now != rec:
+        return True, f"owner pid {rpid} identity mismatch (recorded {rec!r}, now {now!r})"
+    return False, f"owner pid {rpid} alive"
+
+
+def slot_status(project_root: str | Path) -> dict:
+    """{'held': bool, 'marker': dict|None, 'reason': str} — read-only view
+    with the same recovery rule the claim uses."""
+    m = read_inflight(project_root)
+    if m is None:
+        return {"held": False, "marker": None, "reason": "free"}
+    gone, why = slot_owner_gone(m)
+    return {"held": not gone, "marker": m, "reason": why}
+
+
+def claim_turn_slot(project_root: str | Path, *, kind: str, role: str,
+                    fields: dict) -> SlotClaim:
+    """Atomically claim the slot; raise SlotBusy if held. `fields` are the
+    marker fields (existing contract: stem, phase, type, round, agent,
+    provider, log_path, events_path, started_at, pid, child_ident,
+    watcher_pid, watcher_ident, …). Adds kind + owner_token."""
+    import secrets
+    from tagteam.dualwrite import writer_lock
+    root = Path(project_root)
+    path = inflight_path(root)
+    with writer_lock(root):
+        cur = read_inflight(root)
+        recovered = None
+        if cur is not None:
+            gone, why = slot_owner_gone(cur)
+            if not gone:
+                raise SlotBusy(cur, why)
+            recovered = cur
+        token = secrets.token_hex(8)
+        marker = dict(fields)
+        marker["kind"] = kind
+        marker["role"] = role
+        marker["owner_token"] = token
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(marker, indent=2), encoding="utf-8")
+        return SlotClaim(token=token, marker=marker, path=path, root=root, recovered_from=recovered)
+
+
+def update_turn_slot(claim: SlotClaim, **fields) -> bool:
+    """Rewrite our marker with new fields (e.g. pid/child_ident after spawn).
+    Returns False (and writes nothing) if the marker is no longer ours."""
+    from tagteam.dualwrite import writer_lock
+    root = claim.root
+    with writer_lock(root):
+        cur = read_inflight(root)
+        if cur is None or cur.get("owner_token") != claim.token:
+            return False
+        claim.marker.update(fields)
+        try:
+            claim.path.write_text(json.dumps(claim.marker, indent=2), encoding="utf-8")
+        except OSError:
+            return False
+        return True
+
+
+def release_turn_slot(claim: SlotClaim) -> bool:
+    """Unlink the marker only if it still carries our owner token."""
+    from tagteam.dualwrite import writer_lock
+    root = claim.root
+    with writer_lock(root):
+        cur = read_inflight(root)
+        if cur is None:
+            return False
+        if cur.get("owner_token") != claim.token:
+            return False
+        try:
+            claim.path.unlink()
+        except OSError:
+            return False
+        return True
+
+
 def prune_turn_logs(project_root: str | Path, keep: int = KEEP_TURN_LOGS) -> int:
     """Keep the newest ``keep`` turn stems; delete older .log/.events.jsonl."""
     d = turns_dir(project_root)
@@ -1148,6 +1328,7 @@ class HeadlessEngine:
         self.timeout_s = float(timeout_minutes) * 60.0
         self.tail_n = int(tail_rounds)
         self.confirm = confirm
+        self.slot_busy: dict | None = None   # Phase 37: last SlotBusy seen by run_owed_turn
         self._log = log or (lambda m: print(m, flush=True))
         self._notify = notify or (lambda t, m: None)
         self.skill_path = skill_path or (Path(self.project_root) / SKILL_RELPATH)
@@ -1215,7 +1396,8 @@ class HeadlessEngine:
 
     def run_owed_turn(self, state: dict) -> TurnResult | None:
         """Spawn the owed agent for a ``ready`` state. Returns None if the
-        engine is paused or the role is unknown (already logged).
+        engine is paused, the role is unknown, or the turn slot is held by
+        another live turn (``self.slot_busy`` is then set; already logged).
 
         With ``retries > 0`` a failed attempt is re-run only under the
         deterministic at-least-once rule (Phase 32): outcome in
@@ -1351,8 +1533,22 @@ class HeadlessEngine:
             "watcher_ident": procs.identity(watcher_pid), "child_ident": None,
             "attempt": attempt + 1, "interjection_ids": note_ids,
         }
-        inflight_file = inflight_path(self.project_root)
-        inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
+        # Phase 37: the slot is claimed atomically; a live conversation or
+        # briefer turn makes this tick a no-op (the watcher retries once the
+        # slot frees), never a duplicate spawn or a clobbered marker.
+        try:
+            claim = claim_turn_slot(self.project_root, kind=SLOT_KIND_CYCLE, role=role,
+                                    fields=inflight)
+        except SlotBusy as busy:
+            self.slot_busy = {"marker": busy.marker, "reason": busy.reason}
+            self._log(f"   headless: turn slot busy — {busy.reason} "
+                      f"(kind={busy.marker.get('kind', 'cycle')}, stem="
+                      f"{busy.marker.get('stem')!r}); will retry when it frees")
+            return None
+        self.slot_busy = None
+        if claim.recovered_from is not None:
+            self._log(f"   headless: recovered a stale turn slot (stem "
+                      f"{claim.recovered_from.get('stem')!r})")
         # A stale cancel marker from an earlier turn must never apply here.
         stale = read_cancel(self.project_root)
         if stale is not None:
@@ -1361,12 +1557,7 @@ class HeadlessEngine:
             clear_cancel(self.project_root)
 
         def _on_spawn(pid: int) -> None:
-            inflight["pid"] = pid
-            inflight["child_ident"] = procs.identity(pid)
-            try:
-                inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
-            except OSError:
-                pass
+            update_turn_slot(claim, pid=pid, child_ident=procs.identity(pid))
 
         self._log(f"   headless: spawning {spec.provider} for {spec.agent_name} "
                   f"({role}) — log: {log_path}"
@@ -1388,10 +1579,7 @@ class HeadlessEngine:
             spawn_error = str(e)
             out = RunOutput(exit_code=None, timed_out=False, duration_ms=0)
         finally:
-            try:
-                inflight_file.unlink()
-            except OSError:
-                pass
+            release_turn_slot(claim)
 
         # Cancel marker (Phase 32): the arbiter's intent wins regardless of
         # exit code; a marker for another stem is stale and never applied.
