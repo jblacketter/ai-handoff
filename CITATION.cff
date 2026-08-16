@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use tagteam, please cite it and link back to the repository."
+title: "Tagteam"
+abstract: "A collaboration framework for structured AI-to-AI handoffs (Lead / Reviewer with a human Arbiter), packaged as a Python CLI."
+type: software
+authors:
+  - family-names: Blacketter
+    given-names: Jack
+repository-code: "https://github.com/jblacketter/tagteam"
+url: "https://github.com/jblacketter/tagteam"
+license: MIT
+version: 0.12.0
+date-released: 2026-08-16
+keywords:
+  - ai-agents
+  - multi-agent
+  - code-review
+  - claude-code
+  - orchestration

@@ -282,4 +282,7 @@ tagteam --help
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Tagteam is open source and free to use, modify, and
+redistribute; the license asks only that the copyright notice travels with the code.
+If tagteam is useful to you, a link back to this repository is appreciated
+(see [CITATION.cff](CITATION.cff) or GitHub's "Cite this repository" button).
