@@ -12,5 +12,11 @@
     "dirty_paths": [],
     "captured_at": "2026-08-16T23:13:04.742492+00:00",
     "source": "plan-init"
+  },
+  "impl_boundary": {
+    "sha": "3f6766f01b7070f8e9b2ec1f8a848e7c1e09a79e",
+    "dirty": {},
+    "captured_at": "2026-08-16T23:22:17.722599+00:00",
+    "source": "plan-approve"
   }
 }
