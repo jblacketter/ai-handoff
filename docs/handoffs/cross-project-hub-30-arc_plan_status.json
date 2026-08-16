@@ -1,6 +1,6 @@
 {
-  "state": "in-progress",
-  "ready_for": "reviewer",
+  "state": "approved",
+  "ready_for": null,
   "round": 2,
   "phase": "cross-project-hub-30-arc",
   "type": "plan",
