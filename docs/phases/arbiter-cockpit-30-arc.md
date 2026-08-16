@@ -50,25 +50,27 @@ PR at the end. **Release:** 0.11.0.
 
 ### In Scope
 
-1. **Server hardening for write endpoints** (`tagteam/server.py`):
-   - `ThreadingHTTPServer` (SSE needs long-lived connections; today's
-     single-threaded `HTTPServer` would block every other request).
-   - **Bind `127.0.0.1` by default**; `--host 0.0.0.0` (or any address)
-     opts in to remote access. This is a deliberate, called-out deviation
-     from "flag-off identical": the cockpit adds state-changing endpoints
-     (rule/cancel/pause), so shipping them bound to all interfaces by
-     default would be a regression in safety. Documented in README and the
-     release notes; the old behavior is one flag away.
-   - **CSRF/origin protection for every POST**: the server generates a
-     random per-run token, embeds it in the served HTML, and requires it
-     in an `X-Tagteam-Token` header on all POSTs (existing `/api/state`,
-     `/api/config`, `/api/launch`, `/api/start-phase` included); it also
-     rejects POSTs whose `Origin`/`Referer` (when present) is not the
-     server's own origin. `Access-Control-Allow-Origin: *` is dropped for
-     POST responses and for the new endpoints (kept for the read-only GETs
-     the Saloon already exposes, to avoid breaking external readers).
-   - Every write endpoint returns `{ok, message}` and never raises through
-     the handler (500 with a JSON error, logged).
+1. **Modes and the flag-off guarantee** (`tagteam/server.py`; reviewer r1 —
+   the arc's hard constraint, proposal §2, applies unchanged):
+   | | `tagteam serve` (bare, **legacy** — 0.10.0 byte-identical) | `tagteam serve --theme cockpit` (**cockpit mode**, opt-in) |
+   |---|---|---|
+   | Page at `/` | Saloon (`index.html`) | Cockpit (`cockpit.html`); Saloon at `/?theme=saloon` |
+   | Bind | all interfaces (`""`) as today | **`127.0.0.1`**; `--host` overrides (e.g. `0.0.0.0`) |
+   | HTTP server | `ThreadingHTTPServer` in both modes (drop-in; no behavior change for legacy requests) | same |
+   | POST auth | none, as today (`Access-Control-Allow-Origin: *` unchanged) | per-run token in `X-Tagteam-Token` **required on every POST** (legacy `/api/state`, `/api/config`, `/api/launch`, `/api/start-phase` and the new action endpoints); `Origin`/`Referer`, when present, must match the server's own origin; no `*` CORS on POST responses |
+   | New read endpoints (`/api/now`, `/api/usage`, `/api/briefs`, `/api/scope-diff`, `/api/tail`, `/api/events`, …) | **not routed** (404, exactly as today) | routed |
+   | New action endpoints (`/api/pause`, `/api/rule`, …) | not routed (404) | routed, token-protected |
+   `--host` is honored in both modes when given explicitly. A `serve.theme:
+   cockpit` key in `tagteam.yaml` is an equivalent gate (config opt-in), so
+   a project can turn the cockpit on without changing how it starts the
+   server. **Standing criterion:** with no flag and no config key, every
+   request/response of 0.10.0 is unchanged (regression tests drive the
+   legacy invocation for `/`, the four legacy POSTs without a token, the
+   bind address, and a 404 for a new endpoint). Threading is the only
+   shared change and is covered by "an open connection does not block
+   others" plus the legacy tests. Every action endpoint returns
+   `{ok, message}` and never raises through the handler (500 + JSON error,
+   logged).
 2. **Read endpoints** (all JSON, all read-only):
    - `GET /api/now` — state, owed role, `inflight.json` (with age), pause
      marker, watcher liveness (via `.tagteam/watcher-*.log` mtime is not
@@ -117,10 +119,19 @@ PR at the end. **Release:** 0.11.0.
    CLI records (diagnostics, interjections rows, ruling entries).
 5. **Frontend — the cockpit** (`tagteam/data/web/`): new `cockpit.html`,
    `cockpit.js`, `cockpit.css` (plain JS, no build step, no framework,
-   `EventSource` + `fetch`), served at `/` by default; the Saloon (`index.html`
-   + `app.js` + `sprites.js` + `conversation.js`) is served at
-   `/?theme=saloon` and via a header toggle, and remains functional
-   unchanged. Panels: Now / Inbox / Blockers / Feed / Diff / Usage as
+   `EventSource` + `fetch`), served at `/` in cockpit mode; the Saloon
+   (`index.html` + `app.js` + `sprites.js` + `conversation.js`) is served at
+   `/?theme=saloon` in cockpit mode and at `/` in legacy mode. **Saloon +
+   token** (reviewer r1): `app.js` gets one minimal, mode-agnostic change —
+   a small `tagteamFetch()` helper that reads
+   `<meta name="tagteam-token">` (present only in cockpit mode) and, when
+   present, adds `X-Tagteam-Token` to every POST (`/api/config`,
+   `/api/start-phase`, `/api/state`, `/api/launch`); in legacy mode the
+   meta is absent, no header is sent, behavior identical. Tests drive all
+   four legacy POST routes through the served pages' contract in both
+   modes: legacy mode without token → accepted; cockpit mode without token
+   → 403; cockpit mode with the embedded token (as the Saloon and cockpit
+   JS send it) → accepted. Panels: Now / Inbox / Blockers / Feed / Diff / Usage as
    described in the Summary; keyboard-free, single page, responsive enough
    for a laptop split screen; every control confirms destructive actions
    (`cancel-turn`, `rule approve/request-changes`) with the exact CLI it
@@ -136,9 +147,16 @@ PR at the end. **Release:** 0.11.0.
    Usage panel show "5h window: <status>, resets HH:MM" (Codex emits no
    equivalent → "n/a"). This is the honest version of the proposal's
    "burn-down gauge": what the CLI reports, no invented percentages.
-7. **`tagteam serve` flags**: `--host` (default 127.0.0.1), `--port`
-   (existing), `--theme cockpit|saloon` (default cockpit), `--max-sse`,
-   `--no-open` (existing behavior unchanged otherwise).
+   `rate_limits` is non-file-backed and is **added to
+   `db.NON_FILE_BACKED_TABLES`** so `repair.rebuild_db_from_files_and_verify`
+   snapshots/restores it like `usage`/`interjections`/`briefs` (reviewer
+   r1); a repair test proves the latest signal survives a rebuild. The
+   older-version-open (downgrade) test stays a separate guarantee.
+7. **`tagteam serve` flags**: `--theme cockpit|saloon` (default **saloon**
+   = legacy; `cockpit` enables cockpit mode), `--host` (default: legacy
+   `""` all interfaces / cockpit `127.0.0.1`; explicit value wins in both),
+   `--port` (existing), `--max-sse` (cockpit), `--no-open` (existing).
+   Config equivalent: `serve: {theme: cockpit}` in `tagteam.yaml`.
 8. **Docs**: README ("The Cockpit" replaces "The Saloon" section, Saloon
    noted as theme; security note on host binding + token), roadmap,
    findings `docs/phases/arbiter-cockpit-findings.md` (browser dogfood:
@@ -165,10 +183,18 @@ PR at the end. **Release:** 0.11.0.
 ## Technical Approach
 
 ### Files
-- `tagteam/server.py` — `ThreadingHTTPServer`; token generation +
-  `_check_write_auth()`; new GET routes; SSE handler; POST routes calling
-  `controls.*`/`briefer.*` functions with an injected `out` buffer;
-  `--host/--theme/--max-sse`; `_get_dashboard_html(theme)`.
+- `tagteam/server.py` — `ThreadingHTTPServer`; `mode` (legacy|cockpit)
+  from `--theme`/config; token generation + `_check_write_auth()` (cockpit
+  mode only); new GET/POST routes registered only in cockpit mode; SSE
+  handler; POST routes calling `controls.*`/`briefer.*` functions with an
+  injected `out` buffer; `--host/--theme/--max-sse`;
+  `_get_dashboard_html(theme, token)`.
+- `tagteam/data/web/app.js` — minimal `tagteamFetch()` helper adding
+  `X-Tagteam-Token` when the meta tag is present (Saloon works in both
+  modes).
+- `tagteam/db.py` — `NON_FILE_BACKED_TABLES += ("rate_limits",)`;
+  `tagteam/repair.py` unchanged in logic (it iterates that tuple) but a
+  repair test covers the new table.
 - `tagteam/cockpit_api.py` — **new**: pure functions that build the JSON
   payloads (`now_payload`, `usage_payload`, `scope_diff_payload`,
   `brief_current_payload`, `events_signature`) so they are unit-testable
@@ -176,7 +202,8 @@ PR at the end. **Release:** 0.11.0.
 - `tagteam/cycle.py` — `compute_scope_diff(phase, type, project_dir) ->
   dict` (paths + baseline info); `_cli_scope_diff` calls it.
 - `tagteam/db.py` — `SCHEMA_VERSION = 6`, `rate_limits` table,
-  `upsert_rate_limit`, `latest_rate_limits`; usage per-round series query.
+  `upsert_rate_limit`, `latest_rate_limits`; usage per-round series query;
+  `rate_limits` in `NON_FILE_BACKED_TABLES`.
 - `tagteam/headless.py` / `tagteam/briefer.py` — record `rate_limit_event`
   from the events stream (claude) into `rate_limits` after each run.
 - `tagteam/data/web/cockpit.html|js|css` — new; existing Saloon files
@@ -185,13 +212,18 @@ PR at the end. **Release:** 0.11.0.
 - Tests: `tests/test_cockpit_api.py` (payload builders incl. scope-diff
   caps, usage series, now/pause/inflight, current-brief rule),
   `tests/test_server_cockpit.py` (real `ThreadingHTTPServer` on an
-  ephemeral port in a thread: token required on every POST incl. legacy
-  ones; origin check; each write endpoint calls the CLI-equivalent function
-  and records the same rows; SSE: two concurrent clients each receive a
-  frame after a `cycle add`, heartbeat present, `Last-Event-ID` resend, 503
-  above `--max-sse`; asset smoke test; default bind is loopback and
-  `--host` overrides), `tests/test_db.py` v6, `tests/test_headless.py`
-  rate-limit capture, existing server validation tests unchanged.
+  ephemeral port in a thread, **both modes**: legacy invocation serves the
+  Saloon, binds `""`, accepts the four legacy POSTs without a token, 404s
+  every new endpoint, no meta token in the page; cockpit mode: token
+  required on every POST incl. the legacy four (403 without / with a wrong
+  `Origin`, 200 with the embedded token as the pages send it), origin
+  check, each write endpoint calls the CLI-equivalent function and records
+  the same rows; SSE: two concurrent clients each receive a frame after a
+  `cycle add`, heartbeat present, `Last-Event-ID` resend, 503 above
+  `--max-sse`; asset smoke test for both pages; loopback default and
+  `--host` override; `serve.theme` config gate), `tests/test_db.py` v6 +
+  `rate_limits` repair preservation, `tests/test_headless.py` rate-limit
+  capture, existing server validation tests unchanged.
 
 ### SSE frame
 ```
@@ -228,12 +260,20 @@ The client re-fetches the panels it cares about on `change` (cheap, local).
 
 ## Success Criteria
 
-- [ ] `tagteam serve` binds `127.0.0.1` by default and `--host 0.0.0.0`
-  binds all interfaces (test); every POST — including the pre-existing
-  `/api/state`, `/api/config`, `/api/launch`, `/api/start-phase` — is
-  rejected (403, JSON) without the per-run `X-Tagteam-Token` or with a
-  mismatching `Origin`, and accepted with both (tests); no
-  `Access-Control-Allow-Origin: *` on POST responses.
+- [ ] **Flag-off identical:** bare `tagteam serve` (no `--theme`, no
+  `serve.theme` config) serves the Saloon at `/`, binds all interfaces,
+  accepts the four legacy POSTs without any token, sets the same CORS
+  headers, embeds no token, and returns 404 for every new endpoint — all
+  regression-tested; the only shared change is `ThreadingHTTPServer`.
+- [ ] Cockpit mode (`--theme cockpit` or `serve.theme: cockpit`) binds
+  `127.0.0.1` by default and `--host 0.0.0.0` binds all interfaces (test);
+  every POST — including the pre-existing `/api/state`, `/api/config`,
+  `/api/launch`, `/api/start-phase` — is rejected (403, JSON) without the
+  per-run `X-Tagteam-Token` or with a mismatching `Origin`, and accepted
+  with both (tests driven the way both pages send it); no
+  `Access-Control-Allow-Origin: *` on POST responses; the Saloon served at
+  `/?theme=saloon` in cockpit mode completes all four legacy POSTs
+  (its `tagteamFetch()` adds the token).
 - [ ] The server is threaded: an open SSE connection does not block other
   requests (test: hold an SSE stream and fetch `/api/state` concurrently).
 - [ ] `GET /api/events` emits an initial snapshot, then a `change` frame
@@ -255,11 +295,13 @@ The client re-fetches the panels it cares about on `change` (cheap, local).
   message}`, and never surfaces a traceback (tests per endpoint incl. an
   invalid `rule` on a non-escalated cycle → `{ok:false}` 400).
 - [ ] Schema v6 `rate_limits` additive; headless turns and briefs record
-  the latest Claude `rate_limit_event`; `/api/usage` includes it; 0.10.0
-  opens a v6 project (release checklist).
-- [ ] Frontend: `/` serves the cockpit with the token embedded and all
-  referenced assets resolve (smoke test); `/?theme=saloon` serves the
-  unchanged Saloon; the cockpit works with SSE and falls back to polling
+  the latest Claude `rate_limit_event`; `/api/usage` includes it;
+  `rate_limits` survives `repair.rebuild_db_from_files_and_verify` (test);
+  0.10.0 opens a v6 project (release checklist).
+- [ ] Frontend: in cockpit mode `/` serves the cockpit with the token
+  embedded and all referenced assets resolve (smoke test); `/?theme=saloon`
+  serves the Saloon (only change: `tagteamFetch()`); in legacy mode `/`
+  serves the Saloon exactly as 0.10.0; the cockpit works with SSE and falls back to polling
   when `EventSource` is unavailable (manual dogfood, recorded).
 - [ ] Docs + findings: README cockpit section and security note; findings
   record the browser dogfood — live Feed during a headless reviewer turn,
@@ -268,17 +310,19 @@ The client re-fetches the panels it cares about on `change` (cheap, local).
   the real rows, two-tab SSE.
 - [ ] Released as 0.11.0 via PR → merge → tag (post-approval; CI green).
 
+## Decisions (round 1)
+
+- Bare `tagteam serve` stays 0.10.0-identical (Saloon, bind all, no
+  token, no new routes); the cockpit, loopback default, token/origin
+  enforcement and new endpoints are gated behind `--theme cockpit` /
+  `serve.theme: cockpit`. `--host` is the explicit override in both modes.
+- Per-run token (reviewer agreed); signal-only SSE frames (agreed).
+- Saloon's `app.js` gets a minimal `tagteamFetch()` so it works in both
+  modes; `rate_limits` is repair-preserved.
+
 ## Open Questions
 
-1. **Loopback default** — a real behavior change for anyone serving on a
-   LAN today. Recommendation: accept it as a safety fix (one flag restores
-   it) and say so in the release notes.
-2. **Token scope** — per server run (recommended) vs. persisted in
-   `.tagteam/`. Per run means a browser tab must reload after the server
-   restarts; persisted means a token on disk. Recommendation: per run.
-3. **Feed granularity** — signal-only frames (recommended; client refetches)
-   vs. shipping full payloads over SSE. Signals keep the server trivial and
-   multi-client safe.
+- None blocking.
 
 ## Risks
 - **Scope size** — mitigated by the ordered steps: 0–5 are backend with
