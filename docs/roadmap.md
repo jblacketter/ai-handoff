@@ -365,7 +365,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Open follow-up:** bump `version` / `date-released` in `CITATION.cff` as part of each release (consider folding into the release checklist).
 
 ### CI: take the Windows job out of the per-PR gate
-- **Status:** Not started — noted 2026-08-16 (Phase 37 PR)
+- **Status:** Done 2026-08-16 — `.github/workflows/tests.yml` now runs only `pytest (ubuntu-latest)` on push/PR; the Windows job is a separate `pytest-windows` job that runs only via **Run workflow → `windows` = true** (`workflow_dispatch` input). No branch protection existed, so nothing else to unrequire. **We still want Windows back in the gate later** — when Windows becomes a priority, drop the `if:` on `pytest-windows` (or fold it back into a matrix) and run it before any release that touches procs / headless / watcher pidfile / port-lease code.
 - **Motivation:** `pytest (windows-latest)` takes ~7–9 min per PR vs ~2 min for Ubuntu and Windows is not a current priority. Options: run it on `workflow_dispatch` / nightly / on `v*` tags only, or keep it non-required. Verify Windows separately once macOS/Ubuntu are green. Keep the Windows code paths (procs, headless, watcher pidfile, port-lease fallback) — this is about per-PR cost, not support.
 
 ### Saloon rethink — archetype cast & theme packs
