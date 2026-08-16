@@ -526,7 +526,7 @@
       var tot = (s.input || 0) + (s.output || 0);
       (byRole[s.role] = byRole[s.role] || []).push({ x: s.round, y: tot, s: s });
     });
-    var maxR = Math.max(10, Math.max.apply(null, pts.map(function (p) { return p.round; }).concat([1])));
+    var maxR = Math.max(5, Math.max.apply(null, pts.map(function (p) { return p.round; }).concat([1])));
     var maxY = Math.max(1, Math.max.apply(null, pts.map(function (p) { return (p.input || 0) + (p.output || 0); }).concat([1])));
     var X = function (r) { return padL + (r - 1) / Math.max(1, maxR - 1) * (W - padL - padR); };
     var Y = function (v) { return H - padB - v / maxY * (H - padT - padB); };
@@ -536,14 +536,10 @@
     line(padL, H - padB, W - padR, H - padB, '#2b333d'); line(padL, padT, padL, H - padB, '#2b333d');
     for (var r = 1; r <= maxR; r++) { if (maxR <= 12 || r % 2 === 1) text(X(r), H - 8, 'r' + r, 'middle'); }
     text(padL - 4, padT + 8, fmtInt(maxY), 'end'); text(padL - 4, H - padB, '0', 'end');
-    // stale-round limit marker (auto-escalation fires after 10 consecutive
-    // stale rounds — unchanged re-submissions — not at a fixed round number;
-    // the marker only gives the curve a scale)
-    if (maxR >= 10) {
-      line(X(10), padT, X(10), H - padB, '#f85149', '4 3');
-      var nearRight = X(10) > W - padR - 150;
-      text(X(10) + (nearRight ? -3 : 3), padT + 10, '10-stale-round limit', nearRight ? 'end' : 'start', '#f85149');
-    }
+    // No threshold marker: auto-escalation is not a round number (it fires
+    // after 10 consecutive stale rounds — unchanged re-submissions — whatever
+    // the round), so nothing is drawn at a fixed x; the rule is stated in the
+    // chart caption instead.
     var colors = { lead: '#5aa9ff', reviewer: '#c58af9', briefer: '#d29922' };
     Object.keys(byRole).forEach(function (role) {
       var arr = byRole[role].sort(function (a, b) { return a.x - b.x || 0; });

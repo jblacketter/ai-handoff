@@ -34,8 +34,8 @@ tests only; the `tagteam/` package tree is byte-identical to 0.12.0.
   `export-usage --as-of …`), **`scripts/showcase_seed.py DIR`**,
   **`scripts/upgrade_smoke.py`** (`--project --sentinel --python
   --expect-version --json`).
-- **Tests:** `tests/test_docs_story.py` (21), `tests/test_showcase_numbers.py`
-  (7), `tests/test_upgrade_smoke.py` (5). Full suite: **932 passed, 5
+- **Tests:** `tests/test_docs_story.py` (22), `tests/test_showcase_numbers.py`
+  (7), `tests/test_upgrade_smoke.py` (5). Full suite: **933 passed, 5
   skipped**.
 - Bookkeeping: `pyproject.toml` and `CITATION.cff` → 3.0.0; roadmap;
   proposal §5 "shipped as 3.0.0" note.
@@ -75,8 +75,8 @@ command.
   package change**: `tagteam/data/web/cockpit.html` (caption → "dashed
   line: the stale-round limit (auto-escalation after 10 consecutive stale
   rounds; a progressing cycle can go past it)") and `cockpit.js` (marker
-  label → "10-stale-round limit", comment). `git diff origin/main --
-  tagteam/` is exactly those two files (6+/4−); the wheel comparison
+  label, then in round 3 the marker removed altogether — see Round 2 §2).
+  `git diff origin/main -- tagteam/` is exactly those two files (6+/8−); the wheel comparison
   against 0.12.0 differs in exactly those two entries; no behavior change;
   `tagteam/data/web` is not among the files `setup`/`upgrade` copy, so the
   upgrade no-op is unaffected. `cockpit-usage.png` recaptured from the
@@ -114,7 +114,19 @@ command.
    absent). This repo has no such duplicates, so the committed block is
    unchanged (byte-compare still green).
 2. **Cockpit wording** — see the deviation entry above; screenshot
-   recaptured; guard test added.
+   recaptured; guard test added. **Round 3 (reviewer impl r2):** relabelling
+   was not enough — the chart's x-axis is the absolute round number and a
+   stale-round limit has no fixed x, so the dashed rule at `X(10)` is
+   **removed** entirely (the axis floor drops from r10 to r5 so nothing
+   suggests a round-10 line); the accurate rule lives in the caption:
+   "Auto-escalation is not a round number: it fires after 10 consecutive
+   stale rounds (unchanged re-submissions), however long the cycle runs."
+   `cockpit-usage.png` recaptured (chart texts: `r1…r5`, y labels; zero
+   `stroke-dasharray` lines). New structural test
+   `test_cockpit_churn_chart_draws_no_threshold_at_a_fixed_round` extracts
+   `drawChurn` and rejects any `X(<number>)` anchor, any drawn text
+   containing stale / escalat / limit, and any dashed `line(...)` call —
+   verified to catch the previous marker.
 3. **Loop diagram ruling routing** — the mermaid and `tagteam-loop.svg` no
    longer send a generic "ruling" back to the Lead: `A → P` "request
    changes (plan)", `A → I` "approve (plan) / request changes (impl)",
@@ -158,17 +170,17 @@ command.
    "10 rounds" / "round-10" / "review cycle" / "handoff session" /
    "handoff cycle" in the story docs or SVG labels).
 6. **Release readiness** —
-   - `pytest`: 932 passed, 5 skipped (macOS, 2 m 37 s; round 2).
+   - `pytest`: 933 passed, 5 skipped (macOS; round 3).
    - `git diff origin/main -- tagteam/`: round 1 **0 lines**; after the
-     round-2 wording fix exactly `tagteam/data/web/cockpit.html` (1 line)
-     and `cockpit.js` (marker label + comment) — nothing else (origin/main
-     = 688daa8 = v0.12.0).
+     round-2/3 fix exactly `tagteam/data/web/cockpit.html` (1 line: the
+     caption) and `cockpit.js` (marker removed, axis floor 10 → 5, comment)
+     — 6+/8−, nothing else (origin/main = 688daa8 = v0.12.0).
    - `pip wheel . --no-deps` → `tagteam-3.0.0-py3-none-any.whl`,
      `METADATA` `Version: 3.0.0`; the wheel's 86 `tagteam/` entries have
      the **same file list** as the `tagteam-0.12.0-py3-none-any.whl`
      downloaded from PyPI and the same sha256 hashes for 84 of them — the
      two differing entries are exactly `tagteam/data/web/cockpit.html` and
-     `cockpit.js` (the round-2 wording fix).
+     `cockpit.js` (the round-2/3 chart fix; re-verified after round 3).
    - Upgrade smoke, only through the harness: a scratch venv with the
      0.12.0 wheel; 0.12.0's `setup.main` run in a fresh `-I` process with
      `registry.REGISTRY_DIR/REGISTRY_FILE` patched to a scratch registry
