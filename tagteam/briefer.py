@@ -502,18 +502,15 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
         if ev is None:
             return BriefResult("skipped", why)
         sweep_abandoned(root, spec.timeout_s, log)
-        inflight = h.read_inflight(root)
-        if inflight is not None:
-            if _inflight_live(inflight):
-                msg = (f"another turn is in flight ({inflight.get('stem')}) — wait or "
-                       f"`tagteam cancel-turn`")
-                log(f"   briefer: claim refused: {msg}")
-                return BriefResult("refused", msg, event_key=ev.event_key)
-            log(f"   briefer: removing stale inflight pointer ({inflight.get('stem')})")
-            try:
-                h.inflight_path(root).unlink()
-            except OSError:
-                pass
+        # Phase 37: the slot rule is shared with every spawner (fail closed);
+        # a stale marker is recovered by the claim itself, never unlinked here.
+        slot = h.slot_status(root)
+        if slot["held"]:
+            inflight = slot["marker"]
+            msg = (f"another turn is in flight ({inflight.get('stem')}; {slot['reason']}) "
+                   f"— wait or `tagteam cancel-turn`")
+            log(f"   briefer: claim refused: {msg}")
+            return BriefResult("refused", msg, event_key=ev.event_key)
         conn = db.connect(project_dir=root)
         try:
             claim = db.claim_brief(conn, ts=_now_iso(), phase=ev.phase, cycle_type=ev.type,
@@ -541,7 +538,6 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
                                event_key=ev.event_key)
         brief_id, attempt = claim
         stem = f"{ev.phase}_{ev.type}_r{ev.round}_briefer_{_stamp()}_a{attempt}"
-        inflight_file = h.inflight_path(root)
         # From here on, every failure must finalize the claim.
         try:
             conn = db.connect(project_dir=root)
@@ -559,9 +555,16 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
                 "log_path": str(log_path), "events_path": str(events_path),
                 "started_at": started_at, "pid": None, "child_ident": None,
                 "watcher_pid": runner_pid, "watcher_ident": runner_ident,
-                "brief_id": brief_id, "event_key": ev.event_key, "kind": kind, "attempt": attempt,
+                "brief_id": brief_id, "event_key": ev.event_key, "brief_kind": kind, "attempt": attempt,
             }
-            inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
+            # Phase 37: atomic slot claim (kind=briefer); a live cycle or
+            # conversation turn makes the attempt fail cleanly, never a
+            # clobbered marker.
+            try:
+                slot_claim = h.claim_turn_slot(root, kind=h.SLOT_KIND_BRIEFER, role="briefer",
+                                               fields=inflight)
+            except h.SlotBusy as busy:
+                raise RuntimeError(f"turn slot busy: {busy.reason}")
         except Exception as e:
             _finalize_failed(root, brief_id, stem, f"setup failed: {type(e).__name__}: {e}",
                              ev, kind, attempt, log)
@@ -599,12 +602,7 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
                            stem=stem, event_key=ev.event_key)
 
     def _on_spawn(pid: int) -> None:
-        inflight["pid"] = pid
-        inflight["child_ident"] = procs.identity(pid)
-        try:
-            inflight_file.write_text(json.dumps(inflight, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        h.update_turn_slot(slot_claim, pid=pid, child_ident=procs.identity(pid))
 
     env = dict(os.environ)
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
@@ -620,18 +618,12 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
         spawn_error = str(e)
         out = h.RunOutput(exit_code=None, timed_out=False, duration_ms=0)
     except BaseException as e:   # KeyboardInterrupt / unexpected: finalize, re-raise
-        try:
-            inflight_file.unlink()
-        except OSError:
-            pass
+        h.release_turn_slot(slot_claim)
         _finalize_failed(root, brief_id, stem, f"runner interrupted: {type(e).__name__}",
                          ev, kind, attempt, log)
         raise
     finally:
-        try:
-            inflight_file.unlink()
-        except OSError:
-            pass
+        h.release_turn_slot(slot_claim)
 
     # ---- finalize (any exception here → failed row, never a stranded claim)
     try:

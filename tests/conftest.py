@@ -22,3 +22,14 @@ def _isolate_cwd_pause_marker(monkeypatch):
         return real(self)
 
     monkeypatch.setattr(watcher._StateProcessor, "_pause_info", isolated)
+
+
+
+
+
+@pytest.fixture(autouse=True)
+def _isolated_port_leases(tmp_path, monkeypatch):
+    """Phase 37: `tagteam serve` / `hub` claim a port lease under
+    ~/.tagteam/ports/ — tests must never touch the real one."""
+    monkeypatch.setenv("TAGTEAM_PORT_LEASE_DIR", str(tmp_path / "_port_leases"))
+    yield

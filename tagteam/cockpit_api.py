@@ -139,8 +139,10 @@ def watcher_status(project_dir: str | Path, inflight: dict | None = None,
                     mode = None
             out.update({"running": True, "pid": pid, "mode": mode, "source": "process-scan"})
             return out
-    # in-flight runner
-    if inflight and inflight.get("watcher_pid"):
+    # in-flight runner — only a CYCLE turn's runner is a watcher; a
+    # conversation turn's runner (the cockpit server / `tagteam lead`) or
+    # the briefer's is not (Phase 37 marker `kind`).
+    if inflight and inflight.get("watcher_pid") and inflight.get("kind") in (None, "cycle"):
         wpid = inflight.get("watcher_pid")
         try:
             if procs.pid_alive(wpid) and (not inflight.get("watcher_ident")

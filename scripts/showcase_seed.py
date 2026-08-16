@@ -12,6 +12,8 @@ round text authored right here (nothing is copied from a real project):
              in the DB, a declining per-round usage series  -> Needs you
   demo-web   impl cycle, reviewer turn owed for hours, no watcher -> Waiting · stale
   demo-docs  impl cycle approved                             -> Quiet
+  demo-idle  no cycle yet, roadmap has an open phase, plus a canned Lead
+             conversation (two turns)                        -> Start card + Lead panel
 
 plus DIR/registry.json listing exactly those three paths, so `tagteam hub
 --registry DIR/registry.json` never reads ~/.tagteam/projects.json.
@@ -161,17 +163,67 @@ def _seed_brief(project: Path, phase: str, ctype: str) -> None:
         conn.close()
 
 
+CONVERSATION = [
+    ("Before we start the next phase: the roadmap says 'search index'. I'd rather ship "
+     "the CSV export first — customers keep asking. Thoughts?",
+     "Reasonable. The CSV export is smaller (one endpoint + a streaming writer) and unblocks "
+     "three open tickets; the search index needs the schema change we deferred. I'd swap the "
+     "order: export now, index next. If you agree I'll rewrite the roadmap entry and open the "
+     "plan cycle with `/handoff start csv-export`."),
+    ("Agreed — do it.",
+     "Done: roadmap reordered (csv-export before search-index). Say `/handoff start csv-export` "
+     "here or press Start and I'll write the plan for review."),
+]
+
+
+def _seed_conversation(project: Path) -> None:
+    """A canned two-turn Lead conversation: DB rows + transcript + events."""
+    from tagteam import db, lead_chat
+    conv = lead_chat.new_conversation(project, provider="claude", title="roadmap order before the next phase")
+    cid = conv["id"]
+    conn = db.connect(project_dir=str(project))
+    try:
+        base = datetime.now(timezone.utc) - timedelta(minutes=25)
+        for i, (you, lead) in enumerate(CONVERSATION):
+            ts = _iso(base + timedelta(minutes=6 * i))
+            t = db.add_conversation_turn(conn, conversation_id=cid, ts=ts, user_text=you,
+                                         owner_pid=None, owner_ident=None)
+            log_path, events_path = lead_chat._turn_paths(project, cid, t["n"])
+            events_path.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": lead}]}}) + "\n"
+                                   + json.dumps({"type": "result", "result": lead, "session_id": "demo-session",
+                                                 "usage": {"input_tokens": 1200, "output_tokens": 180}}) + "\n",
+                                   encoding="utf-8")
+            log_path.write_text(f"[claude] {lead}\n[tagteam] conversation turn ok\n", encoding="utf-8")
+            db.finish_conversation_turn(conn, cid, t["n"], status="ok", ts=_iso(base + timedelta(minutes=6 * i + 1)),
+                                        session_id="demo-session", reply=lead,
+                                        continuity="new session" if i == 0 else "resumed session",
+                                        log_path=str(log_path), events_path=str(events_path))
+            lead_chat._append_transcript(project, cid, t["n"], "you", you, ts)
+            lead_chat._append_transcript(project, cid, t["n"], "Claude", lead, _iso(base + timedelta(minutes=6 * i + 1)))
+        db.update_conversation(conn, cid, session_id="demo-session", continuity="resumed session",
+                               last_ts=_iso(base + timedelta(minutes=7)))
+    finally:
+        conn.close()
+
+
 def seed(root: Path) -> dict:
     if root.exists():
         raise SystemExit(f"seed: {root} already exists — pick a fresh directory")
     demo = root / "demo"
     projects = {}
-    for name in ("demo-api", "demo-web", "demo-docs"):
+    for name in ("demo-api", "demo-web", "demo-docs", "demo-idle"):
         p = demo / name
         (p / "docs" / "handoffs").mkdir(parents=True)
         (p / "docs" / "escalations").mkdir(parents=True)
         (p / ".tagteam").mkdir()
         _write_yaml(p)
+        # the handoff skill contract (as `tagteam setup` would install it) —
+        # HeadlessEngine.validate() requires it, so Start headless is offered
+        import shutil
+        from tagteam.setup import get_data_dir
+        skill = get_data_dir() / ".claude" / "skills" / "handoff" / "SKILL.md"
+        (p / ".claude" / "skills" / "handoff").mkdir(parents=True)
+        shutil.copy2(skill, p / ".claude" / "skills" / "handoff" / "SKILL.md")
         (p / "docs" / "roadmap.md").write_text(
             "# Roadmap\n\n### Phase 1: demo\n- **Status:** In progress\n", encoding="utf-8")
         projects[name] = p
@@ -190,6 +242,12 @@ def seed(root: Path) -> dict:
 
     _play(projects["demo-docs"], "docs-build", "impl", DOCS_ROUNDS)
     _age_state(projects["demo-docs"], hours=30)
+
+    (projects["demo-idle"] / "docs" / "roadmap.md").write_text(
+        "# Roadmap\n\n### Phase 1: Auth Cleanup\n- **Status:** Complete\n\n"
+        "### Phase 2: CSV Export\n- **Status:** Not started\n\n"
+        "### Phase 3: Search Index\n- **Status:** Not started\n", encoding="utf-8")
+    _seed_conversation(projects["demo-idle"])
 
     reg = root / "registry.json"
     reg.write_text(json.dumps([str(p.resolve()) for p in projects.values()], indent=2) + "\n", encoding="utf-8")

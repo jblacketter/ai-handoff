@@ -149,10 +149,10 @@ A cycle ends when the reviewer approves. It comes to you when the reviewer escal
 flowchart LR
     M["Manual<br/>you paste /handoff<br/>between two agents"] --> W["Watched<br/>tagteam watch drives<br/>your terminals"]
     W --> H["Headless<br/>each turn is a fresh<br/>claude -p / codex exec"]
-    H --> C["+ Cockpit & Hub<br/>watch and steer<br/>from the browser"]
+    H --> C["+ Cockpit & Hub<br/>talk to the lead, launch,<br/>watch and steer"]
 ```
 
-Every rung is the same loop and the same files; only the automation changes. **Manual** costs nothing to set up. **Watched** (`tagteam watch --mode notify|iterm2|tmux`) types the next command into the right terminal for you. **Headless** is for running unattended, on Windows, or whenever long-lived agent sessions become the problem.
+Every rung is the same loop and the same files; only the automation changes. **Manual** costs nothing to set up. **Watched** (`tagteam watch --mode notify|iterm2|tmux`) types the next command into the right terminal for you. **Headless** is for running unattended, on Windows, or whenever long-lived agent sessions become the problem. The **cockpit** starts any of them from the browser and lets you talk to the lead without a terminal.
 
 ### Headless: fresh process per turn
 
@@ -196,17 +196,23 @@ tagteam usage [--json]                        # per-turn tokens; roll-ups by rol
 
 How each of these behaves (pause markers, cancel-turn identity checks, interjection scoping, retries, notifications, `tagteam rollback`): [arbiter controls](docs/how-tagteam-works.md#controls).
 
-## Watch and steer
+## Talk to the lead, launch, watch and steer
 
-**The Cockpit** — a browser dashboard for one project, built around the arbiter's actual job: *does anything need me?* then *is it healthy and what is it doing?*
+**The Cockpit** — the browser surface for one project, built around the arbiter's actual job: *how do I begin?*, *let me tell the lead something*, *does anything need me?*, then *is it healthy and what is it doing?*
 
 ```bash
-tagteam serve --theme cockpit --dir ~/projects/myproject      # http://localhost:8080
+tagteam serve                    # http://127.0.0.1:8080 — the cockpit for the current project (3.1: default)
+tagteam serve --dir ~/projects/myproject --port 8081
 ```
+
+- **Start card** — when nothing is in progress, *Needs you* shows the exact next step derived from the recorded state and your roadmap (a new phase's plan; after a plan is approved, that phase's implementation; after an implementation, the next open phase). **Start headless** starts the watcher and hands the lead the `/handoff start …` command as the first message of a Lead conversation; **Launch terminals** opens the three-terminal session and gives you the command to paste. Headless is offered only when both agents validate for headless turns.
+- **Lead panel** — talk to the lead agent from the cockpit: brainstorm, plan, say `/handoff start <phase>`, and after implementation give feedback or close the phase. Each message is one turn of the lead's own CLI (`claude -p` / `codex exec`, resumed across messages, streamed live, transcript under `.tagteam/conversations/`), with the same permissions as a headless turn. It never runs on top of the watcher's lead turn — Send is refused while the lead is on its cycle turn (interject instead), and a conversation blocks the watcher's lead dispatch until it ends. `tagteam lead "message"` is the same thing from the terminal.
+
+<p align="center"><img src="docs/media/screenshots/cockpit-lead.png" alt="Cockpit on an idle project: the Start card showing the next step derived from the roadmap (/handoff start csv-export) with Copy command, Launch terminals and Start headless, the watcher chip's Start, and the Lead panel with a two-turn conversation and the composer" width="100%"></p>
 
 <p align="center"><img src="docs/media/screenshots/cockpit-needs-you.png" alt="Cockpit: the Now strip (phase, turn, watcher, connection), a Needs-you card for an escalated plan cycle with its decision brief and Approve / Request changes buttons, and the Watch tabs" width="100%"></p>
 
-The **Now** strip (phase / type / round, whose turn and for how long, the in-flight turn, the pause hold, watcher liveness, connection mode); **Needs you** — one card per thing only the human can do, each with the buttons and the exact CLI they run; **Watch** tabs — Feed, Diff, Usage, Notes. Every button is the CLI command with the same effect, recorded as `by = web:<user>`. Cockpit mode binds **127.0.0.1** by default and guards every POST with a per-run page token; `--host 0.0.0.0` exposes it on the network and is your call. Zones, watcher liveness and the security model in full: [the cockpit](docs/how-tagteam-works.md#cockpit).
+The **Now** strip (phase / type / round, whose turn and for how long, the in-flight turn, the pause hold, watcher liveness with **Start / Stop**, connection mode); **Needs you** — one card per thing only the human can do, each with the buttons and the exact CLI they run; **Watch** tabs — Lead, Feed, Diff, Usage, Notes. Every button is the CLI command with the same effect, recorded as `by = web:<user>`. The cockpit binds **127.0.0.1** by default and guards every POST with a per-run page token; `--host 0.0.0.0` exposes it on the network — including the ability to run agent turns and launch processes — and is your call. Two `tagteam serve` on one port never shadow each other: the second refuses and names the first. Zones, the launchpad, the lead conversation model and the security model in full: [the cockpit](docs/how-tagteam-works.md#cockpit), [talking to the lead](docs/how-tagteam-works.md#lead).
 
 **The Hub** — every project you've set up, in one list ranked by what needs you.
 
@@ -217,9 +223,9 @@ tagteam hub --list [--json]     # the same triage as text
 
 <p align="center"><img src="docs/media/screenshots/hub.png" alt="Hub: three registered projects — one under Needs you (escalated, brief ready, Open), one under Waiting (reviewer owed for hours, stale, with the CLI to run), one under Quiet — with burn and the shared subscription window in the top strip" width="100%"></p>
 
-**Needs you** → **Waiting** (turns owed to agents; **stale** when nothing is dispatching) → **Quiet**, with burn across projects and the shared subscription window in the strip. **Open** takes you into that project's cockpit, mounted at `/p/<id>/`. The hub is read-only: it never migrates a project database and never rewrites the registry (`tagteam registry list|unregister PATH`). Details: [the hub](docs/how-tagteam-works.md#hub).
+**Needs you** → **Waiting** (turns owed to agents; **stale** when nothing is dispatching) → **Quiet**, with burn across projects and the shared subscription window in the strip. **Open** takes you into that project's cockpit, mounted at `/p/<id>/`; a project with a next step shows **Start →** straight to its cockpit's Start card. The hub is read-only: it never migrates a project database and never rewrites the registry (`tagteam registry list|unregister PATH`). Details: [the hub](docs/how-tagteam-works.md#hub).
 
-**The Saloon** — the original western-themed dashboard survives as a theme: bare `tagteam serve` is unchanged, and in cockpit mode it lives at `/?theme=saloon`. [More](docs/how-tagteam-works.md#saloon).
+**The Saloon** — the original western-themed dashboard survives as a theme: `tagteam serve --theme saloon` (identical to the pre-3.1 bare `serve`), and inside the cockpit at `/?theme=saloon`. [More](docs/how-tagteam-works.md#saloon).
 
 ## Reference
 
@@ -256,7 +262,8 @@ tagteam cycle rounds --phase P --type plan --tail 3
 tagteam pause --reason "..." / tagteam resume / tagteam cancel-turn
 tagteam interject "note" [--to lead|reviewer] / --list / --retire ID
 tagteam usage [--json]
-tagteam serve [--theme cockpit] [--host H] [--port N] [--max-sse N]   # dashboard; cockpit is opt-in
+tagteam serve [--theme cockpit|saloon] [--host H] [--port N] [--max-sse N]   # the cockpit (default); saloon = legacy dashboard
+tagteam lead "message" [--new] [--conversation ID] / --list           # talk to the lead from the terminal
 tagteam hub [--list [--json]] [--all] [--port 8090]                   # all registered projects; cockpits at /p/<id>/
 tagteam registry list [--json] | unregister PATH
 tagteam brief [--list | --generate | --event KEY]
@@ -278,7 +285,10 @@ tagteam --help
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Tagteam is open source and free to use, modify, and
-redistribute; the license asks only that the copyright notice travels with the code.
-If tagteam is useful to you, a link back to this repository is appreciated
-(see [CITATION.cff](CITATION.cff) or GitHub's "Cite this repository" button).
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Tagteam is open
+source and free to use, modify, and redistribute. The license asks that the copyright
+and NOTICE attribution travel with the code, that modified files say they were changed,
+and it includes an express patent grant. If tagteam is useful to you, a link back to
+this repository is appreciated (see [CITATION.cff](CITATION.cff) or GitHub's "Cite this
+repository" button). Releases up to and including 3.1.0 were published under MIT and
+remain available under that license.

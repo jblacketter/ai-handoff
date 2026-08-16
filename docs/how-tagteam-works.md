@@ -3,7 +3,7 @@
 The long version of the [README](../README.md), section by section, in the
 same order. Each heading below is the anchor the README links to.
 
-- [The loop](#loop) · [One cycle](#cycle) · [Modes](#modes) · [Headless](#headless) · [Arbiter controls](#controls) · [Escalations and the briefer](#escalations) · [The cockpit](#cockpit) · [The hub](#hub) · [The Saloon](#saloon) · [Files tagteam writes](#files)
+- [The loop](#loop) · [One cycle](#cycle) · [Modes](#modes) · [Headless](#headless) · [Arbiter controls](#controls) · [Escalations and the briefer](#escalations) · [The cockpit](#cockpit) · [Talking to the lead](#lead) · [The hub](#hub) · [The Saloon](#saloon) · [Files tagteam writes](#files)
 
 <a id="loop"></a>
 ## The loop
@@ -120,11 +120,29 @@ Briefs land in `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (uni
 <a id="cockpit"></a>
 ## The Cockpit
 
-A browser dashboard built around the arbiter's actual job — *does anything need me?* then *is it healthy and what is it doing?* — over the data the headless engine, controls and briefer record:
+The browser surface for one project, built around the arbiter's actual job — *how do I begin?*, *let me tell the lead something*, *does anything need me?*, then *is it healthy and what is it doing?* — over the data the headless engine, controls and briefer record:
 
 ```bash
-tagteam serve --theme cockpit --dir ~/projects/myproject      # http://localhost:8080
+tagteam serve                                    # http://127.0.0.1:8080 — the cockpit for the cwd's project (default since 3.1)
+tagteam serve --dir ~/projects/myproject --port 8081
+tagteam serve --theme saloon                     # the legacy dashboard (identical to the pre-3.1 bare `serve`)
 ```
+
+**Default and banner (3.1).** Bare `tagteam serve` opens the cockpit; `serve: {theme: saloon}` in `tagteam.yaml` or `--theme saloon` gives the Saloon. The banner names the project and its cycle state (`Tagteam cockpit — myproject — <phase · type · rN · state | no active cycle> → http://127.0.0.1:8080`).
+
+**One server per port.** Two Tagteam servers can never share a port number on the machine, whatever their bind host or start order: `serve` and `hub` claim a project-independent lease (`~/.tagteam/ports/<port>.json`, pid + creation identity) before binding and release it on shutdown; the second one refuses with `port 8080 is held by tagteam cockpit for <project> (pid N) — use --port 8081` and exits 2. A stale lease (dead pid, or a definitively different process identity) is replaced; a live-but-unverifiable holder keeps it. For anything else on the port the real bind decides (`EADDRINUSE` → refuse) and a pre-bind connect probe catches the loopback-vs-wildcard shadow with `port 8080 is in use on 127.0.0.1 — use --port 8081`; the residual probe→bind race applies to non-Tagteam processes only.
+
+**Launchpad.** When nothing is in progress the *Needs you* zone shows a **Start** card built from one *launch intent* (also what the hub row and the copy-command use), computed from the recorded state, the canonical cycle status and `docs/roadmap.md`:
+
+| observed | intent |
+|---|---|
+| no state / no cycle | first actionable roadmap phase → `/handoff start <phase>` |
+| current plan cycle approved | **same phase**, implementation → `/handoff start <phase> impl` |
+| current impl cycle approved | next actionable phase after it (skipped by name — the roadmap may still say "In progress") |
+| a cycle in progress / escalated / needs-human / paused | no Start (the card is absent; the reason is in the strip) |
+| roadmap exhausted / not set up | the reason (`no actionable phase in docs/roadmap.md` / `run tagteam quickstart`), no button |
+
+"Actionable" means the roadmap status is not terminal — `Complete` / `✅ Complete …` / `Absorbed` / `Deferred` / `Superseded` are terminal (normalized; `tagteam roadmap queue` uses the same rule). **Start headless** is offered only when the two-role headless configuration validates (`HeadlessEngine.validate()`); it is one server-side, idempotent operation: ensure the watcher (`tagteam watch --mode headless --pidfile`, detached; started only when none runs; reported as *not started* if it exits within 5 s or never writes its pidfile), then send the intent's command as the first message of a Lead conversation. A double-click, a retry after a lost response, or concurrent clicks produce one watcher and one message — the claim is persisted (`launches` table, keyed on the intent + the observed state), side effects run outside the lock, and an orphaned claim (the launching server died) is reconciled from its persisted references and retried without duplication. **Launch terminals** runs `tagteam session start` (three tabs/panes, agents launched) and shows the command to paste into the Lead; on the manual backend it prints the three commands. The watcher chip gains **Start** (headless when it validates, else notify) and **Stop** (identity-checked, pidfile'd watchers only).
 
 - **Now** strip — phase / type / round, whose turn and for how long, the in-flight headless turn (with a `tagteam tail` drawer), the pause hold, watcher liveness, queued notes, and the connection mode (**Live** via SSE / **Polling** fallback / Disconnected).
 - **Needs you** — one card per thing only the human can do: an escalation with its brief and **Approve / Request changes**, a needs-human question with **Answer**, a hold with **Resume**, a missing/failed brief with **Generate brief**, a stale in-flight or missing watcher with the CLI to run. Empty when nothing needs you — and it says so.
@@ -138,6 +156,19 @@ Every button is the CLI command with the same effect (`tagteam pause`, `resume`,
 
 **Security note.** Cockpit mode binds **127.0.0.1** by default; a per-run token is embedded in the page and required as `X-Tagteam-Token` on every POST (`Origin`/`Referer` must match the server; no `*` CORS). That stops cross-site POSTs and non-browser clients that have not read the page — it is not remote-access authentication. `--host 0.0.0.0` deliberately exposes the server on the network; the page token is then the only guard, so do that only on a network you trust.
 
+<a id="lead"></a>
+## Talking to the lead
+
+The **Lead** tab is your conversation with the lead agent, from the cockpit — brainstorm, plan, say `/handoff start <phase>`, and after implementation give feedback or close the phase — the same lead, in the same project directory, with the same permissions and the same handoff skill as the terminal session; only where you type differs.
+
+- **One message = one turn** of the lead's own CLI through the Phase 31 adapters (`agents.lead.headless` provider / executable / validated `args`, the same least-privilege defaults as a headless cycle turn), in the project cwd, message on stdin, streamed live to the panel and to `.tagteam/conversations/<id>/<n>.events.jsonl` + `<n>.log`; the human-readable record is `.tagteam/conversations/<id>/transcript.md`, indexed in the DB (`conversations`, `conversation_turns`).
+- **Continuity.** Claude: the first turn passes `--session-id`, later turns `--resume` (the engine sets these; they are reserved for user `args`). Codex: `codex exec … resume <thread_id>` when the installed CLI supports it (probed once, before spawning; parent options stay before the subcommand); otherwise the budgeted transcript tail is replayed on stdin and the panel says so ("continuity: transcript replay"). A resume that fails at runtime is a failed turn with its log — never auto-replayed.
+- **Never on top of the loop.** Every spawner (headless cycle turns, the briefer, conversation turns) claims the project's single turn slot atomically under the writer lock; a conversation turn holds it as `kind: conversation`, so the watcher does not dispatch the lead's cycle turn until it ends (it retries once the slot frees), and `cancel-turn` / `tail` / the in-flight chip work unchanged. While the lead is on its cycle turn, **Send is refused** ("lead is busy on round N — wait, or interject"); talking is allowed while dispatch is paused. Recovery of a stale slot is definitive-only: dead owner pid, or a recorded identity that no longer matches — an unverifiable owner stays busy and `tagteam cancel-turn` remains the human's tool.
+- **Turn lifecycle.** `running → ok | failed | cancelled`; a failed conversation turn keeps its log, releases the slot, and never writes the watcher's pause marker. On server start (and `tagteam lead --list`) a `running` row whose owner process is gone is marked failed (orphaned), so Send is never permanently busy.
+- **Untrusted content.** The lead's replies, tool summaries and errors are rendered as text nodes only — a reply containing HTML or script shows as text. Conversation ids are server-generated and validated before any file access; messages are capped at 32 KB.
+- **Accounting.** Every conversation turn writes a `usage` row with `kind = conversation`; `tagteam usage` shows them alongside cycle turns.
+- **From the terminal:** `tagteam lead "message"` continues the most recent conversation (`--new` starts one, `--conversation ID` picks one, `--list` shows them; exit 3 = the lead is busy).
+
 <a id="hub"></a>
 ## The Hub (all your projects)
 
@@ -146,17 +177,17 @@ tagteam hub                     # http://localhost:8090 — every registered pro
 tagteam hub --list [--json]     # the same triage as text
 ```
 
-One surface over every project `tagteam setup` registered (`~/.tagteam/projects.json`), ranked by intent: **Needs you** (escalations, questions, paused-after-failure — one **Open** per row), **Waiting** (turns owed to agents, oldest first; **stale** when nothing is dispatching, **abandoned?** past a day — with the CLI to run), **Quiet** (done / idle, collapsed to a count). The strip shows how many are live, burn across projects (24 h / 7 d) and the shared subscription window (newest signal per provider/kind across *every* registered project — the subscription is one pool, so hidden projects count too; burn totals are for the visible projects only). **Open** takes you into that project's cockpit, mounted by the hub at `/p/<id>/` — same token, same loopback default — so ruling, pausing or interjecting anywhere is two clicks away.
+One surface over every project `tagteam setup` registered (`~/.tagteam/projects.json`), ranked by intent: **Needs you** (escalations, questions, paused-after-failure — one **Open** per row), **Waiting** (turns owed to agents, oldest first; **stale** when nothing is dispatching, **abandoned?** past a day — with the CLI to run), **Quiet** (done / idle, collapsed to a count). Every row carries the project's launch intent; a row with a next step shows **Start →** (plan / implementation) linking to that project's cockpit Start card — the hub itself launches nothing. The strip shows how many are live, burn across projects (24 h / 7 d) and the shared subscription window (newest signal per provider/kind across *every* registered project — the subscription is one pool, so hidden projects count too; burn totals are for the visible projects only). **Open** takes you into that project's cockpit, mounted by the hub at `/p/<id>/` — same token, same loopback default — so ruling, pausing or interjecting anywhere is two clicks away.
 
 The hub is read-only: it never migrates a project database (`mode=ro`), never rewrites the registry (`tagteam registry list` / `tagteam registry unregister PATH` are the only registry commands, and only `unregister` writes). Missing dirs, scratch paths and dirs without `tagteam.yaml` are hidden by default (`--all` / "show hidden"). `tagteam hub --registry PATH` reads a different registry file the same way (used by the screenshot seed in `docs/media/`).
 
 <a id="saloon"></a>
 ## The Saloon (theme)
 
-The original western-themed dashboard survives as a theme — bare `tagteam serve` (no `--theme`, no config key) is unchanged from 0.10.0: the Saloon at `/`, all interfaces, no token, no cockpit endpoints. In cockpit mode it lives at `/?theme=saloon` (and works there, token included). Under a hub mount only the cockpit is served.
+The original western-themed dashboard survives as a theme — `tagteam serve --theme saloon` (or `serve: {theme: saloon}` in `tagteam.yaml`) is identical to the pre-3.1 bare `serve`: the Saloon at `/`, all interfaces, no token, no cockpit endpoints. Inside the cockpit it lives at `/?theme=saloon` (and works there, token included). Under a hub mount only the cockpit is served.
 
 ```bash
-tagteam serve --dir ~/projects/myproject           # legacy Saloon (0.10.0-identical)
+tagteam serve --theme saloon --dir ~/projects/myproject     # legacy Saloon
 ```
 
 `tagteam tui` is an optional Textual terminal UI over the same state (`pip install 'tagteam[tui]'`).
@@ -174,7 +205,9 @@ tagteam serve --dir ~/projects/myproject           # legacy Saloon (0.10.0-ident
 | `.tagteam/tagteam.db` | every writer (shadow) | SQLite mirror of state/rounds plus usage, interjections, briefs, rate limits |
 | `.tagteam/turns/<phase>_<type>_r<N>_<role>_<ts>.log` / `.events.jsonl` | headless watcher | one headless turn's human-readable log and raw event stream |
 | `.tagteam/headless-paused.json` | headless watcher, `tagteam pause` | the hold marker (reason, log path); delete or `tagteam resume` to continue |
-| `.tagteam/watcher.json` | `tagteam watch --pidfile` / `serve.theme: cockpit` | identity-checked watcher pidfile for the cockpit's liveness chip |
+| `.tagteam/watcher.json` | `tagteam watch --pidfile` / `serve.theme: cockpit` / the cockpit's Start | identity-checked watcher pidfile for the cockpit's liveness chip and Stop button |
+| `.tagteam/conversations/<id>/transcript.md`, `<n>.log`, `<n>.events.jsonl` | the Lead panel / `tagteam lead` | one lead conversation: the human-readable transcript and each turn's log + raw event stream |
+| `~/.tagteam/ports/<port>.json` | `tagteam serve` / `tagteam hub` | the port lease (pid + identity) that keeps two Tagteam servers off one port; removed on shutdown |
 | `.tagteam/legacy/` | `tagteam migrate --to-step-b` | cycle files moved out of `docs/handoffs/` on Step B activation; still read by the CLI, cockpit and hub |
 | `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (+ `_latest.md`) | the briefer | decision briefs, one per escalation event and attempt |
 | `docs/roadmap.md`, `docs/decision_log.md`, `docs/checklists/`, `templates/`, `.claude/skills/handoff/SKILL.md` | `tagteam setup` / `tagteam upgrade` | the framework files (created once; skill/templates/checklists refreshed on upgrade) |

@@ -133,8 +133,59 @@ def main() -> int:
                                    "rateLimitType": "five_hour",
                                    "overageStatus": "allowed", "isUsingOverage": False}})
     else:
-        _emit({"type": "thread.started", "thread_id": "fake-thread"})
+        tid = "fake-thread"
+        if mode == "chat":
+            tid = sys.argv[sys.argv.index("resume") + 1] if "resume" in sys.argv else "fake-thread-" + str(os.getpid())
+        _emit({"type": "thread.started", "thread_id": tid})
     _sleep()
+
+    if mode == "chat":
+        # Phase 37 lead conversation: echo the message; prove continuity by
+        # quoting the previous message when the argv carries a resume token
+        # (`--resume <sid>` for claude, `resume <thread>` for codex) — the
+        # "memory" is a per-session file next to the capture path.
+        argv = sys.argv
+        sid = None
+        resumed = False
+        if flavor == "claude":
+            for flag in ("--resume", "--session-id"):
+                if flag in argv:
+                    sid = argv[argv.index(flag) + 1]
+                    resumed = flag == "--resume"
+        else:
+            if "resume" in argv:
+                sid = argv[argv.index("resume") + 1]
+                resumed = True
+            else:
+                sid = "fake-thread-" + str(os.getpid())
+        mem_dir = os.environ.get("FAKE_AGENT_MEMDIR") or os.getcwd()
+        mem = os.path.join(mem_dir, f".fake-mem-{sid}") if sid else None
+        prev = None
+        if resumed and mem and os.path.exists(mem):
+            with open(mem, encoding="utf-8") as f:
+                prev = f.read()
+        msg = prompt.strip().splitlines()[-1] if prompt.strip() else ""
+        reply = f"echo: {msg}" + (f" (earlier you said: {prev})" if prev else "")
+        if mem:
+            with open(mem, "w", encoding="utf-8") as f:
+                f.write(msg)
+        if os.environ.get("FAKE_AGENT_CHAT_HTML"):
+            reply = "<img src=x onerror=\"document.title='pwned'\"><script>document.title='pwned'</script>" + reply
+        _sleep()
+        if flavor == "claude":
+            _emit({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]},
+                   "session_id": sid})
+            _emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                   "session_id": sid, "total_cost_usd": 0.001,
+                   "usage": {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": 0,
+                             "cache_creation_input_tokens": 0},
+                   "result": reply})
+        else:
+            _emit({"type": "item.completed", "item": {"type": "agent_message", "text": reply}})
+            _emit({"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 7,
+                                                       "cached_input_tokens": 0,
+                                                       "cache_write_input_tokens": 0}})
+        return 0
 
     if mode.startswith("brief"):
         out_path = None

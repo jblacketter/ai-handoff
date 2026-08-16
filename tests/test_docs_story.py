@@ -29,7 +29,7 @@ DIAGRAM_CONTRACT = {
 }
 SVG_VIEWBOX = {"tagteam-loop.svg": "0 0 800 260", "tagteam-cycle.svg": "0 0 800 260",
                "tagteam-modes.svg": "0 0 800 240", "tagteam-headless.svg": "0 0 800 260"}
-SCREENSHOTS = ["cockpit-needs-you.png", "cockpit-usage.png", "hub.png"]
+SCREENSHOTS = ["cockpit-needs-you.png", "cockpit-usage.png", "hub.png", "cockpit-lead.png"]
 
 FENCE_RE = re.compile(r"^```(\w*)\s*$", re.M)
 MERMAID_TYPES = ("flowchart LR", "flowchart TD", "flowchart TB", "stateDiagram-v2", "sequenceDiagram")

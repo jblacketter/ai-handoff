@@ -24,7 +24,7 @@ from pathlib import Path
 # 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
 # ONLY — new tables / nullable columns, never renames or drops — so an
 # older release can still open a newer DB after a downgrade.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed",
                   "cancelled"}
@@ -32,7 +32,9 @@ INTERJECTION_ROLES = {"lead", "reviewer"}
 BRIEF_STATUSES = {"running", "ok", "partial", "failed", "abandoned"}
 BRIEF_KINDS = {"auto", "manual"}
 # Non-file-backed tables: preserved verbatim across `repair` rebuilds.
-NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs", "rate_limits")
+# parent-before-child order matters for restore_non_file_backed()
+NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs", "rate_limits",
+                          "conversations", "conversation_turns", "launches")
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
@@ -232,6 +234,57 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 );
 """
 
+# Phase 37 (3.1): lead conversations, their turns, and composite launch
+# claims. Additive: new tables + one nullable usage column.
+_SCHEMA_V7 = """
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    provider    TEXT,
+    session_id  TEXT,
+    title       TEXT,
+    last_ts     TEXT,
+    continuity  TEXT
+);
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id  TEXT NOT NULL,
+    n                INTEGER NOT NULL,
+    ts               TEXT NOT NULL,
+    user_text        TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    session_id       TEXT,
+    owner_pid        INTEGER,
+    owner_ident      TEXT,
+    usage_row_id     INTEGER,
+    log_path         TEXT,
+    events_path      TEXT,
+    finished_at      TEXT,
+    error            TEXT,
+    reply            TEXT,
+    continuity       TEXT,
+    UNIQUE(conversation_id, n)
+);
+CREATE TABLE IF NOT EXISTS launches (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    key              TEXT NOT NULL UNIQUE,
+    status           TEXT NOT NULL,
+    attempt          INTEGER NOT NULL DEFAULT 1,
+    intent_json      TEXT,
+    owner_pid        INTEGER,
+    owner_ident      TEXT,
+    watcher_pid      INTEGER,
+    watcher_ident    TEXT,
+    conversation_id  TEXT,
+    turn_n           INTEGER,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT,
+    finished_at      TEXT,
+    error            TEXT,
+    partial_json     TEXT
+);
+"""
+
 
 def _resolve_db_path(project_dir: str | Path | None) -> Path:
     """Resolve where the database lives.
@@ -285,6 +338,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_V6)
         conn.execute("PRAGMA user_version = 6")
         current = 6
+    if current < 7:
+        conn.executescript(_SCHEMA_V7)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(usage)").fetchall()}
+        if "kind" not in cols:
+            conn.execute("ALTER TABLE usage ADD COLUMN kind TEXT")
+        conn.execute("PRAGMA user_version = 7")
+        current = 7
     # Future migrations land here.
     # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
     # deliberately tolerated — additive-only migrations mean older code
@@ -542,7 +602,7 @@ _USAGE_COLS = [
     "ts", "phase", "type", "round", "role", "agent", "provider", "model",
     "status", "exit_code", "duration_ms", "input_tokens", "output_tokens",
     "cache_read_tokens", "cache_write_tokens", "cost_usd", "num_turns",
-    "session_id", "log_path",
+    "session_id", "log_path", "kind",
 ]
 
 
@@ -868,12 +928,157 @@ def latest_rate_limits(conn: sqlite3.Connection, provider: str | None = None) ->
     return rows
 
 
+# ---------- Phase 37: conversations / turns / launches ----------
+
+CONVERSATION_ID_RE = re.compile(r"^c-[0-9a-f]{12}$")
+TURN_STATUSES = ("running", "ok", "failed", "cancelled")
+LAUNCH_STATUSES = ("pending", "succeeded", "failed")
+
+
+def _row(cur) -> dict | None:
+    r = cur.fetchone()
+    if r is None:
+        return None
+    return dict(zip([d[0] for d in cur.description], r))
+
+
+def _rows(cur) -> list[dict]:
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def new_conversation(conn: sqlite3.Connection, *, id_: str, ts: str, provider: str | None,
+                     title: str | None = None) -> dict:
+    if not CONVERSATION_ID_RE.match(id_ or ""):
+        raise ValueError(f"invalid conversation id: {id_!r}")
+    conn.execute("INSERT INTO conversations (id, created_at, provider, title, last_ts) VALUES (?,?,?,?,?)",
+                 (id_, ts, provider, title, ts))
+    conn.commit()
+    return get_conversation(conn, id_)
+
+
+def get_conversation(conn: sqlite3.Connection, id_: str) -> dict | None:
+    if not CONVERSATION_ID_RE.match(id_ or ""):
+        return None
+    return _row(conn.execute("SELECT * FROM conversations WHERE id=?", (id_,)))
+
+
+def list_conversations(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    return _rows(conn.execute(
+        "SELECT c.*, (SELECT COUNT(*) FROM conversation_turns t WHERE t.conversation_id=c.id) AS turns "
+        "FROM conversations c ORDER BY COALESCE(last_ts, created_at) DESC, id LIMIT ?", (int(limit),)))
+
+
+def update_conversation(conn: sqlite3.Connection, id_: str, **fields) -> None:
+    allowed = {"session_id", "title", "last_ts", "continuity", "provider"}
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"unknown conversation fields: {sorted(bad)}")
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE conversations SET {sets} WHERE id=?", [*fields.values(), id_])
+    conn.commit()
+
+
+def add_conversation_turn(conn: sqlite3.Connection, *, conversation_id: str, ts: str,
+                          user_text: str, owner_pid: int | None, owner_ident: str | None,
+                          log_path: str | None = None, events_path: str | None = None) -> dict:
+    """Append the next turn (n = max+1) as `running`. Commits."""
+    n = conn.execute("SELECT COALESCE(MAX(n), 0) + 1 FROM conversation_turns WHERE conversation_id=?",
+                     (conversation_id,)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO conversation_turns (conversation_id, n, ts, user_text, status, owner_pid, owner_ident, log_path, events_path) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (conversation_id, n, ts, user_text, "running", owner_pid, owner_ident, log_path, events_path))
+    conn.execute("UPDATE conversations SET last_ts=? WHERE id=?", (ts, conversation_id))
+    conn.commit()
+    return get_conversation_turn(conn, conversation_id, n)
+
+
+def get_conversation_turn(conn: sqlite3.Connection, conversation_id: str, n: int) -> dict | None:
+    return _row(conn.execute("SELECT * FROM conversation_turns WHERE conversation_id=? AND n=?",
+                             (conversation_id, int(n))))
+
+
+def list_conversation_turns(conn: sqlite3.Connection, conversation_id: str) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM conversation_turns WHERE conversation_id=? ORDER BY n",
+                              (conversation_id,)))
+
+
+def finish_conversation_turn(conn: sqlite3.Connection, conversation_id: str, n: int, *,
+                             status: str, ts: str, session_id: str | None = None,
+                             usage_row_id: int | None = None, error: str | None = None,
+                             log_path: str | None = None, events_path: str | None = None,
+                             reply: str | None = None, continuity: str | None = None) -> None:
+    if status not in TURN_STATUSES or status == "running":
+        raise ValueError(f"invalid final turn status: {status!r}")
+    conn.execute(
+        "UPDATE conversation_turns SET status=?, finished_at=?, session_id=COALESCE(?, session_id), "
+        "usage_row_id=COALESCE(?, usage_row_id), error=?, log_path=COALESCE(?, log_path), "
+        "events_path=COALESCE(?, events_path), reply=COALESCE(?, reply), "
+        "continuity=COALESCE(?, continuity) WHERE conversation_id=? AND n=?",
+        (status, ts, session_id, usage_row_id, error, log_path, events_path, reply, continuity,
+         conversation_id, int(n)))
+    conn.commit()
+
+
+def running_conversation_turns(conn: sqlite3.Connection) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM conversation_turns WHERE status='running' ORDER BY id"))
+
+
+def claim_launch(conn: sqlite3.Connection, *, key: str, ts: str, intent_json: str,
+                 owner_pid: int, owner_ident: str | None) -> tuple[dict, bool]:
+    """Insert the launch claim for `key` if none exists. Returns (row,
+    created). Never overwrites an existing row (UNIQUE key)."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO launches (key, status, attempt, intent_json, owner_pid, owner_ident, created_at, updated_at) "
+        "VALUES (?, 'pending', 1, ?, ?, ?, ?, ?)", (key, intent_json, owner_pid, owner_ident, ts, ts))
+    created = cur.rowcount == 1
+    conn.commit()
+    return get_launch(conn, key), created
+
+
+def get_launch(conn: sqlite3.Connection, key: str) -> dict | None:
+    return _row(conn.execute("SELECT * FROM launches WHERE key=?", (key,)))
+
+
+def update_launch(conn: sqlite3.Connection, key: str, *, ts: str, **fields) -> None:
+    allowed = {"status", "watcher_pid", "watcher_ident", "conversation_id", "turn_n",
+               "finished_at", "error", "partial_json", "owner_pid", "owner_ident"}
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"unknown launch fields: {sorted(bad)}")
+    if "status" in fields and fields["status"] not in LAUNCH_STATUSES:
+        raise ValueError(f"invalid launch status: {fields['status']!r}")
+    fields["updated_at"] = ts
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE launches SET {sets} WHERE key=?", [*fields.values(), key])
+    conn.commit()
+
+
+def retry_launch(conn: sqlite3.Connection, key: str, *, ts: str, owner_pid: int,
+                 owner_ident: str | None) -> bool:
+    """Atomic failed → pending transition with attempt+1 and a new owner
+    (no second insert under the UNIQUE key). Returns True if transitioned."""
+    cur = conn.execute(
+        "UPDATE launches SET status='pending', attempt=attempt+1, owner_pid=?, owner_ident=?, "
+        "updated_at=?, finished_at=NULL, error=NULL WHERE key=? AND status='failed'",
+        (owner_pid, owner_ident, ts, key))
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def pending_launches(conn: sqlite3.Connection) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM launches WHERE status='pending' ORDER BY id"))
+
+
 def snapshot_non_file_backed(conn: sqlite3.Connection) -> dict[str, list[tuple]]:
     """Copy every row of the non-file-backed tables (repair preservation)."""
     out: dict[str, list[tuple]] = {}
     for table in NON_FILE_BACKED_TABLES:
         try:
-            cur = conn.execute(f"SELECT * FROM {table} ORDER BY id")
+            cur = conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
             cols = [d[0] for d in cur.description]
             out[table] = [tuple(cols)] + [tuple(r) for r in cur.fetchall()]
         except sqlite3.OperationalError:

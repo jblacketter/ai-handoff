@@ -58,7 +58,7 @@ If there is no state file, show: `Phase: — | Type: — | Round: — | Turn: �
   - If plan → "Plan approved! Implement, then `/handoff start [phase] impl`."
   - If impl and `run_mode == "full-roadmap"` → "Implementation approved! Watcher will auto-advance to next phase." (The watcher sets `turn: lead` for the next phase — lead runs `/handoff start [next-phase]`.)
   - If impl (single-phase) → "Implementation approved! Start next phase."
-- **Escalated:** "Escalated to human arbiter." The arbiter reads `tagteam brief` (a decision brief, if the escalation briefer is enabled) and rules with `tagteam rule approve|request-changes --content "…"` — or from the cockpit's Needs-you card (`tagteam serve --theme cockpit`), which runs the same command.
+- **Escalated:** "Escalated to human arbiter." The arbiter reads `tagteam brief` (a decision brief, if the escalation briefer is enabled) and rules with `tagteam rule approve|request-changes --content "…"`.
 - **Needs-human:** "Paused for human input." The arbiter answers with `tagteam rule answer --to lead|reviewer --content "…"` (the answer arrives as an interjection and the cycle is re-armed for that role). Do not hand-edit cycle files.
 - **Aborted:** "Cycle was aborted. See cycle file for reason."
 - **Not your turn:** "Waiting for [other agent]. Tell them to run `/handoff`."

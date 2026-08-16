@@ -341,6 +341,13 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Description:** README restructured around a visual narrative (mermaid flowcharts of the planning/review processes and 3.0 architecture), standalone SVG diagram exports in `docs/media/` shaped for the portfolio site's featured-app pages, and an outside-reader `docs/showcase.md` with real soak numbers. Portfolio repo itself is out of scope.
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 36
 
+### Phase 37: Cockpit Launchpad & Lead Conversation (3.1)
+- **Status:** ✅ Complete — impl approved 2026-08-16 (round 4; plan 5 rounds, flow designed first with the ux-design-guide skill from a user walk-through). Release **3.1.0** via PR from `phase-37-cockpit-launchpad`; tag after merge + green CI.
+- **Findings:** `docs/phases/cockpit-launchpad-lead-conversation-findings.md`
+- **Description:** bare `tagteam serve` opens the cockpit (Saloon behind `--theme saloon`), honest banner, port-collision refusal; a **Start** card that launches the interactive session or the headless watcher and hands the lead its first turn; a **Lead** panel — talk to the lead agent from the cockpit through its own CLI (resumable, streamed, transcript on disk, same permissions and lead lock as headless turns) so brainstorm → plan → handoff → follow-up → close-out all happen where the arbiter already is; `tagteam lead` CLI twin; hub rows link to Start.
+- **Plan:** `docs/phases/cockpit-launchpad-lead-conversation-31.md`
+- **Source:** arbiter walk-through 2026-08-16 (idle cockpit dead-ends; two servers shadowing on one port; "I want to talk to my lead and start one from here").
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
@@ -351,10 +358,15 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
 ### Licensing & attribution decision
-- **Status:** Decided 2026-08-15 — **stay open, keep MIT.** `CITATION.cff` added and README License section now asks for a link back.
-- **Context:** Repo was already public and MIT-licensed (`LICENSE`, `pyproject.toml`, PyPI classifier), and every release is on PyPI as an sdist, so going private would have hidden only *future* work, not retracted anything. Public provenance (commit history, release dates, handoff logs) plus MIT's attribution requirement is the real protection against uncredited copying, and public proof is the whole point of the portfolio plan.
-- **Options considered and rejected:** Apache-2.0 (adds patent grant + "state your changes" clause — revisit only if stronger attribution language becomes necessary); AGPL/GPL (deters commercial forks but also the internal adoption that builds reputation); private or private-shared (kills portfolio value without retracting published versions).
+- **Status:** Done 2026-08-16 — **relicensed MIT → Apache-2.0** (`LICENSE` replaced, `NOTICE` added, `pyproject.toml` license + classifier, `CITATION.cff`, README License section). Takes effect from the next release; 3.1.0 and earlier stay MIT on PyPI (nothing published can be retracted). Not run through a handoff cycle — mechanical, no code paths touched.
+- **History:** 2026-08-15 interim decision was "stay open, keep MIT" with `CITATION.cff` + README link-back; that was explicitly a placeholder pending a stronger-attribution license. Apache-2.0 chosen for the express patent grant, the "state your changes" clause on modified files, the NOTICE-file attribution that must travel with redistributions, and the trademark clause — all while staying permissive so internal adoption (the reputation path) isn't deterred.
+- **Context:** Repo was already public and MIT-licensed, and every release is on PyPI as an sdist, so going private would have hidden only *future* work. Public provenance (commit history, release dates, handoff logs) plus a stronger attribution license is the protection against uncredited copying, and public proof is the whole point of the portfolio plan.
+- **Options considered and rejected:** AGPL/GPL (deters commercial forks but also the internal adoption that builds reputation); private or private-shared (kills portfolio value without retracting published versions).
 - **Open follow-up:** bump `version` / `date-released` in `CITATION.cff` as part of each release (consider folding into the release checklist).
+
+### CI: take the Windows job out of the per-PR gate
+- **Status:** Not started — noted 2026-08-16 (Phase 37 PR)
+- **Motivation:** `pytest (windows-latest)` takes ~7–9 min per PR vs ~2 min for Ubuntu and Windows is not a current priority. Options: run it on `workflow_dispatch` / nightly / on `v*` tags only, or keep it non-required. Verify Windows separately once macOS/Ubuntu are green. Keep the Windows code paths (procs, headless, watcher pidfile, port-lease fallback) — this is about per-PR cost, not support.
 
 ### Terminal.app backend (macOS, optional)
 - **Status:** Not started
