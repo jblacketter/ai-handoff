@@ -1,7 +1,7 @@
 {
   "state": "in-progress",
-  "ready_for": "lead",
-  "round": 4,
+  "ready_for": "reviewer",
+  "round": 5,
   "phase": "cockpit-launchpad-lead-conversation-31",
   "type": "plan",
   "lead": "Claude",
