@@ -358,9 +358,10 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
 ### Licensing & attribution decision
-- **Status:** Decided 2026-08-15 — **stay open, keep MIT.** `CITATION.cff` added and README License section now asks for a link back.
-- **Context:** Repo was already public and MIT-licensed (`LICENSE`, `pyproject.toml`, PyPI classifier), and every release is on PyPI as an sdist, so going private would have hidden only *future* work, not retracted anything. Public provenance (commit history, release dates, handoff logs) plus MIT's attribution requirement is the real protection against uncredited copying, and public proof is the whole point of the portfolio plan.
-- **Options considered and rejected:** Apache-2.0 (adds patent grant + "state your changes" clause — revisit only if stronger attribution language becomes necessary); AGPL/GPL (deters commercial forks but also the internal adoption that builds reputation); private or private-shared (kills portfolio value without retracting published versions).
+- **Status:** Done 2026-08-16 — **relicensed MIT → Apache-2.0** (`LICENSE` replaced, `NOTICE` added, `pyproject.toml` license + classifier, `CITATION.cff`, README License section). Takes effect from the next release; 3.1.0 and earlier stay MIT on PyPI (nothing published can be retracted). Not run through a handoff cycle — mechanical, no code paths touched.
+- **History:** 2026-08-15 interim decision was "stay open, keep MIT" with `CITATION.cff` + README link-back; that was explicitly a placeholder pending a stronger-attribution license. Apache-2.0 chosen for the express patent grant, the "state your changes" clause on modified files, the NOTICE-file attribution that must travel with redistributions, and the trademark clause — all while staying permissive so internal adoption (the reputation path) isn't deterred.
+- **Context:** Repo was already public and MIT-licensed, and every release is on PyPI as an sdist, so going private would have hidden only *future* work. Public provenance (commit history, release dates, handoff logs) plus a stronger attribution license is the protection against uncredited copying, and public proof is the whole point of the portfolio plan.
+- **Options considered and rejected:** AGPL/GPL (deters commercial forks but also the internal adoption that builds reputation); private or private-shared (kills portfolio value without retracting published versions).
 - **Open follow-up:** bump `version` / `date-released` in `CITATION.cff` as part of each release (consider folding into the release checklist).
 
 ### CI: take the Windows job out of the per-PR gate

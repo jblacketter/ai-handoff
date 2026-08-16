@@ -285,7 +285,10 @@ tagteam --help
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Tagteam is open source and free to use, modify, and
-redistribute; the license asks only that the copyright notice travels with the code.
-If tagteam is useful to you, a link back to this repository is appreciated
-(see [CITATION.cff](CITATION.cff) or GitHub's "Cite this repository" button).
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Tagteam is open
+source and free to use, modify, and redistribute. The license asks that the copyright
+and NOTICE attribution travel with the code, that modified files say they were changed,
+and it includes an express patent grant. If tagteam is useful to you, a link back to
+this repository is appreciated (see [CITATION.cff](CITATION.cff) or GitHub's "Cite this
+repository" button). Releases up to and including 3.1.0 were published under MIT and
+remain available under that license.
