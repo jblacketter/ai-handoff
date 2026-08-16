@@ -329,7 +329,8 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 34
 
 ### Phase 35: Cross-Project Hub (3.0 arc)
-- **Status:** Not started
+- **Status:** 📝 Planning — plan cycle opened 2026-08-16 (branch `phase-35-cross-project-hub`; UX flow designed with the ux-design-guide skill: Needs you → Waiting → Quiet, cockpits mounted at `/p/<id>/`). Release 0.12.0 via PR.
+- **Plan:** `docs/phases/cross-project-hub-30-arc.md`.
 - **Description:** `tagteam hub` — one surface over every registered project: waiting turns, pending escalations, stale cycles, aggregate token burn against the shared subscription pool.
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 35
 
