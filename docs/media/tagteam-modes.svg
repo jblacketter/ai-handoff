@@ -15,7 +15,7 @@
   <path d="M590 102 L606 102" stroke="#8899aa" stroke-width="1.5" marker-end="url(#ar)"/>
   <!-- Step 4: + Cockpit & Hub -->
   <rect x="608" y="20" width="176" height="80" rx="10" fill="#1a2332" stroke="#a78bfa" stroke-width="1.5"/>
-  <text class="node" x="624" y="46" fill="#c6b5fc" font-family="monospace" font-size="15" font-weight="bold"><tspan x="624">+ Cockpit &amp; Hub</tspan> <tspan x="624" dy="20" font-size="11" font-weight="normal" fill="#e4ecf0">watch and steer</tspan> <tspan x="624" dy="16" font-size="11" font-weight="normal" fill="#e4ecf0">from the browser</tspan></text>
+  <text class="node" x="624" y="46" fill="#c6b5fc" font-family="monospace" font-size="15" font-weight="bold"><tspan x="624">+ Cockpit &amp; Hub</tspan> <tspan x="624" dy="20" font-size="11" font-weight="normal" fill="#e4ecf0">talk to the lead, launch,</tspan> <tspan x="624" dy="16" font-size="11" font-weight="normal" fill="#e4ecf0">watch and steer</tspan></text>
   <!-- footers -->
   <text x="20" y="236" fill="#8899aa" font-family="monospace" font-size="9">zero setup</text>
   <text x="216" y="236" fill="#8899aa" font-family="monospace" font-size="9">notify · iterm2 · tmux</text>

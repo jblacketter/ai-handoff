@@ -31,10 +31,11 @@ You choose how much runs by itself — paste `/handoff` between two terminals
 yourself, let `tagteam watch` drive the terminals, or go **headless**, where
 each turn is a fresh `claude -p` / `codex exec` process with a bounded
 context and its token usage recorded. A browser **cockpit** (one project)
-and a **hub** (every project you have set up) show what needs you, and let
-you rule, pause or interject with the same CLI commands.
+and a **hub** (every project you have set up) show what needs you, start
+the next step, let you talk to the lead, and let you rule, pause or
+interject with the same CLI commands.
 
-<p align="center"><img src="media/tagteam-modes.svg" alt="A ladder rising left to right: Manual (you paste /handoff between two agents), Watched (tagteam watch drives your terminals), Headless (each turn is a fresh claude -p / codex exec), + Cockpit & Hub (watch and steer from the browser)" width="100%"></p>
+<p align="center"><img src="media/tagteam-modes.svg" alt="A ladder rising left to right: Manual (you paste /handoff between two agents), Watched (tagteam watch drives your terminals), Headless (each turn is a fresh claude -p / codex exec), + Cockpit & Hub (talk to the lead, launch, watch and steer)" width="100%"></p>
 
 ## What one phase looks like
 

@@ -342,7 +342,8 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 36
 
 ### Phase 37: Cockpit Launchpad & Lead Conversation (3.1)
-- **Status:** In progress — plan cycle opened 2026-08-16 (branch `phase-37-cockpit-launchpad`; release **3.1.0**). Flow designed first with the ux-design-guide skill from a user walk-through.
+- **Status:** Implementation in review — plan approved 2026-08-16 (round 5; flow designed first with the ux-design-guide skill from a user walk-through), impl cycle opened 2026-08-16 on branch `phase-37-cockpit-launchpad`; release **3.1.0** via PR.
+- **Findings:** `docs/phases/cockpit-launchpad-lead-conversation-findings.md`
 - **Description:** bare `tagteam serve` opens the cockpit (Saloon behind `--theme saloon`), honest banner, port-collision refusal; a **Start** card that launches the interactive session or the headless watcher and hands the lead its first turn; a **Lead** panel — talk to the lead agent from the cockpit through its own CLI (resumable, streamed, transcript on disk, same permissions and lead lock as headless turns) so brainstorm → plan → handoff → follow-up → close-out all happen where the arbiter already is; `tagteam lead` CLI twin; hub rows link to Start.
 - **Plan:** `docs/phases/cockpit-launchpad-lead-conversation-31.md`
 - **Source:** arbiter walk-through 2026-08-16 (idle cockpit dead-ends; two servers shadowing on one port; "I want to talk to my lead and start one from here").
