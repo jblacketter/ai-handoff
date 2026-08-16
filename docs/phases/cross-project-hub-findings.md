@@ -82,13 +82,37 @@ designed first with the `ux-design-guide` skill). Branch
   filesystem timestamp tick was invisible (caught by the signature test).
   Small rewritten-in-place files (state, cycle status, registry) are now
   content-hashed; growing files (rounds, DB, WAL) keep size+mtime(ns).
+- **Round 2 (reviewer r1):** (1) *broken data is visible* — `_read_json`
+  distinguishes absence (None) from a file that exists but is unreadable /
+  malformed / not an object (`ProjectDataError`), `_query` treats only
+  "no such table/column" (older schema) as expected absence and raises on
+  corruption, `read_only_connect` probes `sqlite_master` and raises for a
+  non-database file; `project_summary` puts the message on the row
+  (`error`), the row is still classified from whatever was readable, and
+  aggregates skip broken projects; tests require a non-empty error for a
+  corrupt DB and malformed/unreadable state/inflight, and nulls (no error)
+  for a v3 schema. (2) *signature covers displayed marker content* — the
+  pause marker, `inflight.json` and the watcher pidfile are content-hashed
+  (a same-presence rewrite of reason/outcome, or started_at/role/agent, or
+  the pidfile mode, fires), and the watcher signal carries every displayed
+  field (running, pid, mode, source, stale_pidfile); tests for each. (3)
+  *unregistering unmounts* — `HubContext.router_for` re-validates membership
+  against the current registry on every call, evicts stale entries and
+  rebuilds when an id maps to a different path; a real-server test opens a
+  mount, removes the entry, and asserts GET → 404, authenticated POST → 404
+  with no mutation, `mounted` no longer lists it, and re-adding mounts again.
+  (4) *the window is global* — `shared_rate_limits` runs over EVERY readable
+  registered DB (hidden included, missing dirs excluded); burn totals stay
+  visibility-scoped and the payload/README say so; test with the only
+  `five_hour` signal in a hidden project. The dogfood note below is
+  corrected accordingly.
 - **`ui`/`python-behave` ages** are computed from `updated_at`, which is
   what the state records; both are `abandoned?` on the real registry (134
   d, 8 d) with the `tagteam watch --mode headless` hint.
 
 ## Verification
 
-- `pytest`: **895 passed, 5 skipped**. New: `tests/test_hub_api.py` (14 —
+- `pytest`: **899 passed, 5 skipped** (round 2). New: `tests/test_hub_api.py` (17 —
   AST ban, read-only never-creates/never-migrates for v3/v4/v5, corrupt DB
   → row error, reader vs writer `BEGIN IMMEDIATE`, classification incl.
   legacy/missing/scratch, ranking + stale/abandoned boundary + live long
@@ -125,8 +149,11 @@ designed first with the `ux-design-guide` skill). Branch
    with `Open` on each. Registering this repo while the page was open
    fired the hub SSE (registry signal) and the strip re-rendered live
    (`1 live` = this repo's iterm2 watcher found by process scan; burn from
-   its 26 usage rows). `window: n/a` because the only project with a
-   `rate_limits` row is a hidden scratch dir — correct by design.
+   its 26 usage rows). At round 1 the strip showed `window: n/a` because the
+   only project with a `rate_limits` row was a hidden scratch dir and the
+   window was (wrongly) visibility-scoped; since round 2 the window is read
+   from every registered DB, so that signal shows (`claude five hour:
+   allowed → 22:20`).
 3. **Open → mounted cockpit** `/p/ui-b2e3df/`: base meta + assets under
    the mount, "← Hub" link, that project's Feed (an April `SUBMIT_FOR_
    REVIEW`), the Now strip `turn: reviewer · owed 134d…`, and the Needs-you

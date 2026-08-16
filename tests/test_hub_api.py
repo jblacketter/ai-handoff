@@ -112,10 +112,52 @@ class TestHardRules:
         d = _mk(tmp_path, "bad", state=_state())
         (d / ".tagteam").mkdir(); (d / ".tagteam" / "tagteam.db").write_bytes(b"not a database at all" * 10)
         s = hub_api.project_summary(d, now=NOW)
-        # sqlite raises DatabaseError on first query → captured in `error`, row still has state
-        assert s["phase"] == "p" and (s["error"] is None or "Database" in s["error"] or "file is not a database" in s["error"])
+        assert s["phase"] == "p"                                    # state still read
+        assert s["error"] and "db:" in s["error"]                   # corruption is visible
         p = hub_api.hub_payload([str(d)], now=NOW, scratch_prefixes=NO_SCRATCH)
         assert p["totals"]["projects"] == 1
+        row = [r for g in ("needs_you", "waiting", "quiet") for r in p["groups"][g]][0]
+        assert row["error"] and row["group"] == "waiting"           # isolated: still classified from the state
+        # aggregates skip the broken project, never raise
+        assert hub_api.aggregate_usage([str(d)], now=NOW)["all"]["turns"] == 0
+        assert hub_api.shared_rate_limits([str(d)]) == []
+
+    def test_malformed_or_unreadable_state_is_a_row_error(self, tmp_path):
+        d = _mk(tmp_path, "m")
+        (d / "handoff-state.json").write_text("{not json")
+        s = hub_api.project_summary(d, now=NOW)
+        assert s["error"] and "malformed JSON" in s["error"] and s["state"] is None
+        row = hub_api.classify_row(s)
+        assert row["group"] == "quiet" and row["error"]              # never presented as healthy
+        p = hub_api.hub_payload([str(d)], now=NOW, scratch_prefixes=NO_SCRATCH)
+        assert p["groups"]["quiet"][0]["error"]
+        (d / "handoff-state.json").write_text("[1, 2]")
+        assert "expected a JSON object" in hub_api.project_summary(d, now=NOW)["error"]
+        # malformed pause / inflight markers surface too, state still read
+        (d / "handoff-state.json").write_text(json.dumps(_state()))
+        h.turns_dir(d).mkdir(parents=True); h.inflight_path(d).write_text("{{")
+        s = hub_api.project_summary(d, now=NOW)
+        assert s["phase"] == "p" and s["error"] and "inflight.json" in s["error"]
+        # the signature tolerates it (row error is a signal too) and does not raise
+        sig = hub_api.hub_signature([str(d)], None, procs_snapshot=[])
+        assert sig["projects"][str(d)]["inflight_file"] is not None
+        (d / "handoff-state.json").write_text("{nope")
+        sig = hub_api.hub_signature([str(d)], None, procs_snapshot=[])
+        assert "state_error" in sig["projects"][str(d)]
+
+    def test_old_schema_absence_stays_null_not_error(self, tmp_path):
+        """A v3 DB has no `briefs` / `rate_limits` tables: that is expected
+        absence (nulls), not an error."""
+        e = _mk(tmp_path, "v3", state=_state(status="escalated", turn=None))
+        _cycle_status(e, "p", "plan", "escalated")
+        dbp = e / ".tagteam" / "tagteam.db"; dbp.parent.mkdir()
+        raw = sqlite3.connect(dbp)
+        raw.executescript(db._SCHEMA_V1); raw.executescript(db._SCHEMA_V3)
+        raw.execute("PRAGMA user_version = 3"); raw.commit(); raw.close()
+        s = hub_api.project_summary(e, now=NOW)
+        assert s["error"] is None and s["brief_ready"] is False and s["brief_attempts"] == []
+        assert s["usage"]["turns"] == 0
+        assert hub_api.shared_rate_limits([str(e)]) == []
 
     def test_reader_does_not_block_on_writer_transaction(self, project):
         _init_cycle(project)
@@ -303,6 +345,37 @@ class TestAggregates:
         rl = {r["kind"]: r for r in hub_api.shared_rate_limits([str(b), str(a)])}
         assert rl["five_hour"]["project"] == str(b)
 
+    def test_shared_window_reads_hidden_projects_too(self, tmp_path):
+        """The subscription is one pool: the only/newest signal living in a
+        HIDDEN registered project (scratch path, no tagteam.yaml) still wins."""
+        shown = _mk(tmp_path, "shown", state=_state())
+        hidden = _mk(tmp_path, "hidden", yaml=False)                # no yaml, no state → hidden
+        cs = db.connect(project_dir=str(shown)); ch = db.connect(project_dir=str(hidden))
+        try:
+            db.upsert_rate_limit(ch, provider="claude", kind="five_hour", status="allowed_warning", resets_at="rh",
+                                 payload=None, ts="2026-08-16T11:00:00+00:00")
+            db.upsert_rate_limit(cs, provider="claude", kind="seven_day", status="allowed", resets_at="rs",
+                                 payload=None, ts="2026-08-16T10:00:00+00:00")
+        finally:
+            cs.close(); ch.close()
+        p = hub_api.hub_payload([str(shown), str(hidden)], now=NOW, procs_snapshot=[], scratch_prefixes=NO_SCRATCH)
+        assert p["registry"]["hidden"] == 1
+        by = {r["kind"]: r for r in p["rate_limits"]}
+        assert by["five_hour"]["project"] == str(hidden) and by["five_hour"]["status"] == "allowed_warning"
+        assert by["seven_day"]["project"] == str(shown)
+        # a scratch-prefixed hidden project counts as well
+        p = hub_api.hub_payload([str(shown), str(hidden)], now=NOW, procs_snapshot=[],
+                                scratch_prefixes=(str(hidden.parent) + "/hidden",))
+        assert {r["kind"] for r in p["rate_limits"]} == {"five_hour", "seven_day"}
+        # burn totals stay visibility-scoped (documented): hidden usage is not summed
+        ch = db.connect(project_dir=str(hidden))
+        try:
+            db.add_usage(ch, ts=NOW.isoformat(), status="ok", input_tokens=999)
+        finally:
+            ch.close()
+        p = hub_api.hub_payload([str(shown), str(hidden)], now=NOW, procs_snapshot=[], scratch_prefixes=NO_SCRATCH)
+        assert p["usage"]["all"]["input_tokens"] == 0
+
 
 # ---------------------------------------------------------------------------
 # signature
@@ -325,18 +398,26 @@ class TestSignature:
         finally:
             conn.close()
         s3 = sid(); assert s3 != s2
-        # pause marker
-        controls.pause_command([], project_root=project); s4 = sid(); assert s4 != s3
+        # pause marker appears…
+        controls.pause_command(["--reason", "first"], project_root=project); s4 = sid(); assert s4 != s3
+        # …and is REWRITTEN in place with a different reason/outcome (same presence)
+        h.write_pause(project, {"reason": "other", "outcome": "crash", "ts": h._now_iso()})
+        s4b = sid(); assert s4b != s4
+        s4 = s4b
         # inflight appears / dies
         h.turns_dir(project).mkdir(parents=True, exist_ok=True)
-        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": os.getpid(), "started_at": "t"}))
+        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": os.getpid(), "started_at": "t", "role": "lead", "agent": "Claude"}))
         s5 = sid(); assert s5 != s4
-        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": 999999, "started_at": "t"}))
-        s6 = sid(); assert s6 != s5
-        # watcher pidfile appears / dies
+        # displayed metadata changes with the same stem/pid (started_at / role / agent)
+        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": os.getpid(), "started_at": "t2", "role": "reviewer", "agent": "Codex"}))
+        s5b = sid(); assert s5b != s5
+        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": 999999, "started_at": "t2", "role": "reviewer", "agent": "Codex"}))
+        s6 = sid(); assert s6 != s5b
+        # watcher pidfile appears / changes mode (same pid) / dies
         watcher_mod.write_pidfile(project, "headless"); s7 = sid(); assert s7 != s6
-        watcher_mod.pidfile_path(project).write_text(json.dumps({"pid": 999999, "mode": "headless"}))
-        s8 = sid(); assert s8 != s7
+        watcher_mod.write_pidfile(project, "iterm2"); s7b = sid(); assert s7b != s7
+        watcher_mod.pidfile_path(project).write_text(json.dumps({"pid": 999999, "mode": "iterm2"}))
+        s8 = sid(); assert s8 != s7b
         # registry edit
         reg.write_text(json.dumps([str(a)])); s9 = sid(); assert s9 != s8
         # unchanged → same
@@ -360,7 +441,8 @@ class TestSignature:
                 time.sleep(0.2); s1 = hub_api.signature_id(hub_api.hub_signature([str(a)], None, procs_snapshot=snap()))
             assert s1 != s0
             sig = hub_api.hub_signature([str(a)], None, procs_snapshot=snap())
-            assert sig["projects"][str(a)]["watcher"] == [True, proc.pid]
+            assert sig["projects"][str(a)]["watcher"][:2] == [True, proc.pid]
+            assert sig["projects"][str(a)]["watcher"][2:] == ["notify", "process-scan", False]
         finally:
             proc.kill(); proc.wait()
         s2 = hub_api.signature_id(hub_api.hub_signature([str(a)], None, procs_snapshot=snap()))

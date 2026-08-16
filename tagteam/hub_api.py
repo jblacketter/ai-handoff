@@ -105,15 +105,34 @@ def read_only_connect(project_dir: str | Path) -> sqlite3.Connection | None:
     uri = "file:" + db_path.resolve().as_posix() + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=1.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        raise ProjectDataError(f"db: {e}")
     return conn
 
 
+class ProjectDataError(Exception):
+    """A project file exists but cannot be read/parsed (malformed JSON,
+    unreadable, corrupt DB). Distinct from *absence*, which is normal
+    (older projects, no cycle yet) and yields nulls."""
+
+
 def _read_json(path: Path) -> dict | None:
+    """Parsed dict, None if the file is ABSENT; `ProjectDataError` if it
+    exists but is unreadable / not valid JSON / not an object."""
+    if not path.exists():
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
-    except (OSError, ValueError):
-        return None
+    except OSError as e:
+        raise ProjectDataError(f"{path.name}: unreadable ({e.__class__.__name__})")
+    except ValueError as e:
+        raise ProjectDataError(f"{path.name}: malformed JSON ({e})")
+    if not isinstance(data, dict):
+        raise ProjectDataError(f"{path.name}: expected a JSON object")
+    return data
 
 
 def read_state_file(project_dir: str | Path) -> dict | None:
@@ -164,10 +183,18 @@ def _event_key(phase, ctype, status, last) -> str | None:
 
 
 def _query(conn, sql, params=()) -> list[sqlite3.Row]:
+    """Run a read. A missing table/column (an older schema) is EXPECTED →
+    `[]`; anything else (corrupt file, locked beyond timeout, I/O) is a
+    `ProjectDataError` so the row shows it."""
     try:
         return conn.execute(sql, params).fetchall()
-    except sqlite3.Error:
-        return []
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "no such table" in msg or "no such column" in msg:
+            return []
+        raise ProjectDataError(f"db: {e}")
+    except sqlite3.DatabaseError as e:
+        raise ProjectDataError(f"db: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -200,12 +227,12 @@ def project_summary(project_dir: str | Path, *, now: datetime | None = None,
         if row["phase"] and row["type"]:
             cyc = read_cycle_status_file(root, row["phase"], row["type"])
             row["cycle_state"] = (cyc or {}).get("state")
-        paused = h.read_pause(root)
+        paused = _read_json(h.pause_path(root))
         if paused is not None:
             row["paused"] = {"reason": paused.get("reason"), "by": paused.get("by"),
                              "outcome": paused.get("outcome"), "ts": paused.get("ts"),
                              "age_s": _age_s(paused.get("ts"), now)}
-        inflight = h.read_inflight(root)
+        inflight = _read_json(h.inflight_path(root))
         if inflight is not None:
             pid = inflight.get("pid")
             alive = None
@@ -247,6 +274,8 @@ def project_summary(project_dir: str | Path, *, now: datetime | None = None,
                         pass  # state updated_at remains the "activity" clock; usage is informational
             finally:
                 conn.close()
+    except ProjectDataError as e:  # broken data → visible on the row
+        row["error"] = str(e)
     except Exception as e:  # contract: never raise
         row["error"] = f"{type(e).__name__}: {e}"
     return row
@@ -334,7 +363,10 @@ def aggregate_usage(project_dirs: list[str], *, now: datetime | None = None,
     out = {w: {"turns": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
                "cost_usd": 0.0, "priced_turns": 0, "projects": 0} for w in windows}
     for d in project_dirs:
-        conn = read_only_connect(d)
+        try:
+            conn = read_only_connect(d)
+        except ProjectDataError:
+            continue  # the row itself carries the error
         if conn is None:
             continue
         try:
@@ -359,6 +391,8 @@ def aggregate_usage(project_dirs: list[str], *, now: datetime | None = None,
                     b["priced_turns"] += r["pc"]
                     if r["n"]:
                         b["projects"] += 1
+        except ProjectDataError:
+            pass
         finally:
             conn.close()
     for b in out.values():
@@ -373,11 +407,18 @@ def shared_rate_limits(project_dirs: list[str]) -> list[dict]:
     wins). [{provider, kind, status, resets_at, ts, project}]"""
     best: dict[tuple[str, str], dict] = {}
     for d in project_dirs:
-        conn = read_only_connect(d)
+        try:
+            conn = read_only_connect(d)
+        except ProjectDataError:
+            continue
         if conn is None:
             continue
         try:
-            for r in _query(conn, "SELECT provider, kind, status, resets_at, ts FROM rate_limits"):
+            rows = _query(conn, "SELECT provider, kind, status, resets_at, ts FROM rate_limits")
+        except ProjectDataError:
+            rows = []
+        try:
+            for r in rows:
                 key = (r["provider"], r["kind"])
                 cand = {"provider": r["provider"], "kind": r["kind"], "status": r["status"],
                         "resets_at": r["resets_at"], "ts": r["ts"], "project": str(d)}
@@ -423,6 +464,10 @@ def hub_payload(paths: list[str], *, now: datetime | None = None, show_all: bool
     groups["waiting"].sort(key=_sort_key_waiting)
     groups["quiet"].sort(key=_sort_key_quiet)
     live = sum(1 for g in ("needs_you", "waiting", "quiet") for r in groups[g] if r.get("live"))
+    # The subscription window is ONE pool per provider: read the signal from
+    # every readable registered project DB, hidden or not (display
+    # visibility scopes the list and the burn totals, not the account).
+    all_dirs = [e["path"] for e in entries if e["kind"] != "missing"]
     return {
         "ts": now.isoformat(),
         "registry": {"total": len(entries), "visible": len(visible_dirs),
@@ -432,8 +477,8 @@ def hub_payload(paths: list[str], *, now: datetime | None = None, show_all: bool
                    "needs_you": len(groups["needs_you"]), "waiting": len(groups["waiting"]),
                    "quiet": len(groups["quiet"]),
                    "stale": sum(1 for r in groups["waiting"] if r.get("stale"))},
-        "usage": aggregate_usage(visible_dirs, now=now),
-        "rate_limits": shared_rate_limits(visible_dirs),
+        "usage": aggregate_usage(visible_dirs, now=now),          # burn: visible projects
+        "rate_limits": shared_rate_limits(all_dirs),               # window: every registered project
         "thresholds": {"stale_after_s": stale_after_s, "abandoned_after_s": abandoned_after_s},
     }
 
@@ -485,10 +530,18 @@ def hub_signature(paths: list[str], registry_file: Path | None = None,
             sig["projects"][raw] = None
             continue
         ps: dict = {"state": _hash_sig(root / "handoff-state.json"),
-                    "paused": (root / ".tagteam" / "headless-paused.json").exists(),
+                    # marker files are rewritten in place (reason/outcome, pid,
+                    # stem, started_at, role, agent…): hash their content
+                    "paused": _hash_sig(root / ".tagteam" / "headless-paused.json"),
+                    "inflight_file": _hash_sig(h.inflight_path(root)),
+                    "pidfile": _hash_sig(watcher_mod.pidfile_path(root)),
                     "db": _stat_sig(root / ".tagteam" / "tagteam.db"),
                     "wal": _stat_sig(root / ".tagteam" / "tagteam.db-wal")}
-        st = read_state_file(root)
+        try:
+            st = read_state_file(root)
+        except ProjectDataError as e:
+            st = None
+            ps["state_error"] = str(e)
         if st and st.get("phase") and st.get("type"):
             for d in (root / "docs" / "handoffs", root / ".tagteam" / "legacy"):
                 sp = d / f"{st['phase']}_{st['type']}_status.json"
@@ -505,11 +558,12 @@ def hub_signature(paths: list[str], registry_file: Path | None = None,
             ps["inflight"] = None
         rec = watcher_mod.read_pidfile(root)
         wpid = rec.get("pid") if rec else None
-        ps["pidfile"] = {"pid": wpid, "alive": bool(isinstance(wpid, int) and wpid > 0
-                                                    and procs.pid_alive(wpid))} if rec else None
+        ps["pidfile_alive"] = bool(isinstance(wpid, int) and wpid > 0 and procs.pid_alive(wpid)) if rec else None
         try:
             ws = capi.watcher_status(root, inflight, procs_snapshot=procs_snapshot)
-            ps["watcher"] = [ws.get("running"), ws.get("pid")]
+            # every watcher field the row displays
+            ps["watcher"] = [ws.get("running"), ws.get("pid"), ws.get("mode"), ws.get("source"),
+                             ws.get("stale_pidfile")]
         except Exception:
             ps["watcher"] = None
         sig["projects"][raw] = ps
