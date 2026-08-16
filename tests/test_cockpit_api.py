@@ -354,9 +354,13 @@ class TestScopeDiff:
 # ---------------------------------------------------------------------------
 
 def _sleeper(cwd: Path, *extra_argv: str) -> subprocess.Popen:
-    """A process whose argv says `tagteam watch` (no project path) and whose
-    cwd is `cwd` — Tagteam's own watcher launch shape."""
-    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", *extra_argv],
+    """A process with the console-script watcher shape — argv
+    `python …/bin/tagteam watch --mode X` (no project path) — whose cwd is
+    `cwd`: Tagteam's own launch shape."""
+    fake_bin = cwd / ".fakebin"; fake_bin.mkdir(exist_ok=True)
+    script = fake_bin / "tagteam"
+    script.write_text("import time; time.sleep(120)\n")
+    return subprocess.Popen([sys.executable, str(script), *extra_argv],
                             cwd=str(cwd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -398,17 +402,20 @@ class TestWatcherLiveness:
         cwd (no project path on argv) is detected; the same shape started
         elsewhere is not."""
         other = tmp_path / "elsewhere"; other.mkdir()
-        far = _sleeper(other, "tagteam", "watch", "--mode", "iterm2")
+        far = _sleeper(other, "watch", "--mode", "iterm2")
         try:
             st = capi.watcher_status(project)
             assert st["running"] is False, st
-            near = _sleeper(project, "tagteam", "watch", "--mode", "iterm2")
+            near = _sleeper(project, "watch", "--mode", "iterm2")
             try:
                 deadline = time.monotonic() + 5
                 st = capi.watcher_status(project)
                 while not st["running"] and time.monotonic() < deadline:
                     time.sleep(0.2); st = capi.watcher_status(project)
-                assert st["running"] is True and st["pid"] == near.pid, st
+                diag = {"status": st, "near": near.pid, "near_cwd": procs.cwd(near.pid),
+                        "project": str(project.resolve()),
+                        "scan": procs.list_processes(capi.WATCH_ARGV_RE.pattern)}
+                assert st["running"] is True and st["pid"] == near.pid, diag
                 assert st["source"] == "process-scan" and st["mode"] == "iterm2"
                 assert capi.now_payload(project)["watcher"]["pid"] == near.pid
             finally:
@@ -418,6 +425,18 @@ class TestWatcherLiveness:
         # gone → not running
         st = capi.watcher_status(project)
         assert st["running"] is False
+
+    def test_watch_argv_shapes(self):
+        rx = capi.WATCH_ARGV_RE
+        assert rx.search("/Users/x/proj/.venv/bin/python -m tagteam watch --mode iterm2")
+        assert rx.search("/usr/bin/python3.12 /Users/x/.local/bin/tagteam watch --mode headless --interval 5")
+        assert rx.search("tagteam watch")
+        assert rx.search(r"C:\py\python.exe -m tagteam watch --mode notify")
+        # not watchers: a shell whose text mentions both words, `tagteam serve`, `tagteam tail`
+        assert not rx.search('/bin/zsh -c pgrep -f "tagteam.*watch" && echo tagteam watching')
+        assert not rx.search("/x/python -m tagteam serve --theme cockpit")
+        assert not rx.search("/x/python -m tagteam tail --no-follow")
+        assert not rx.search("/x/python -m pytest tests/test_watcher.py")
 
     def test_legacy_watcher_status_endpoint_unchanged(self, project):
         """The 0.10.0 `/api/watcher/status` helper keeps its argv-only rule
