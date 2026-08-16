@@ -61,26 +61,18 @@ DOCS_ROUNDS = [
 
 BRIEF = """# Decision brief — demo-api / plan r3 (escalated)
 
-**Crux:** what a rate limiter should do when its backing store is unreachable.
+Crux: what the rate limiter does when its backing store is unreachable.
 
-**Lead (Claude):** fail *open* — this API's SLO is availability; a closed
-limiter during a Redis blip would page on-call for a self-inflicted outage.
-Adds a metric and alert on the fallback path.
+Lead (Claude): fail OPEN — this API's SLO is availability; a closed limiter
+during a Redis blip would page on-call for a self-inflicted outage.
+Reviewer (Codex): fail CLOSED with a small in-memory fallback bucket — the
+limit must not vanish exactly when the system is under stress.
 
-**Reviewer (Codex):** fail *closed* with a small in-memory fallback bucket —
-the limit must not vanish exactly when the system is under stress.
+Recommendation (confidence: medium): fail open, but keep the reviewer's
+in-memory bucket as a ceiling — availability first, not unbounded.
 
-**What was checked:** the plan text (rounds 1–3), the config surface,
-the SLO doc referenced in round 3.
-
-**Recommendation (confidence: medium):** fail open **with** the in-memory
-fallback bucket the reviewer proposed as a ceiling — availability first,
-but not unbounded. Rule `request-changes` asking for that hybrid.
-
-```
-tagteam rule request-changes --content "Fail open, but keep the reviewer's in-memory fallback bucket as a ceiling."
-tagteam rule approve --content "Fail open with the metric/alert; ship it."
-```
+    tagteam rule request-changes --content "Fail open, with the in-memory bucket as a ceiling."
+    tagteam rule approve --content "Fail open with the metric/alert; ship it."
 """
 
 
@@ -160,7 +152,10 @@ def _seed_brief(project: Path, phase: str, ctype: str) -> None:
         path.write_text(BRIEF, encoding="utf-8")
         briefer.alias_path(project, phase, ctype).write_text(BRIEF, encoding="utf-8")
         db.set_brief_stem(conn, brief_id, path.stem)
-        db.finish_brief(conn, brief_id, status="ok", ts=now, stem=path.stem, path=str(path),
+        # project-relative on purpose: the cockpit's Feed prints this path,
+        # and the screenshots must not carry an absolute path
+        db.finish_brief(conn, brief_id, status="ok", ts=now, stem=path.stem,
+                        path=str(path.relative_to(project)).replace("\\", "/"),
                         content=BRIEF, model="claude", duration_ms=48_000)
     finally:
         conn.close()
