@@ -1,6 +1,6 @@
 {
   "state": "in-progress",
-  "ready_for": "reviewer",
+  "ready_for": "lead",
   "round": 4,
   "phase": "gatekeeper-pre-checks",
   "type": "plan",

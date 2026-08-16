@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics; round 3: slot-first claim order, honest dispatch semantics, consistent boundary algorithm; round 4: idempotent decision application across stores + fault-injection matrix, pre-test scope snapshot)
+- [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics; round 3: slot-first claim order, honest dispatch semantics, consistent boundary algorithm; round 4: idempotent decision application across stores + fault-injection matrix, pre-test scope snapshot; round 5: outcome-aware, submission-pinned reconciliation (compare-and-apply on (phase,type,round,submission_seq)))
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -84,10 +84,17 @@ state.seq changed → _handle_ready(state)
   │    state.seq` and return without dispatching (no DB row was written, so
   │    nothing is left `running` in our name); later ticks with the SAME seq
   │    re-enter here (see "Gate-owed latch")
-  ├─ under dualwrite.writer_lock: sweep abandoned rows, then claim the gate
-  │    row for event_key (at-most-once) → refused (decided already, or a
-  │    live other runner's attempt is running) → RELEASE the slot; decided →
-  │    existing behaviour (hand off); live-other → latch + return
+  ├─ under dualwrite.writer_lock: sweep/reconcile rows, then claim the gate
+  │    row for event_key (at-most-once) → refused → RELEASE the slot, then
+  │    branch on the PERSISTED decision (never generically "hand off"):
+  │      decided PASS  → hand off ONLY if the freshly re-read top-level +
+  │                      cycle state still is that reviewer-ready submission
+  │                      (same phase/type/round, state.seq == submission_seq,
+  │                      status ready_for=reviewer); otherwise return
+  │      decided BOUNCE→ ensure the lead-ready transition (compare-and-apply,
+  │                      see Recovery) or observe it already applied; return
+  │                      WITHOUT dispatching the reviewer
+  │      live-other running → latch + return
   ├─ run checks — ORDER MATTERS: `compute_impl_work()` is computed and FROZEN
   │    first (before any subprocess can touch the tree), then plan-doc, then
   │    the test command; the report shows the pre-test scope result
@@ -102,11 +109,17 @@ state.seq changed → _handle_ready(state)
   │    ts, gate_event, gate_id, gate_attempt}; (3) ensure the transition is
   │    complete: PASS → nothing (rounds + shadow DB + export only, NO
   │    `_derive_top_level_state`, NO handoff-state.json write, seq unchanged);
-  │    BOUNCE → if cycle status is not already (in-progress, ready_for=lead)
-  │    for this round, apply the REQUEST_CHANGES-shaped transition exactly
-  │    once (status → ready_for=lead; derive top-level state → turn=lead,
-  │    updated_by=Gatekeeper, seq+1); (4) finish the gate row from the entry
-  │    (status = entry action, decision id) — all inside the same lock hold
+  │    BOUNCE → COMPARE-AND-APPLY on the row's (phase, type, round,
+  │    submission_seq): (i) the original submission is still reviewer-ready
+  │    at exactly `state.seq == submission_seq` → apply the REQUEST_CHANGES-
+  │    shaped transition once (status → ready_for=lead; derive → turn=lead,
+  │    updated_by=Gatekeeper, seq+1) and record `applied_seq` (the new seq)
+  │    on the gate row; (ii) `applied_seq` already recorded, or the state is
+  │    exactly the applied one → finish/reconcile without another bump;
+  │    (iii) the state has advanced for any other reason (later submission,
+  │    reviewer round, ruling, terminal) → do NOT replay, do NOT dispatch;
+  │    row → `superseded` (entry retained for audit); (4) finish the gate
+  │    row from the entry — all inside the same lock hold
   ├─ (finish gate row is step 4 above; a crash anywhere is repaired by the
   │    sweep, see "Recovery")
   ├─ release slot (every exit path after the slot claim releases it —
@@ -182,12 +195,42 @@ with **no** entry is abandoned/retried. Crash windows and their repair:
 | (c) mid-BOUNCE: entry appended, cycle status / top-level state still point at the reviewer | entry present, transition incomplete | `ensure_gate_applied` applies the lead-ready transition exactly once (status + derive + seq+1); the reviewer is never dispatched because the same-seq tick re-enters the gate path and finds the entry |
 | (d) after the row finish, before slot release / dispatch | decided row + entry, stale slot marker | slot recovery (dead owner) frees it; the tick sees the decided row + entry → PASS hands off / BOUNCE returns; nothing re-run |
 
-Fault-injection tests for (a)–(d) assert: exactly one entry per
+**Outcome-aware, submission-pinned reconciliation.** Every mutation or
+dispatch derived from a gate row is a compare-and-apply against the
+freshly re-read state, keyed on the row's `(phase, type, round,
+submission_seq)`; the persisted decision decides the branch:
+
+- **BOUNCE**: (i) original submission still reviewer-ready at exactly
+  `state.seq == submission_seq` → complete the lead-ready transition once
+  and record `applied_seq`; (ii) `applied_seq` recorded, or the state is
+  exactly the applied one → finish/reconcile the row, no second seq bump;
+  (iii) anything else (a later lead submission, a reviewer round, an
+  arbiter ruling, a terminal state) → never replay the transition, never
+  dispatch from the stale observation; the row becomes `superseded`, the
+  entry stays for audit.
+- **PASS**: a recovered PASS may hand the reviewer off only when the
+  re-read state is still that reviewer-ready submission (same
+  phase/type/round, `state.seq == submission_seq`, `ready_for=reviewer`);
+  otherwise it only finishes the row.
+- A second watcher holding an older reviewer-ready observation that finds
+  a decided BOUNCE ensures/observes the transition and returns — it never
+  dispatches the reviewer.
+
+`gates` gains `applied_seq INTEGER` (BOUNCE: the seq written by the
+transition) so "already applied" is unambiguous.
+
+Fault/concurrency tests: (a)–(d) above assert exactly one entry per
 `gate_event`, exactly one terminal gate row, the correct `turn`/`seq`
 (PASS: seq unchanged, turn reviewer; BOUNCE: turn lead, seq +1 once), and
-no stranded slot; plus a double `ensure_gate_applied` call being a no-op.
-`uq_gates_decided` protects only terminal rows; the cross-store guarantee
-comes from the entry's `gate_event` + this idempotent apply.
+no stranded slot; a double `ensure_gate_applied` call is a no-op; **(e) a
+second watcher with a stale reviewer-ready snapshot after a decided BOUNCE
+never dispatches the reviewer; (f) mid-bounce crash, then a newer
+submission / reviewer round / arbiter ruling arrives before the sweep →
+reconciliation marks the old row superseded, does not overwrite the new
+turn/round/status, and does not advance seq again; (g) a recovered PASS
+whose submission has since advanced does not hand off.** `uq_gates_decided`
+protects only terminal rows; the cross-store guarantee comes from the
+entry's `gate_event` + this idempotent, pinned apply.
 
 ### Checks (all deterministic; each yields `ok | fail | skip` + detail)
 
@@ -321,7 +364,8 @@ CREATE TABLE IF NOT EXISTS gates (
   runner_pid INTEGER, runner_ident TEXT,   -- the process that owns the attempt (populated at claim)
   started_at TEXT NOT NULL, updated_at TEXT, finished_at TEXT,
   duration_s REAL, result_json TEXT, stem TEXT,
-  reason TEXT                     -- error / abandoned / superseded detail
+  reason TEXT,                    -- error / abandoned / superseded detail
+  applied_seq INTEGER             -- BOUNCE: the top-level seq written by the applied transition
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gates_running ON gates(event_key) WHERE status='running';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gates_decided ON gates(event_key) WHERE status IN ('pass','bounce');
@@ -513,10 +557,13 @@ pyproject.toml, CITATION.cff             3.2.0 (last commit)
    decides (not a skip); the scope snapshot is frozen before the test
    subprocess runs, so files created by the tests never count.
 4d. Applying a decision is idempotent across the rounds / status / state /
-   DB stores: the fault-injection matrix (a)–(d) yields exactly one entry,
-   one terminal gate row, the correct turn/seq and no stranded slot;
-   the sweep completes a decided-but-unfinished row from its entry instead
-   of re-running the checks.
+   DB stores and pinned to the original submission: the fault/concurrency
+   matrix (a)–(g) yields exactly one entry, one terminal gate row, the
+   correct turn/seq and no stranded slot; the sweep completes a
+   decided-but-unfinished row from its entry instead of re-running the
+   checks; a decided BOUNCE never leads to a reviewer dispatch (stale second
+   watcher included); a stale row never overwrites newer state or bumps seq
+   again (superseded, entry retained).
 5. After `max_bounces` consecutive bounces, the next failing submission
    passes-with-findings and reaches the reviewer.
 6. `tagteam gate check` exits 1 with the same report the gate would write;
@@ -533,6 +580,18 @@ pyproject.toml, CITATION.cff             3.2.0 (last commit)
 ## Resolved questions (round 1 → 2)
 - Default `on: [impl]` — agreed by the reviewer.
 - `max_bounces` default **2** — agreed by the reviewer.
+
+## Round-5 change (reviewer r4)
+Reconciliation is outcome-aware and pinned to the original submission:
+the refused/decided branch of the sequence and `ensure_gate_applied` both
+compare-and-apply on the row's `(phase, type, round, submission_seq)` —
+decided PASS hands off only if the re-read state is still that
+reviewer-ready submission; decided BOUNCE ensures/observes the lead-ready
+transition (once, recording `applied_seq`) and never dispatches the
+reviewer; any advanced state → `superseded`, no replay, no seq bump, entry
+retained. New tests (e) stale second watcher after a decided BOUNCE, (f)
+mid-bounce crash then a newer submission/ruling before the sweep, (g)
+recovered PASS after the submission advanced. `applied_seq` column added.
 
 ## Round-4 changes (reviewer r3)
 1. Decision application is idempotent across stores: gate entries carry
