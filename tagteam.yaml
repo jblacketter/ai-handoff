@@ -11,3 +11,13 @@ agents:
 # cycle escalates; see `tagteam brief` / `tagteam rule`.
 briefer:
   enabled: true
+
+# Phase 38: gatekeeper pre-checks (opt-in). Runs the suite + the
+# implementation-work check before each reviewer turn on impl cycles;
+# fires from a running `tagteam watch` (any mode) or `tagteam gate run`.
+# `tagteam gate check` is the lead's pre-flight.
+gatekeeper:
+  enabled: true
+  tests:
+    command: "python -m pytest -q -p no:cacheprovider"
+    timeout_minutes: 15
