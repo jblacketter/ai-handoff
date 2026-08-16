@@ -577,7 +577,7 @@ class _StateProcessor:
                     # Phase 37: the owed turn was declined because another
                     # turn (a lead conversation, the briefer) held the slot;
                     # dispatch it once the slot is free.
-                    elif self.engine is not None and self.engine.slot_busy is not None:
+                    elif self.engine is not None and isinstance(getattr(self.engine, "slot_busy", None), dict):
                         from tagteam import headless as _h
                         if not _h.slot_status(self.project_dir)["held"]:
                             _log("Turn slot freed — dispatching the still-owed turn")

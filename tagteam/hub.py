@@ -400,6 +400,8 @@ def hub_command(args: list[str], out=None, *,
     if opts["host"] not in ("127.0.0.1", "localhost"):
         print("  WARNING: reachable from other hosts; the page token is the only write guard", file=out)
     print(file=out); print("Press Ctrl+C to stop.", file=out); print(file=out)
+    from tagteam.server import _install_sigterm_as_interrupt
+    _install_sigterm_as_interrupt()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
