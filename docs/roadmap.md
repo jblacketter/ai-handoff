@@ -336,7 +336,8 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 35
 
 ### Phase 36: Visual Story & Portfolio Feed (3.0 arc)
-- **Status:** Not started
+- **Status:** In progress — plan cycle opened 2026-08-16 (branch `phase-36-visual-story`; ships as **3.0.0**). Flow designed first with the ux-design-guide skill.
+- **Plan:** `docs/phases/visual-story-portfolio-feed-30-arc.md`
 - **Description:** README restructured around a visual narrative (mermaid flowcharts of the planning/review processes and 3.0 architecture), standalone SVG diagram exports in `docs/media/` shaped for the portfolio site's featured-app pages, and an outside-reader `docs/showcase.md` with real soak numbers. Portfolio repo itself is out of scope.
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 36
 
