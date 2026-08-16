@@ -181,8 +181,9 @@ def make_hub_handler(ctx: HubContext):
                     agg = hub_api.aggregate_usage([e["path"] for e in hub_api.classify_registry(
                         ctx.paths(), scratch_prefixes=ctx.scratch_prefixes) if not e["hidden"]])
                     self._send_json({"window": win, "usage": agg.get(win, agg), "all": agg})
-                elif path == "/api/hub/info":
-                    self._send_json({"mode": "hub", "max_sse": ctx.max_sse, "sse_active": ctx.sse_state["active"],
+                elif path in ("/api/hub/info", "/api/info"):
+                    self._send_json({"app": "tagteam", "kind": "hub", "project": "hub",
+                                     "mode": "hub", "max_sse": ctx.max_sse, "sse_active": ctx.sse_state["active"],
                                      "interval_s": ctx.interval_s, "registry": str(ctx.registry_file) if ctx.registry_file else None,
                                      "mounted": sorted(ctx.routers)})
                 elif path == "/api/hub/events":
@@ -375,7 +376,22 @@ def hub_command(args: list[str], out=None, *,
     ctx = HubContext(registry_reader=reader, registry_file=reg_file, token=token, max_sse=opts["max_sse"],
                      interval_s=opts["interval"], show_all=opts["all"], scratch_prefixes=scratch_prefixes)
     handler = make_hub_handler(ctx)
-    server = TagteamHTTPServer((opts["host"], opts["port"]), handler)
+    from tagteam import portlease
+    try:
+        lease = portlease.acquire(opts["port"], host=opts["host"], project="hub", kind="hub")
+    except portlease.PortHeld as held:
+        print(held.reason, file=out)
+        return 2
+    if portlease.probe_occupied(opts["host"], opts["port"]):
+        print(portlease.occupied_message(opts["host"], opts["port"]), file=out)
+        lease.release()
+        return 2
+    try:
+        server = TagteamHTTPServer((opts["host"], opts["port"]), handler)
+    except OSError as e:
+        print(portlease.occupied_message(opts["host"], opts["port"]) + f" ({e.strerror or e})", file=out)
+        lease.release()
+        return 2
     n = len(reader())
     print("Tagteam Hub", file=out)
     print(f"  Registry: {reg_file} ({n} project(s))", file=out)
@@ -391,6 +407,7 @@ def hub_command(args: list[str], out=None, *,
     finally:
         server.stop_event.set()
         server.server_close()
+        lease.release()
     return 0
 
 

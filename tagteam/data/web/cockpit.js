@@ -120,6 +120,7 @@
 
   // ---------- state ----------
   var NOW = null;              // /api/now payload
+  var START = null;            // /api/start payload (Phase 37 launch intent)
   var CYCLE_ID = null;         // "<phase>_<type>"
   var briefCurrent = null;     // /api/brief/current payload
   var lastRoundsKey = null;
@@ -185,12 +186,18 @@
     var w = $('chip-watcher');
     var wr = n.watcher || {};
     w.className = 'chip ' + (wr.running ? 'ok' : (n.owed && !n.inflight ? 'warn' : ''));
+    var wbtn = $('btn-watcher');
+    var wlabel = w.firstChild;   // text node before the button
     if (wr.running) {
-      w.textContent = 'watcher ' + (wr.mode ? wr.mode + ' ' : '') + 'pid ' + wr.pid;
+      wlabel.textContent = 'watcher ' + (wr.mode ? wr.mode + ' ' : '') + 'pid ' + wr.pid;
       w.title = 'watcher liveness — bound to this project via ' + (wr.source || '?');
+      wbtn.textContent = 'Stop'; wbtn.title = 'stop the pidfile\'d watcher (identity-checked)';
+      wbtn.classList.toggle('hidden', wr.source !== 'pidfile');
     } else {
-      w.textContent = wr.stale_pidfile ? 'watcher gone (stale record)' : 'no watcher';
+      wlabel.textContent = wr.stale_pidfile ? 'watcher gone (stale record)' : 'no watcher';
       w.title = wr.stale_pidfile ? 'the recorded watcher process is not running; start a new one' : 'no watcher found for this project';
+      wbtn.textContent = 'Start'; wbtn.title = 'tagteam watch --mode ' + ((START && START.headless && START.headless.ok) ? 'headless' : 'notify') + ' --pidfile';
+      wbtn.classList.remove('hidden');
     }
 
     var notes = $('chip-notes');
@@ -201,6 +208,17 @@
     if (!$('tail-drawer').classList.contains('hidden')) loadTail();
     renderNeeds();
   }
+
+  $('btn-watcher').addEventListener('click', function (e) {
+    e.stopPropagation();
+    var wr = (NOW && NOW.watcher) || {};
+    if (wr.running) {
+      act($('btn-watcher'), '/api/watch/stop', {}, { confirm: { title: 'Stop the watcher?', body: 'Sends SIGTERM to the pidfile\'d watcher only if its identity verifies.' } });
+    } else {
+      var mode = (START && START.headless && START.headless.ok) ? 'headless' : 'notify';
+      act($('btn-watcher'), '/api/watch/start', { mode: mode }, { confirm: { title: 'Start the watcher (' + mode + ')?', body: mode === 'headless' ? 'Runs each owed turn as a fresh agent process, detached from this server.' : 'Notifies you on each turn flip (headless is not configured for both roles).' } });
+    }
+  });
 
   $('btn-pause').addEventListener('click', function () {
     var btn = this;
@@ -340,6 +358,52 @@
       wrap.appendChild(card); cards++;
     }
 
+    // Phase 37: the Start card — renders the exact launch intent, only when
+    // there is one. Headless is offered only when the two-role config validates.
+    if (START && START.intent) {
+      var it = START.intent;
+      if (it.command) {
+        var kindLabel = it.type === 'impl' ? 'implementation' : 'plan';
+        var scard = cardShell('start', 'Start: ' + it.phase + ' — ' + kindLabel, it.reason || '');
+        var sbody = el('div', 'card-body');
+        sbody.appendChild(el('div', null, 'The lead will be told:'));
+        var cmd = el('code', 'cmd', it.command); sbody.appendChild(cmd);
+        if (!(START.headless && START.headless.ok)) {
+          var why = el('div', 'muted small', 'Start headless is unavailable: ' + ((START.headless && START.headless.errors) || []).join('; '));
+          sbody.appendChild(why);
+        }
+        scard.appendChild(sbody);
+        var srow = el('div', 'row');
+        var copyBtn = el('button', 'btn btn-small', 'Copy command'); copyBtn.title = 'copy the /handoff command to paste into the Lead';
+        copyBtn.addEventListener('click', function () { try { navigator.clipboard.writeText(it.command); toast('ok', 'Copied.'); } catch (e) { toast('err', 'Clipboard unavailable — select the command and copy it.'); } });
+        srow.appendChild(copyBtn);
+        var termBtn = el('button', 'btn' + ((START.headless && START.headless.ok) ? '' : ' btn-primary'), 'Launch terminals'); termBtn.title = 'tagteam session start';
+        termBtn.addEventListener('click', function () {
+          act(termBtn, '/api/session/start', {}, { confirm: { title: 'Launch the interactive session?', body: 'Creates the three terminals (Lead, Watcher, Reviewer) and launches the agents. Then paste the command into the Lead.' }, onDone: function (r) { if (r && r.body && r.body.result === 'manual') toast('ok', r.body.message); } });
+        });
+        srow.appendChild(termBtn);
+        var sfin = el('div', 'actions-final');
+        if (START.headless && START.headless.ok) {
+          var hb = el('button', 'btn btn-primary', 'Start headless'); hb.title = 'start the headless watcher and send the lead this command';
+          hb.addEventListener('click', function () {
+            act(hb, '/api/start/launch', { intent: it, ensure_watcher: true }, { confirm: { title: 'Start headless?', body: 'Starts `tagteam watch --mode headless` for this project (if not running) and sends the lead the command as the first Lead-panel message. Idempotent: a repeat returns the same turn.' }, onDone: function (r) {
+              if (r && r.body && (r.body.conversation_id || (r.body.existing && r.body.existing.conversation_id))) {
+                LEAD.current = r.body.conversation_id || r.body.existing.conversation_id;
+                try { localStorage.setItem('tagteam.cockpit.lead', LEAD.current); } catch (e) { /* ignore */ }
+                showTab('lead'); loadLead(true);
+              }
+            } });
+          });
+          sfin.appendChild(hb);
+        }
+        srow.appendChild(sfin); scard.appendChild(srow);
+        wrap.appendChild(scard); cards++;
+      } else if (it.reason && /not set up/.test(it.reason)) {
+        var nc = cardShell('stale', 'Not set up yet', '');
+        nc.appendChild(el('div', 'hint', it.reason)); wrap.appendChild(nc); cards++;
+      }
+    }
+
     // Hold
     if (n.paused) {
       var pc = cardShell('hold', 'Dispatch is on hold', fmtTs(n.paused.ts));
@@ -379,9 +443,9 @@
     $('needs-empty').classList.toggle('hidden', cards > 0);
     if (!cards) {
       var eb = $('needs-empty-body');
-      if (!st.phase) eb.innerHTML = 'No active cycle. Start one with <code>tagteam cycle init --phase … --type plan …</code> or from the <a href="/?theme=saloon">Saloon</a>.';
+      if (!st.phase) eb.textContent = (START && START.intent && START.intent.reason) ? START.intent.reason : 'No active cycle.';
       else if (n.owed) eb.innerHTML = esc(n.owed.agent || n.owed.role) + ' is on ' + esc(st.phase) + ' ' + esc(st.type) + ' r' + esc(st.round) + ' (' + esc(fmtAge(n.owed.age_s)) + ')' + (n.inflight ? ' — in flight now' : '') + '. Watch the <button class="link-btn" data-tab-link="feed">Feed</button>.';
-      else if (st.status === 'done') eb.innerHTML = esc(st.phase) + ' ' + esc(st.type) + ' is ' + esc(st.result || 'done') + '. Next: the lead opens the next cycle.';
+      else if (st.status === 'done') eb.textContent = st.phase + ' ' + st.type + ' is ' + (st.result || 'done') + '. ' + ((START && START.intent && START.intent.reason) ? START.intent.reason : '');
       else eb.textContent = 'Nothing is owed right now.';
       var lb = eb.querySelector('[data-tab-link]'); if (lb) lb.addEventListener('click', function () { showTab('feed'); });
     }
@@ -391,6 +455,7 @@
   function showTab(name) {
     document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
     document.querySelectorAll('.panel').forEach(function (p) { p.classList.toggle('active', p.id === 'panel-' + name); });
+    if (name === 'lead') loadLead(false);
     if (name === 'diff' && !diffLoaded) loadDiff();
     if (name === 'usage' && !usageLoaded) loadUsage();
     if (name === 'notes' && !notesLoaded) loadNotes();
@@ -619,10 +684,11 @@
       if ((cs === 'escalated' || cs === 'needs-human') && st.phase) {
         p = getJSON('/api/brief/current?phase=' + encodeURIComponent(st.phase) + '&type=' + encodeURIComponent(st.type)).then(function (b) { briefCurrent = b.body; });
       } else briefCurrent = null;
-      return p.then(function () {
+      return p.then(function () { return getJSON('/api/start').then(function (sr) { START = sr.ok ? sr.body : null; }).catch(function () { START = null; }); }).then(function () {
         renderNow(n);
         var t = activeTab();
         var ps = [loadFeed()];
+        if (t === 'lead') ps.push(loadLead(false));
         if (t === 'notes' || notesLoaded) ps.push(loadNotes());
         if (t === 'usage' && usageLoaded) ps.push(loadUsage());
         if (t === 'diff' && diffLoaded && reason !== 'tick') ps.push(loadDiff());
@@ -636,6 +702,165 @@
       if (refreshQueued) { refreshQueued = false; refreshAll('queued'); }
     });
   }
+
+  // ---------- Phase 37: Lead panel (text nodes only — the page holds the POST token) ----------
+  var LEAD = { list: [], current: null, conv: null, es: null, cursor: {}, sending: false, sentAt: null, timer: null };
+  try { LEAD.current = localStorage.getItem('tagteam.cockpit.lead') || null; } catch (e) { /* ignore */ }
+
+  function leadStatus(text, cls) { var st = $('lead-status'); st.textContent = text || ''; st.className = 'lead-status muted small' + (cls ? ' ' + cls : ''); }
+
+  function loadLead(force) {
+    return getJSON('/api/lead').then(function (r) {
+      if (!r.ok) throw new Error('lead ' + r.status);
+      LEAD.list = r.body.conversations || [];
+      LEAD.slot = r.body.slot || {}; LEAD.cfg = r.body.lead || {};
+      var sel = $('lead-select'); sel.innerHTML = '';
+      LEAD.list.forEach(function (c) {
+        var o = document.createElement('option'); o.value = c.id;
+        o.textContent = (c.title || c.id) + ' · ' + (c.turns || 0) + ' turn' + (c.turns === 1 ? '' : 's');
+        sel.appendChild(o);
+      });
+      if (!LEAD.current || !LEAD.list.some(function (c) { return c.id === LEAD.current; })) LEAD.current = LEAD.list.length ? LEAD.list[0].id : null;
+      if (LEAD.current) sel.value = LEAD.current;
+      sel.classList.toggle('hidden', !LEAD.list.length);
+      renderLeadGate();
+      if (LEAD.current) return loadConversation(LEAD.current, force);
+      $('lead-transcript').innerHTML = ''; $('lead-empty').classList.remove('hidden');
+      leadStatus(LEAD.cfg.ok ? 'New conversation with ' + (LEAD.cfg.agent || 'the lead') + ' (' + (LEAD.cfg.provider || '?') + ') — your first message starts it.' : '');
+    }).catch(function (e) { leadStatus('Lead panel unavailable: ' + e, 'error'); });
+  }
+
+  function renderLeadGate() {
+    var send = $('btn-lead-send'), ta = $('lead-text');
+    var cfg = LEAD.cfg || {}, slot = LEAD.slot || {};
+    if (!cfg.ok) {
+      send.disabled = true; ta.disabled = true;
+      leadStatus('The lead is not configured for headless turns: ' + (cfg.errors || []).join('; ') + ' — set agents.lead.headless in tagteam.yaml.', 'error');
+      return;
+    }
+    if (slot.held && slot.kind !== 'conversation') {
+      send.disabled = true; ta.disabled = false;
+      var st = $('lead-status'); st.textContent = ''; st.className = 'lead-status muted small busy';
+      st.appendChild(document.createTextNode('The lead is busy on its cycle turn' + (slot.round ? ' (round ' + slot.round + ')' : '') + ' — wait, or '));
+      var lnk = el('button', 'link-btn', 'interject instead'); lnk.type = 'button'; lnk.addEventListener('click', function () { showTab('notes'); });
+      st.appendChild(lnk); st.appendChild(document.createTextNode('. Talking is allowed while dispatch is paused.'));
+      return;
+    }
+    if (LEAD.sending || (slot.held && slot.kind === 'conversation')) {
+      send.disabled = true; ta.disabled = false;
+      $('btn-lead-cancel').classList.remove('hidden');
+      leadStatus('Lead is replying… ' + (LEAD.sentAt ? fmtAge(Math.round((Date.now() - LEAD.sentAt) / 1000)) : ''), 'busy');
+      return;
+    }
+    send.disabled = false; ta.disabled = false; $('btn-lead-cancel').classList.add('hidden');
+    if (LEAD.conv) leadStatus((LEAD.conv.continuity ? 'continuity: ' + LEAD.conv.continuity : '') + (LEAD.conv.turns && LEAD.conv.turns.length ? ' · ' + LEAD.conv.turns.length + ' turn(s)' : ''));
+  }
+
+  function msgNode(who, cls, ts, text) {
+    var m = el('div', 'lead-msg ' + cls);
+    var head = el('div', 'who'); head.appendChild(el('span', null, who)); head.appendChild(el('span', 'spacer')); head.appendChild(el('span', null, fmtTs(ts)));
+    m.appendChild(head);
+    var body = el('div', 'body'); body.textContent = text || ''; m.appendChild(body);
+    return m;
+  }
+
+  function renderConversation(conv) {
+    var wrap = $('lead-transcript'); wrap.innerHTML = '';
+    var turns = conv.turns || [];
+    $('lead-empty').classList.toggle('hidden', turns.length > 0);
+    var agent = (LEAD.cfg && LEAD.cfg.agent) || 'lead';
+    turns.forEach(function (t) {
+      wrap.appendChild(msgNode('you', 'you', t.ts, t.user_text));
+      var m = el('div', 'lead-msg lead'); m.dataset.turn = String(t.n);
+      var head = el('div', 'who'); head.appendChild(el('span', null, agent)); head.appendChild(el('span', 'spacer'));
+      head.appendChild(el('span', null, t.status === 'running' ? 'replying…' : (t.continuity || '') + (t.finished_at ? ' · ' + fmtTs(t.finished_at) : '')));
+      m.appendChild(head);
+      if (t.status === 'running') { var live = el('div', 'live'); live.dataset.live = '1'; m.appendChild(live); }
+      else if (t.status === 'ok') { var b = el('div', 'body'); b.textContent = t.reply || '(no text reply)'; m.appendChild(b); }
+      else { var f = el('div', 'fail'); f.textContent = t.status + (t.error ? ' — ' + t.error : '') + (t.log_path ? '\nlog: ' + t.log_path : ''); m.appendChild(f); }
+      wrap.appendChild(m);
+    });
+    wrap.scrollTop = wrap.scrollHeight;
+    $('lead-title').textContent = 'Talk to the lead' + (conv.title ? ' — ' + conv.title : '');
+    $('lead-continuity').textContent = conv.provider ? '(' + conv.provider + ')' : '';
+  }
+
+  function loadConversation(cid, force) {
+    return getJSON('/api/lead/' + encodeURIComponent(cid)).then(function (r) {
+      if (!r.ok) throw new Error('conversation ' + r.status);
+      LEAD.conv = r.body; LEAD.slot = r.body.slot || LEAD.slot;
+      var running = (r.body.turns || []).some(function (t) { return t.status === 'running'; });
+      LEAD.sending = running;
+      renderConversation(r.body);
+      renderLeadGate();
+      $('lead-dot').classList.toggle('hidden', !running);
+      subscribeLead(cid);
+    });
+  }
+
+  function subscribeLead(cid) {
+    if (LEAD.es && LEAD.es._cid === cid) return;
+    if (LEAD.es) { try { LEAD.es.close(); } catch (e) { /* ignore */ } LEAD.es = null; }
+    if (!window.EventSource) return;
+    var after = LEAD.cursor[cid] ? '?after=' + encodeURIComponent(LEAD.cursor[cid]) : '';
+    var es;
+    try { es = new EventSource(url('/api/lead/' + encodeURIComponent(cid) + '/events' + after)); } catch (e) { return; }
+    es._cid = cid; LEAD.es = es;
+    es.addEventListener('line', function (ev) {
+      var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      LEAD.cursor[cid] = d.id;
+      var box = $('lead-transcript').querySelector('.lead-msg[data-turn="' + String(d.turn) + '"] .live');
+      if (!box) return;
+      var line = el('div', /\[tool|tool_use|Bash|Read|Edit|Write/.test(d.text) ? 'tool' : null, d.text);
+      box.appendChild(line); box.scrollTop = box.scrollHeight;
+    });
+    es.addEventListener('end', function (ev) {
+      var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      LEAD.cursor[cid] = d.id;
+      LEAD.sending = false; LEAD.sentAt = null;
+      $('lead-dot').classList.add('hidden');
+      loadConversation(cid, true).then(function () { refreshAll('lead-turn'); });
+    });
+    es.addEventListener('error', function () { /* EventSource reconnects with Last-Event-ID */ });
+  }
+
+  $('lead-select').addEventListener('change', function () {
+    LEAD.current = this.value; try { localStorage.setItem('tagteam.cockpit.lead', LEAD.current); } catch (e) { /* ignore */ }
+    loadConversation(LEAD.current, true);
+  });
+  $('btn-lead-new').addEventListener('click', function () {
+    postJSON('/api/lead/new', {}).then(function (r) {
+      if (!r.ok) { toast('err', (r.body && r.body.message) || 'Could not start a conversation'); return; }
+      LEAD.current = r.body.conversation.id; try { localStorage.setItem('tagteam.cockpit.lead', LEAD.current); } catch (e) { /* ignore */ }
+      loadLead(true);
+    });
+  });
+  function sendLead() {
+    var ta = $('lead-text'); var text = ta.value.trim();
+    if (!text) return;
+    var go = function (cid) {
+      LEAD.sending = true; LEAD.sentAt = Date.now(); renderLeadGate();
+      postJSON('/api/lead/' + encodeURIComponent(cid) + '/send', { text: text }).then(function (r) {
+        if (!r.ok) {
+          LEAD.sending = false; LEAD.sentAt = null;
+          leadStatus((r.body && r.body.message) || ('Send failed (' + r.status + ')'), r.body && r.body.busy ? 'busy' : 'error');
+          $('btn-lead-send').disabled = false;
+          return;
+        }
+        ta.value = '';
+        loadConversation(cid, true);
+      });
+    };
+    if (LEAD.current) go(LEAD.current);
+    else postJSON('/api/lead/new', {}).then(function (r) { if (r.ok) { LEAD.current = r.body.conversation.id; go(LEAD.current); } else toast('err', (r.body && r.body.message) || 'Could not start a conversation'); });
+  }
+  $('lead-form').addEventListener('submit', function (e) { e.preventDefault(); sendLead(); });
+  $('lead-text').addEventListener('keydown', function (e) { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLead(); } });
+  $('btn-lead-cancel').addEventListener('click', function () {
+    if (!LEAD.current) return;
+    act($('btn-lead-cancel'), '/api/lead/' + encodeURIComponent(LEAD.current) + '/cancel', {}, { confirm: { title: 'Cancel the lead\'s turn?', body: 'Kills the running agent process (identity-checked); the turn is recorded as cancelled.' } });
+  });
+  setInterval(function () { if (LEAD.sending) renderLeadGate(); }, 1000);
 
   // ---------- Live connection: SSE with polling fallback ----------
   var connMode = 'connecting', es = null, pollTimer = null, pollDelay = 3000, sseRetry = null, sseAttempts = 0;

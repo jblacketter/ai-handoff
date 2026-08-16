@@ -65,6 +65,13 @@
     d.appendChild(badges(r));
     var age = el('div', 'age', kind === 'waiting' ? fmtAge(r.owed_age_s) : (r.last_activity_age_s != null ? fmtAge(r.last_activity_age_s) + ' ago' : ''));
     d.appendChild(age);
+    // Phase 37: a Start link only when the project's launch intent has a command
+    if (r.intent && r.intent.command) {
+      var st = el('a', 'btn btn-small btn-start', 'Start ' + (r.intent.type === 'impl' ? 'implementation' : 'plan') + ' \u2192');
+      st.href = '/p/' + encodeURIComponent(r.id) + '/#start';
+      st.title = r.intent.command + ' — opens this project\u2019s cockpit Start card';
+      d.appendChild(st);
+    }
     var open = el('a', 'btn btn-small' + (kind === 'needs' ? ' btn-primary' : ''), 'Open');
     open.href = '/p/' + encodeURIComponent(r.id) + '/';
     open.title = 'open this project’s cockpit';

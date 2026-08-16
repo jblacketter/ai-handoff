@@ -520,3 +520,96 @@ def is_turn_running(project_root: str | Path, cid: str) -> bool:
         return any(t.get("status") == "running" for t in db.list_conversation_turns(conn, cid))
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------------ CLI ----
+
+LEAD_USAGE = """Usage:
+  tagteam lead "message" [--new] [--conversation ID] [--json]
+  tagteam lead --list [--json]
+
+Talk to the lead agent from the terminal — the same engine as the cockpit's
+Lead panel (resumable session, transcript under .tagteam/conversations/).
+Without --conversation the most recent conversation is continued; --new
+starts a fresh one. Exit 0 = the lead replied; 1 = the turn failed;
+3 = the lead is busy (a cycle turn or another conversation holds the slot);
+2 = usage error."""
+
+
+def lead_command(args: list[str], project_root: str | Path | None = None, out=None) -> int:
+    import sys as _sys
+    out = out or _sys.stdout
+    if project_root is None:
+        from tagteam.state import _resolve_project_root
+        project_root = _resolve_project_root()
+    root = Path(project_root)
+    from tagteam.config import read_config
+    cfg = read_config(root / "tagteam.yaml") or {}
+    want_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    if not args or args in (["-h"], ["--help"]):
+        print(LEAD_USAGE, file=out)
+        return 0 if args else 2
+    if args[0] == "--list":
+        reconcile(root)
+        rows = list_conversations(root)
+        if want_json:
+            print(json.dumps(rows, indent=1, default=str), file=out)
+        elif not rows:
+            print("No conversations yet. `tagteam lead \"hello\"` starts one.", file=out)
+        else:
+            for r in rows:
+                print(f"{r['id']}  {r.get('turns', 0):>3} turn(s)  {r.get('last_ts') or r.get('created_at')}  "
+                      f"{r.get('continuity') or ''}  {r.get('title') or ''}", file=out)
+        return 0
+    new = False
+    cid = None
+    text_parts: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--new":
+            new = True
+        elif a == "--conversation" and i + 1 < len(args):
+            cid = args[i + 1]; i += 1
+        elif a.startswith("-"):
+            print(f"Unknown argument: {a}\n{LEAD_USAGE}", file=out)
+            return 2
+        else:
+            text_parts.append(a)
+        i += 1
+    text = " ".join(text_parts).strip()
+    if not text:
+        print("A message is required.\n" + LEAD_USAGE, file=out)
+        return 2
+    spec = resolve_lead(cfg, root)
+    if not spec.ok:
+        print("The lead is not configured for headless turns:\n  " + "\n  ".join(spec.errors), file=out)
+        return 2
+    reconcile(root)
+    if cid is None and not new:
+        rows = list_conversations(root, limit=1)
+        cid = rows[0]["id"] if rows else None
+    if cid is None or new:
+        cid = new_conversation(root, provider=spec.provider)["id"]
+    elif get_conversation(root, cid) is None:
+        print(f"Unknown conversation: {cid}", file=out)
+        return 2
+    try:
+        turn = send(root, cid, text, config=cfg, by="cli:" + (os.environ.get("USER") or "user"))
+    except LeadBusy as busy:
+        msg = f"lead is busy — {busy.reason} (stem {busy.marker.get('stem')}); wait, or `tagteam interject`"
+        print(json.dumps({"ok": False, "busy": True, "message": msg}) if want_json else msg, file=out)
+        return 3
+    except LeadChatError as e:
+        print(json.dumps({"ok": False, "message": str(e)}) if want_json else str(e), file=out)
+        return 2
+    if want_json:
+        print(json.dumps({"ok": turn["status"] == "ok", "conversation_id": cid, "turn": turn}, indent=1,
+                         default=str), file=out)
+    else:
+        print(f"[{cid} · turn {turn['n']} · {turn.get('continuity')}]", file=out)
+        print(turn.get("reply") or f"(no reply — {turn['status']}: {turn.get('error')})", file=out)
+        if turn["status"] != "ok":
+            print(f"log: {turn.get('log_path')}", file=out)
+    return 0 if turn["status"] == "ok" else 1

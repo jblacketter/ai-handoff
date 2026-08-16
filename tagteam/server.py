@@ -596,6 +596,32 @@ class CockpitRouter:
                 h._send_json(capi.tail_payload(self.project_dir, n, events=q.get("events") == "1"))
             elif path == "/api/events":
                 self.sse(h)
+            elif path == "/api/start":
+                from tagteam import launch as _launch
+                from tagteam.config import read_config
+                cfg = read_config(Path(self.project_dir) / "tagteam.yaml") or {}
+                h._send_json(_launch.start_payload(self.project_dir, cfg))
+            elif path == "/api/lead":
+                from tagteam import lead_chat as _lc
+                _lc.reconcile(self.project_dir)
+                h._send_json({"conversations": _lc.list_conversations(self.project_dir),
+                              "slot": _slot_view(self.project_dir),
+                              "lead": _lead_view(self.project_dir)})
+            elif path.startswith("/api/lead/") and path.endswith("/events"):
+                cid = path[len("/api/lead/"):-len("/events")]
+                self.lead_sse(h, cid, q)
+            elif path.startswith("/api/lead/"):
+                from tagteam import lead_chat as _lc
+                cid = path[len("/api/lead/"):]
+                if not _lc.CONVERSATION_ID_RE.match(cid):
+                    h._send_404("Conversation not found")
+                    return True
+                row = _lc.get_conversation(self.project_dir, cid)
+                if row is None:
+                    h._send_404("Conversation not found")
+                else:
+                    row["slot"] = _slot_view(self.project_dir)
+                    h._send_json(row)
             elif path == "/api/cockpit/info":
                 h._send_json({"mode": self.mode, "max_sse": self.max_sse,
                                  "sse_active": self.sse_state["active"],
@@ -690,6 +716,10 @@ class CockpitRouter:
         elif self.cockpit and path.startswith("/api/") and self._cockpit_get(h, parsed, path):
             pass
 
+        elif path == "/api/info":
+            h._send_json({"app": "tagteam", "kind": "cockpit" if self.cockpit else "saloon",
+                          "project": os.path.basename(str(self.project_dir).rstrip("/\\")),
+                          "project_dir": self.project_dir})
         elif path == "/api/state":
             state = read_state(self.project_dir)
             h._send_json(state or {})
@@ -823,7 +853,7 @@ class CockpitRouter:
         }
         action = actions.get(path)
         if action is None:
-            return False
+            return self._phase37_post(h, path)
         data, err = h._read_json_body()
         if err:
             h._send_json({"ok": False, "message": err}, 400)
@@ -845,6 +875,171 @@ class CockpitRouter:
         status = 200 if res.get("ok") else (400 if res.get("rc") == 400 else 409)
         h._send_json(res, status)
         return True
+
+    def _phase37_post(self, h, path) -> bool:
+        """Phase 37: launchpad + lead conversation POSTs (cockpit mode)."""
+        from tagteam import lead_chat as _lc, launch as _launch, cockpit_api as capi
+        from tagteam.config import read_config
+        if not (path in ("/api/start/launch", "/api/watch/start", "/api/watch/stop", "/api/session/start",
+                         "/api/lead/new") or (path.startswith("/api/lead/") and
+                                             (path.endswith("/send") or path.endswith("/cancel")))):
+            return False
+        data, err = h._read_json_body()
+        if err:
+            h._send_json({"ok": False, "message": err}, 400)
+            return True
+        by = capi.web_user()
+        cfg = read_config(Path(self.project_dir) / "tagteam.yaml") or {}
+        try:
+            if path == "/api/start/launch":
+                if data.get("dry_run"):
+                    intent = data.get("intent") or _launch.launch_intent(self.project_dir)
+                    cli = ("tagteam watch --mode headless --pidfile && " if data.get("ensure_watcher", True) else "") + \
+                          f"tagteam lead {json.dumps(intent.get('command') or '')}"
+                    h._send_json({"ok": True, "dry_run": True, "cli": cli, "message": ""})
+                    return True
+                status, payload = _launch.launch(self.project_dir, intent=data.get("intent"), config=cfg, by=by,
+                                                 ensure_watcher=bool(data.get("ensure_watcher", True)),
+                                                 retry=bool(data.get("retry")),
+                                                 watcher_mode=str(data.get("mode") or "headless"))
+                h._send_json(payload, status)
+                return True
+            if path == "/api/watch/start":
+                mode = str(data.get("mode") or "headless")
+                if data.get("dry_run"):
+                    h._send_json({"ok": True, "dry_run": True, "cli": f"tagteam watch --mode {mode} --pidfile", "message": ""})
+                    return True
+                res = _launch.start_watcher(self.project_dir, mode=mode)
+                h._send_json(res, 200 if res.get("ok") else 409)
+                return True
+            if path == "/api/watch/stop":
+                if data.get("dry_run"):
+                    h._send_json({"ok": True, "dry_run": True, "cli": "kill <watcher pid from .tagteam/watcher.json>", "message": ""})
+                    return True
+                res = _launch.stop_watcher(self.project_dir)
+                h._send_json(res, 200 if res.get("ok") else 409)
+                return True
+            if path == "/api/session/start":
+                if data.get("dry_run"):
+                    h._send_json({"ok": True, "dry_run": True, "cli": "tagteam session start", "message": ""})
+                    return True
+                res = _launch.start_session(self.project_dir, backend=(data.get("backend") or None))
+                h._send_json(res, 200 if res.get("ok") else 409)
+                return True
+            if path == "/api/lead/new":
+                spec = _lc.resolve_lead(cfg, self.project_dir)
+                row = _lc.new_conversation(self.project_dir, provider=spec.provider,
+                                           title=(str(data.get("title") or "")[:80] or None))
+                h._send_json({"ok": True, "conversation": row})
+                return True
+            cid = path[len("/api/lead/"):].rsplit("/", 1)[0]
+            if not _lc.CONVERSATION_ID_RE.match(cid) or _lc.get_conversation(self.project_dir, cid) is None:
+                h._send_404("Conversation not found")
+                return True
+            if path.endswith("/cancel"):
+                ok, why = _lc.cancel(self.project_dir, cid, by=by)
+                h._send_json({"ok": ok, "message": why}, 200 if ok else 409)
+                return True
+            # /send — runs the turn on a worker thread; the client follows /events
+            text = data.get("text")
+            if not isinstance(text, str) or not text.strip():
+                h._send_json({"ok": False, "message": "'text' is required"}, 400)
+                return True
+            if len(text.encode("utf-8")) > _lc.MAX_MESSAGE_BYTES:
+                h._send_json({"ok": False, "message": f"message exceeds {_lc.MAX_MESSAGE_BYTES} bytes"}, 413)
+                return True
+            slot = _slot_view(self.project_dir)
+            if slot["held"] and slot.get("kind") != "conversation":
+                h._send_json({"ok": False, "busy": True, "message": f"lead is busy — {slot['reason']}",
+                              "slot": slot}, 409)
+                return True
+            if _lc.is_turn_running(self.project_dir, cid):
+                h._send_json({"ok": False, "busy": True, "message": "a turn of this conversation is still running"}, 409)
+                return True
+            if data.get("dry_run"):
+                h._send_json({"ok": True, "dry_run": True, "message": "",
+                              "cli": f"tagteam lead --conversation {cid} {json.dumps(text)}"})
+                return True
+            started = threading.Event()
+            result: dict = {}
+
+            def _worker():
+                try:
+                    _lc.send(self.project_dir, cid, text, config=cfg, by=by,
+                             on_line=lambda line: started.set())
+                except _lc.LeadBusy as busy:
+                    result["error"] = f"lead is busy — {busy.reason}"
+                    result["busy"] = True
+                except Exception as e:  # recorded on the turn row by send(); surface here too
+                    result["error"] = f"{type(e).__name__}: {e}"
+                finally:
+                    started.set()
+            t = threading.Thread(target=_worker, name=f"lead-turn-{cid}", daemon=True)
+            t.start()
+            # give the claim a moment so a Busy result answers synchronously
+            t.join(0.6)
+            if result.get("error") and not t.is_alive():
+                h._send_json({"ok": False, "busy": bool(result.get("busy")), "message": result["error"]},
+                             409 if result.get("busy") else 400)
+                return True
+            row = _lc.get_conversation(self.project_dir, cid) or {}
+            n = (row.get("turns") or [{}])[-1].get("n") if row.get("turns") else None
+            h._send_json({"ok": True, "conversation_id": cid, "turn_n": n, "message": "turn started"}, 202)
+            return True
+        except _lc.LeadChatError as e:
+            h._send_json({"ok": False, "message": str(e)}, 400)
+            return True
+        except Exception as exc:
+            h.log_message("cockpit POST %s failed: %s", path, exc)
+            h._send_json({"ok": False, "message": f"{type(exc).__name__}: {exc}"}, 500)
+            return True
+
+    def lead_sse(self, h, cid: str, q: dict) -> None:
+        """Per-conversation SSE: replay retained events after the cursor
+        (`Last-Event-ID` header or ?after=), then follow live output."""
+        from tagteam import lead_chat as _lc
+        if not _lc.CONVERSATION_ID_RE.match(cid) or _lc.get_conversation(self.project_dir, cid) is None:
+            h._send_404("Conversation not found")
+            return
+        after = h.headers.get("Last-Event-ID") or q.get("after") or None
+        with self.sse_lock:
+            if self.sse_state["active"] >= self.max_sse:
+                h._send_json({"error": f"Too many live connections (max {self.max_sse})"}, 503)
+                return
+            self.sse_state["active"] += 1
+        stop = getattr(h.server, "stop_event", None)
+        try:
+            h.send_response(200)
+            h.send_header("Content-Type", "text/event-stream")
+            h.send_header("Cache-Control", "no-cache")
+            h.send_header("X-Accel-Buffering", "no")
+            h.end_headers()
+            cursor = after
+            last_beat = time.monotonic()
+            while True:
+                evs = _lc.turn_events(self.project_dir, cid, after=cursor)
+                for ev in evs:
+                    h.wfile.write(f"id: {ev['id']}\nevent: {ev['type']}\ndata: {json.dumps(ev, default=str)}\n\n".encode())
+                    cursor = ev["id"]
+                if evs:
+                    h.wfile.flush()
+                    last_beat = time.monotonic()
+                elif time.monotonic() - last_beat >= self.sse_heartbeat:
+                    h.wfile.write(b": heartbeat\n\n")
+                    h.wfile.flush()
+                    last_beat = time.monotonic()
+                if stop is not None:
+                    if stop.wait(0.4):
+                        break
+                else:
+                    time.sleep(0.4)
+                if self._client_gone(h):
+                    break
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            with self.sse_lock:
+                self.sse_state["active"] -= 1
 
     def handle_post(self, h, parsed, path):
         """Route a POST for this project (path relative to the mount)."""
@@ -1151,6 +1346,24 @@ def make_handler(project_dir: str, *, mode: str = "legacy", token: str | None = 
     return HandoffHandler
 
 
+def _slot_view(project_dir: str) -> dict:
+    """The turn slot as the UI sees it: held?, kind, stem, reason."""
+    from tagteam import headless as _h
+    st = _h.slot_status(project_dir)
+    m = st.get("marker") or {}
+    return {"held": bool(st["held"]), "reason": st["reason"], "kind": m.get("kind") or ("cycle" if m else None),
+            "stem": m.get("stem"), "role": m.get("role"), "round": m.get("round"),
+            "conversation_id": m.get("conversation_id"), "turn_n": m.get("turn_n")}
+
+
+def _lead_view(project_dir: str) -> dict:
+    from tagteam import lead_chat as _lc
+    from tagteam.config import read_config
+    cfg = read_config(Path(project_dir) / "tagteam.yaml") or {}
+    spec = _lc.resolve_lead(cfg, project_dir)
+    return {"ok": spec.ok, "errors": spec.errors, "provider": spec.provider, "agent": spec.agent_name}
+
+
 def _config_theme(project_dir: str) -> str | None:
     """`serve.theme` from tagteam.yaml (the config gate), or None."""
     cfg = _read_config(project_dir) or {}
@@ -1196,7 +1409,7 @@ def resolve_serve_options(args: list[str], project_dir_default: str = ".") -> di
         else:
             return f"Unknown argument: {a}"
     opts["project_dir"] = os.path.abspath(opts["project_dir"])
-    theme = opts["theme"] or _config_theme(opts["project_dir"]) or "saloon"
+    theme = opts["theme"] or _config_theme(opts["project_dir"]) or "cockpit"   # 3.1: cockpit by default
     if theme not in THEMES:
         theme = "saloon"
     opts["mode"] = "cockpit" if theme == "cockpit" else "legacy"
@@ -1218,10 +1431,10 @@ def serve_command(args: list[str]) -> int:
         print()
         print("  --port PORT      Port to listen on (default: 8080)")
         print("  --dir DIR        Project directory (default: current directory)")
-        print("  --theme THEME    saloon (default; legacy dashboard, binds all interfaces, no token)")
-        print("                   or cockpit (Phase 34 arbiter cockpit: loopback bind, per-run")
-        print("                   POST token, live feed + controls; Saloon at /?theme=saloon).")
-        print("                   `serve: {theme: cockpit}` in tagteam.yaml is the same gate.")
+        print("  --theme THEME    cockpit (default since 3.1: loopback bind, per-run POST token,")
+        print("                   live feed, Start card, Lead panel, controls; Saloon at /?theme=saloon)")
+        print("                   or saloon (the legacy dashboard, binds all interfaces, no token).")
+        print("                   `serve: {theme: …}` in tagteam.yaml is the same gate.")
         print("  --host HOST      Bind address (default: all interfaces in saloon mode,")
         print("                   127.0.0.1 in cockpit mode; e.g. --host 0.0.0.0 to expose)")
         print("  --max-sse N      Max concurrent live-feed connections in cockpit mode (default 8)")
@@ -1239,18 +1452,41 @@ def serve_command(args: list[str]) -> int:
 
     token = new_token() if mode == "cockpit" else None
     handler = make_handler(project_dir, mode=mode, token=token, max_sse=opts["max_sse"])
-    server = TagteamHTTPServer((opts["host"], port), handler)
 
-    print(f"Tagteam Dashboard" + (" — Arbiter Cockpit" if mode == "cockpit" else ""))
-    print(f"  Project: {project_dir}")
+    # Phase 37: one Tagteam server per port on this machine (lease), then a
+    # connect probe for the wildcard/loopback shadow, then the real bind.
+    from tagteam import portlease
+    kind = "cockpit" if mode == "cockpit" else "saloon"
+    project_name = os.path.basename(project_dir.rstrip("/\\")) or project_dir
+    try:
+        lease = portlease.acquire(port, host=opts["host"], project=project_name, kind=kind)
+    except portlease.PortHeld as held:
+        print(held.reason)
+        return 2
+    try:
+        if portlease.probe_occupied(opts["host"], port):
+            print(portlease.occupied_message(opts["host"], port))
+            return 2
+        try:
+            server = TagteamHTTPServer((opts["host"], port), handler)
+        except OSError as e:
+            print(portlease.occupied_message(opts["host"], port) + f" ({e.strerror or e})")
+            return 2
+    except BaseException:
+        lease.release()
+        raise
+    shown_host = opts["host"] or "0.0.0.0"
+    url_host = "127.0.0.1" if shown_host in ("127.0.0.1", "localhost", "0.0.0.0", "") else shown_host
     if mode == "cockpit":
-        shown_host = opts["host"] or "0.0.0.0"
-        print(f"  URL:     http://{'localhost' if shown_host in ('127.0.0.1', 'localhost') else shown_host}:{port}"
-              f"   (Saloon theme: /?theme=saloon)")
+        print(f"Tagteam cockpit — {project_name} — {_banner_state(project_dir)}")
+        print(f"  → http://{url_host}:{port}   (Saloon theme: /?theme=saloon)")
+        print(f"  Project: {project_dir}")
         print(f"  Bind:    {shown_host}:{port}"
               + ("" if shown_host in ("127.0.0.1", "localhost") else
-                 "   WARNING: reachable from other hosts; the page token is the only write guard"))
+                 "   WARNING: reachable from other hosts; the page token is the only guard — and the page can run agent turns and launch processes"))
     else:
+        print(f"Tagteam Dashboard")
+        print(f"  Project: {project_dir}")
         print(f"  URL:     http://localhost:{port}")
     print()
     print("Press Ctrl+C to stop.")
@@ -1263,5 +1499,18 @@ def serve_command(args: list[str]) -> int:
     finally:
         server.stop_event.set()
         server.server_close()
+        lease.release()
 
     return 0
+
+
+def _banner_state(project_dir: str) -> str:
+    """`<phase · type · rN · state>` or `no active cycle` (never raises)."""
+    try:
+        from tagteam import launch as _launch
+        obs = _launch.launch_intent(project_dir).get("observed") or {}
+        if obs.get("phase"):
+            return f"{obs['phase']} · {obs.get('type')} · r{obs.get('round')} · {obs.get('state')}"
+    except Exception:
+        pass
+    return "no active cycle"

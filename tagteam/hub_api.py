@@ -250,6 +250,14 @@ def project_summary(project_dir: str | Path, *, now: datetime | None = None,
         except Exception as e:  # never fail the row on process inspection
             row["watcher"] = {"running": False, "pid": None, "mode": None, "source": None,
                               "stale_pidfile": False, "error": str(e)}
+        # Phase 37: the same launch intent the cockpit's Start card renders,
+        # from what this row already read (files only — read-only stays read-only)
+        try:
+            from tagteam import launch as _launch
+            row["intent"] = _launch.launch_intent(root, state=st or {}, cycle_status=cyc,
+                                                  paused=paused, _prefetched=True)
+        except Exception as e:
+            row["intent"] = {"phase": None, "type": None, "command": None, "reason": f"intent unavailable: {e}"}
         # DB-derived (read-only, only if the DB exists)
         conn = read_only_connect(root)
         if conn is not None:

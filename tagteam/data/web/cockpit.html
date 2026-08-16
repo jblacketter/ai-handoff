@@ -21,7 +21,7 @@
       <span class="chip" id="chip-owed" title="whose turn, and for how long">—</span>
       <span class="chip chip-inflight hidden" id="chip-inflight" title="in-flight headless turn">—</span>
       <span class="chip chip-hold hidden" id="chip-paused" title="dispatch is on hold">paused</span>
-      <span class="chip" id="chip-watcher" title="watcher liveness">—</span>
+      <span class="chip" id="chip-watcher" title="watcher liveness">—<button class="chip-btn hidden" id="btn-watcher" type="button">Start</button></span>
       <span class="chip hidden" id="chip-notes" title="queued interjections">—</span>
     </div>
     <div class="now-actions">
@@ -56,12 +56,34 @@
   <!-- WATCH: everything else, tabbed -->
   <section class="zone watch" id="watch" aria-label="Watch">
     <nav class="tabs" role="tablist">
+      <button class="tab" data-tab="lead" id="tab-lead" role="tab">Lead <span class="dot hidden" id="lead-dot"></span></button>
       <button class="tab active" data-tab="feed" id="tab-feed" role="tab">Feed</button>
       <button class="tab" data-tab="diff" id="tab-diff" role="tab">Diff</button>
       <button class="tab" data-tab="usage" id="tab-usage" role="tab">Usage</button>
       <button class="tab" data-tab="notes" id="tab-notes" role="tab">Notes <span class="count" id="notes-count"></span></button>
     </nav>
 
+    <div class="panel" id="panel-lead" role="tabpanel">
+      <div class="panel-head">
+        <span id="lead-title">Talk to the lead</span>
+        <span class="muted small" id="lead-continuity"></span>
+        <span class="spacer"></span>
+        <select id="lead-select" title="conversation"></select>
+        <button class="btn btn-small" id="btn-lead-new" title="start a fresh conversation (new agent session)">New</button>
+      </div>
+      <div class="lead-status muted small" id="lead-status">Loading…</div>
+      <div class="lead-transcript" id="lead-transcript" aria-live="polite"></div>
+      <div class="empty small hidden" id="lead-empty">No messages yet. Say something to the lead — brainstorm, plan, or <code>/handoff start &lt;phase&gt;</code>.</div>
+      <form class="lead-form" id="lead-form">
+        <textarea id="lead-text" rows="3" placeholder="Message the lead… (Cmd/Ctrl-Enter to send)"></textarea>
+        <div class="row">
+          <span class="muted small" id="lead-hint">Each message runs one lead turn through its own CLI (same permissions as headless turns).</span>
+          <span class="spacer"></span>
+          <button class="btn btn-danger btn-small hidden" type="button" id="btn-lead-cancel" title="cancel the running turn (tagteam cancel-turn)">Cancel</button>
+          <button class="btn btn-primary" type="submit" id="btn-lead-send">Send</button>
+        </div>
+      </form>
+    </div>
     <div class="panel active" id="panel-feed" role="tabpanel">
       <div class="panel-head"><span id="feed-title">Round stream</span><span class="spacer"></span><span class="muted" id="feed-meta"></span></div>
       <div id="feed-list"></div>
