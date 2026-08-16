@@ -457,12 +457,15 @@ class _StateProcessor:
         pre_send_delay: float,
         engine=None,
         briefer=None,
+        gatekeeper=None,
     ):
         self.mode = mode
         # Phase 31: HeadlessEngine when mode == "headless" (else None).
         self.engine = engine
         # Phase 33: BriefSpec (enabled) or None — escalation briefer.
         self.briefer = briefer
+        # Phase 38: GateSpec (enabled) or None — gatekeeper pre-checks.
+        self.gatekeeper = gatekeeper
         self.lead_name = lead_name
         self.reviewer_name = reviewer_name
         self.lead_pane = lead_pane
@@ -485,6 +488,12 @@ class _StateProcessor:
         # and that seq is still ready, tick() re-dispatches it exactly once.
         self._paused_seq: int | None = None
         self._last_pause_log: float = 0.0
+        # Phase 38: gate-owed latch — the seq whose reviewer hand-off we
+        # withheld because the gate could not decide yet (turn slot busy,
+        # another runner's attempt live). Identical later ticks re-enter
+        # the gate in EVERY mode; the reviewer is never dispatched past an
+        # undecided gate.
+        self._gate_owed_seq: int | None = None
 
     # -- pause (Phase 32) --------------------------------------------------
 
@@ -545,6 +554,18 @@ class _StateProcessor:
 
         # Seq dedup with stuck-agent + watchdog re-send logic
         if current_seq == self.last_processed_seq:
+            # Phase 38: gate-owed re-entry (every mode) — the reviewer's
+            # hand-off for this very seq is still owed to an undecided
+            # gate; try again, and on a decision continue into the normal
+            # hand-off (PASS) or return (BOUNCE moved the turn).
+            if (self._gate_owed_seq == current_seq
+                    and state.get("status") == "ready"
+                    and state.get("turn") == "reviewer"):
+                if self._pause_info() is not None:
+                    self._log_paused(self._pause_info() or {})
+                    return
+                self._dispatch(state)
+                return
             # Phase 32: resume re-dispatch — we declined this seq while
             # paused; if the marker is now gone and the state is still
             # ready, dispatch it exactly once.
@@ -642,6 +663,12 @@ class _StateProcessor:
             self._log_paused(info, force=True)
             return
         self._paused_seq = None
+        # Phase 38: the gate sits between the lead's submission and the
+        # reviewer's turn, in every mode. It decides (PASS → fall through
+        # to the hand-off in this same tick; BOUNCE → the turn is the
+        # lead's now, return) or defers (latch this seq, return).
+        if (state or {}).get("turn") == "reviewer" and not self._maybe_gate(state or {}):
+            return
         send_success = False
 
         if self.mode == "iterm2":
@@ -772,6 +799,44 @@ class _StateProcessor:
         except Exception as e:  # the loop must never die because of the briefer
             _log(f"   briefer error: {type(e).__name__}: {e}")
 
+    def _maybe_gate(self, state: dict) -> bool:
+        """Phase 38: run the gatekeeper for a reviewer-ready submission.
+        Returns True when the reviewer may be handed off now (gate
+        disabled / not applicable / PASS / already decided PASS for this
+        very submission), False when the hand-off must not happen in this
+        tick (BOUNCE — the turn moved to the lead; deferred — the latch
+        retries on identical ticks; error — fail closed for this tick).
+        Byte-identical behaviour when the gate is not enabled."""
+        spec = self.gatekeeper
+        if spec is None or not getattr(spec, "enabled", False):
+            return True
+        seq = state.get("seq")
+        try:
+            from tagteam import gatekeeper as _gk
+            res = _gk.run_gate(self.project_dir, kind="auto", spec=spec, state=state, log=_log)
+        except Exception as e:  # the loop must never die because of the gate
+            _log(f"   gate error: {type(e).__name__}: {e} — will retry")
+            self._gate_owed_seq = seq
+            return False
+        if res.status in ("deferred", "error", "not-ready"):
+            # undecided (slot busy / live other runner / transient) — retry
+            # on identical ticks; the reviewer waits for a decision
+            if self._gate_owed_seq != seq:
+                _log(f"   gate: undecided ({res.reason}) — reviewer hand-off withheld until the gate decides")
+            self._gate_owed_seq = seq
+            return False
+        self._gate_owed_seq = None
+        if res.status == "stale":
+            _log(f"   gate: {res.reason} — this observation is stale; not dispatching")
+            return False
+        if res.status == "bounce":
+            _log("   gate: bounced — turn is the lead's (reviewer not dispatched)")
+            return False
+        if not res.dispatch:
+            _log(f"   gate: {res.reason} — no hand-off")
+            return False
+        return True
+
 
 def _build_processor(
     *,
@@ -829,6 +894,20 @@ def _build_processor(
     except Exception as e:
         _log(f"WARNING: escalation briefer disabled for this run: {e}")
 
+    # Phase 38: gatekeeper pre-checks — opt-in; problems warn and disable.
+    gate_spec = None
+    try:
+        from tagteam.gatekeeper import resolve_gatekeeper
+        gs = resolve_gatekeeper(config or {})
+        if gs.enabled:
+            gate_spec = gs
+        elif gs.problems:
+            _log("WARNING: gatekeeper disabled for this run:")
+            for pr in gs.problems:
+                _log(f"  - {pr}")
+    except Exception as e:
+        _log(f"WARNING: gatekeeper disabled for this run: {e}")
+
     engine = None
     if mode == "headless":
         from tagteam.headless import (HeadlessEngine,
@@ -868,6 +947,7 @@ def _build_processor(
         pre_send_delay=pre_send_delay,
         engine=engine,
         briefer=briefer_spec,
+        gatekeeper=gate_spec,
     )
 
 
@@ -875,6 +955,10 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
     _log(f"Watching handoff-state.json"
          f" (interval: {interval}s, mode: {processor.mode})")
     _log(f"Lead: {processor.lead_name} | Reviewer: {processor.reviewer_name}")
+    gk = getattr(processor, "gatekeeper", None)
+    if gk is not None and getattr(gk, "enabled", False):
+        _log(f"Gatekeeper: on ({', '.join(gk.on)} cycles"
+             f"{'; tests: ' + (gk.tests_command if isinstance(gk.tests_command, str) else ' '.join(map(str, gk.tests_command))) if gk.tests_command else ''})")
     if processor.mode == "tmux":
         _log(f"Panes: lead={processor.lead_pane},"
              f" reviewer={processor.reviewer_pane}")

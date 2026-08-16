@@ -355,10 +355,11 @@ class Submission:
 
 
 def current_submission(project_root: str, *, phase: str | None = None,
-                       cycle_type: str | None = None, state: dict | None = None) -> Submission | None:
-    """The reviewer-ready submission the gate would act on, or None."""
+                       cycle_type: str | None = None) -> Submission | None:
+    """The reviewer-ready submission the gate would act on, from the FRESH
+    top-level state + cycle status, or None."""
     from tagteam.state import read_state
-    st = state if state is not None else (read_state(project_root) or {})
+    st = read_state(project_root) or {}
     if not st:
         return None
     if phase is None:
@@ -390,7 +391,7 @@ def _pinned(sub: Submission, project_root: str) -> bool:
 
 def _entry_for_event(project_root: str, phase: str, cycle_type: str, event_key: str) -> dict | None:
     try:
-        rounds = _cycle.read_rounds(phase, cycle_type, project_root)
+        rounds = _cycle.read_rounds_file(phase, cycle_type, project_root)
     except Exception:
         return None
     for e in rounds:
@@ -413,12 +414,12 @@ def _finish_from_apply(conn, row_id: int, action: str, applied: dict, *, ts: str
                        duration_s: float | None = None) -> str:
     """Translate an `ensure_gate_applied` result into the terminal row status
     and write it. Returns the status."""
-    if action == _cycle.GATE_PASS:
-        status = "pass"
-    elif applied["applied"] in ("applied", "already"):
-        status = "bounce"
-    else:
+    if applied["applied"] == "superseded":
         status = "superseded"
+    elif action == _cycle.GATE_PASS:
+        status = "pass"
+    else:                                   # "applied" | "already"
+        status = "bounce"
     reason = None if status in ("pass", "bounce") else "submission advanced before the decision could apply"
     _db.finish_gate(conn, row_id, status=status, ts=ts, duration_s=duration_s, result_json=result_json,
                     stem=stem, reason=reason, applied_seq=applied.get("applied_seq"))
@@ -536,7 +537,7 @@ def sweep_abandoned_gates(project_root: str, spec: GateSpec | None = None, *,
 
 @dataclass
 class GateResult:
-    status: str                 # pass | bounce | deferred | superseded | error | not-applicable | not-ready
+    status: str                 # pass | bounce | deferred | superseded | error | not-applicable | not-ready | stale
     dispatch: bool              # caller may hand the reviewer off now
     reason: str = ""
     event_key: str | None = None
@@ -587,9 +588,18 @@ def run_gate(project_root: str, *, kind: str = "auto", spec: GateSpec | None = N
     project_root = str(Path(project_root).resolve())
     log = log or (lambda *_: None)
     spec = spec or load_spec(project_root)
-    sub = current_submission(project_root, phase=phase, cycle_type=cycle_type, state=state)
+    sub = current_submission(project_root, phase=phase, cycle_type=cycle_type)
     if sub is None:
-        return GateResult("not-ready", True, "no reviewer-ready submission to gate")
+        # Nothing reviewer-ready right now: either the caller's observation
+        # is stale (a decided BOUNCE already moved the turn) or the state
+        # cannot be read — never a reason to hand the reviewer off.
+        return GateResult("not-ready", False, "no reviewer-ready submission to gate (fresh state)")
+    if state is not None and int(state.get("seq") or 0) != sub.submission_seq:
+        # The caller observed an OLDER seq than the live one: its hand-off is
+        # for a submission that no longer exists; the fresh seq gets its own
+        # tick (or a fresh gate) — do not gate or dispatch from a stale view.
+        return GateResult("stale", False, f"observed seq {state.get('seq')} != live seq {sub.submission_seq}",
+                          sub.event_key)
     if not spec.applies_to(sub.type):
         return GateResult("not-applicable", True, f"gate not enabled for {sub.type} cycles", sub.event_key)
 
@@ -666,16 +676,23 @@ def run_gate(project_root: str, *, kind: str = "auto", spec: GateSpec | None = N
         log_path = _gates_dir(project_root) / f"{stem}.log"
         log(f"   gate: checking {sub.event_key} (attempt {attempt}, {kind})")
 
-        # 3. checks (outside the lock; slot held)
+        # 3. checks (outside the lock; slot held). The round log's length is
+        # pinned first: an AMEND during the checks is rounds-only (no seq
+        # bump) and must still supersede this decision.
+        try:
+            pre_entries = len(_cycle.read_rounds_file(sub.phase, sub.type, project_root))
+        except Exception:
+            pre_entries = None
         t0 = time.monotonic()
         results = run_checks(spec, sub.phase, sub.type, project_root, log_path=log_path, log=log)
         try:
-            rounds = _cycle.read_rounds(sub.phase, sub.type, project_root)
+            rounds = _cycle.read_rounds_file(sub.phase, sub.type, project_root)
         except Exception:
             rounds = []
         decision = decide(results, spec, consecutive_bounces(rounds))
         decision.update({"round": sub.round, "gate_event": sub.event_key, "gate_id": row_id,
-                         "gate_attempt": attempt, "submission_seq": sub.submission_seq})
+                         "gate_attempt": attempt, "submission_seq": sub.submission_seq,
+                         "pre_entries": pre_entries})
         duration = time.monotonic() - t0
         results["decision"] = {k: decision[k] for k in ("action", "verdict", "cap_hit", "failed")}
         try:
@@ -759,7 +776,7 @@ def last_gate_summary(project_root: str, phase: str, cycle_type: str) -> dict | 
     """Cockpit: {'status', 'round', 'ts', 'attempt'} of the most recent
     decided gate for the cycle (from the round entries — no DB needed)."""
     try:
-        rounds = _cycle.read_rounds(phase, cycle_type, project_root)
+        rounds = _cycle.read_rounds_file(phase, cycle_type, project_root)
     except Exception:
         return None
     ents = gate_entries(rounds)
@@ -769,3 +786,147 @@ def last_gate_summary(project_root: str, phase: str, cycle_type: str) -> dict | 
     return {"status": "pass" if e.get("action") == _cycle.GATE_PASS else "bounce",
             "round": e.get("round"), "ts": e.get("ts"), "attempt": e.get("gate_attempt"),
             "headline": (e.get("content") or "").splitlines()[0] if e.get("content") else ""}
+
+
+# ---------------------------------------------------------------------------
+# CLI: tagteam gate check | run | status | list
+
+_GATE_USAGE = """Usage: tagteam gate <check|run|status|list> [--phase P --type T] [--json]
+  check   run the checks against the working tree, print the report, write nothing
+          (lead pre-flight before SUBMIT_FOR_REVIEW; exit 0 = would pass, 1 = would bounce)
+  run     gate the current reviewer-ready submission and record PASS/BOUNCE
+          (manual-mode substitute for the watcher; same at-most-once claim path)
+  status  last gate result for the current cycle (--json for the raw rows)
+  list    every gate row for a cycle"""
+
+
+def _fmt_row(r: dict) -> str:
+    dur = f" {_fmt_dur(r['duration_s'])}" if r.get("duration_s") is not None else ""
+    extra = f" — {r['reason']}" if r.get("reason") else ""
+    seq = f" applied_seq={r['applied_seq']}" if r.get("applied_seq") is not None else ""
+    return (f"  #{r['id']} {r['event_key']} a{r['attempt']} {r['kind']:<6} {r['status']:<10}"
+            f"{dur}{seq} started {r.get('started_at', '?')}{extra}")
+
+
+def gate_command(args: list[str], project_root: str | Path | None = None, out=None) -> int:
+    from tagteam.state import read_state
+    out = out or sys.stdout
+    if not args or args[0] in ("-h", "--help"):
+        print(_GATE_USAGE, file=out)
+        return 0 if args else 1
+    sub = args[0]
+    if sub not in ("check", "run", "status", "list"):
+        print(f"Unknown gate subcommand: {sub}\n{_GATE_USAGE}", file=out)
+        return 1
+    phase = ctype = None
+    as_json = False
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a == "--phase" and i + 1 < len(args):
+            phase = args[i + 1]; i += 2
+        elif a == "--type" and i + 1 < len(args):
+            ctype = args[i + 1]; i += 2
+        elif a == "--json":
+            as_json = True; i += 1
+        else:
+            print(f"Unknown argument: {a}", file=out); return 1
+    if project_root is None:
+        from tagteam.state import _resolve_project_root
+        project_root = _resolve_project_root()
+    root = str(project_root)
+    st = read_state(root) or {}
+    phase = phase or st.get("phase")
+    ctype = ctype or st.get("type")
+    spec = load_spec(root)
+
+    if sub == "check":
+        if not phase or not ctype:
+            print("No cycle selected (use --phase/--type).", file=out); return 1
+        if spec.problems:
+            for pr in spec.problems:
+                print(f"gatekeeper config: {pr}", file=out)
+        if not spec.enabled:
+            print("gatekeeper is not enabled (tagteam.yaml `gatekeeper: {enabled: true}`) — running the checks anyway:",
+                  file=out)
+        progress = (lambda m: print(m.strip(), file=sys.stderr)) if as_json else (lambda m: print(m.strip(), file=out))
+        results = run_checks(spec, phase, ctype, root, log=progress)
+        try:
+            rounds = _cycle.read_rounds_file(phase, ctype, root)
+        except Exception:
+            rounds = []
+        decision = decide(results, spec, consecutive_bounces(rounds))
+        if as_json:
+            print(json.dumps({"results": results, "decision": decision}, indent=2), file=out)
+        else:
+            print(format_check_report(results, decision), file=out)
+            if decision["cap_hit"]:
+                print(f"  (bounce cap {spec.max_bounces} reached — the gate would pass this with findings)", file=out)
+        return 0 if decision["action"] == _cycle.GATE_PASS and not decision["cap_hit"] else 1
+
+    if sub == "run":
+        if not spec.enabled:
+            print("gatekeeper is not enabled — set `gatekeeper: {enabled: true}` in tagteam.yaml", file=out)
+            for pr in spec.problems:
+                print(f"  - {pr}", file=out)
+            return 1
+        progress = (lambda m: print(m.strip(), file=sys.stderr)) if as_json else (lambda m: print(m.strip(), file=out))
+        res = run_gate(root, kind="manual", spec=spec, phase=phase, cycle_type=ctype, log=progress)
+        if as_json:
+            print(json.dumps({"status": res.status, "dispatch": res.dispatch, "reason": res.reason,
+                              "event_key": res.event_key, "gate_id": res.gate_id, "attempt": res.attempt,
+                              "decision": res.decision}, indent=2), file=out)
+        else:
+            if res.decision:
+                print(res.decision["content"], file=out)
+            print(f"gate: {res.status} — {res.reason}" + (f" ({res.event_key})" if res.event_key else ""), file=out)
+            if res.status == "pass":
+                print("next: the reviewer's turn (the watcher, if running, hands off; otherwise tell the reviewer to run /handoff)", file=out)
+            elif res.status == "bounce":
+                print("next: the lead's turn (turn handed back with the failing report)", file=out)
+        return 0 if res.status in ("pass", "bounce", "not-applicable") else 1
+
+    info = gate_status(root, phase, ctype)
+    if sub == "list":
+        if as_json:
+            print(json.dumps(info["rows"], indent=2), file=out)
+            return 0
+        if not info["rows"]:
+            print(f"No gate rows for {info['phase']}_{info['type']}.", file=out)
+            return 0
+        print(f"Gate rows for {info['phase']}_{info['type']}:", file=out)
+        for r in info["rows"]:
+            print(_fmt_row(r), file=out)
+        return 0
+
+    # status
+    if as_json:
+        print(json.dumps({k: info[k] for k in ("enabled", "on", "problems", "phase", "type", "last", "unverifiable")},
+                         indent=2), file=out)
+        return 0
+    print(f"Gatekeeper: {'on' if info['enabled'] else 'off'}"
+          + (f" ({', '.join(info['on'])} cycles)" if info['enabled'] else ""), file=out)
+    for pr in info["problems"]:
+        print(f"  config: {pr}", file=out)
+    if not info["phase"] or not info["type"]:
+        print("No cycle selected (use --phase/--type).", file=out)
+        return 0
+    last = info["last"]
+    if last is None:
+        print(f"No gate has run for {info['phase']}_{info['type']}.", file=out)
+    else:
+        print(f"Last gate for {info['phase']}_{info['type']}:", file=out)
+        print(_fmt_row(last), file=out)
+        try:
+            rj = json.loads(last.get("result_json") or "{}")
+        except ValueError:
+            rj = {}
+        if rj.get("checks"):
+            print(format_check_report(rj), file=out)
+        summ = last_gate_summary(root, info["phase"], info["type"])
+        if summ and summ.get("headline"):
+            print(f"  entry: r{summ['round']} {summ['headline']}", file=out)
+    for u in info["unverifiable"]:
+        print(f"  note: gate row #{u['id']} ({u['event_key']}) is running but its runner cannot be verified — {u['reason']}",
+              file=out)
+    return 0

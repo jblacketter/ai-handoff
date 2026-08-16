@@ -196,6 +196,18 @@ tagteam usage [--json]                        # per-turn tokens; roll-ups by rol
 
 How each of these behaves (pause markers, cancel-turn identity checks, interjection scoping, retries, notifications, `tagteam rollback`): [arbiter controls](docs/how-tagteam-works.md#controls).
 
+### Gatekeeper: don't spend a reviewer turn on a broken build
+
+```yaml
+# tagteam.yaml
+gatekeeper:
+  enabled: true                       # opt-in; absent = off
+  tests:
+    command: "python -m pytest -q"
+```
+
+With the gate on, every impl submission is checked **before** the reviewer's turn — by a script, not a model: the test command runs, the submission must contain real implementation work since the plan was approved (an impl cycle opened over an unchanged tree fails), and the phase plan must exist. Green → a one-line report is attached to the round and the reviewer starts with the facts; red → the turn bounces straight back to the lead with the failing output, and no reviewer tokens or rounds are spent. Two consecutive bounces and the gate passes-with-findings so nobody gets trapped. `tagteam gate check` is the lead's pre-flight; `tagteam gate status` shows the last report. Runs in every watcher mode; without a watcher, `tagteam gate run`. Details: [gatekeeper pre-checks](docs/how-tagteam-works.md#gatekeeper).
+
 ## Talk to the lead, launch, watch and steer
 
 **The Cockpit** — the browser surface for one project, built around the arbiter's actual job: *how do I begin?*, *let me tell the lead something*, *does anything need me?*, then *is it healthy and what is it doing?*
@@ -267,6 +279,7 @@ tagteam lead "message" [--new] [--conversation ID] / --list           # talk to 
 tagteam hub [--list [--json]] [--all] [--port 8090]                   # all registered projects; cockpits at /p/<id>/
 tagteam registry list [--json] | unregister PATH
 tagteam brief [--list | --generate | --event KEY]
+tagteam gate check | run | status [--json] | list      # gatekeeper pre-checks (opt-in `gatekeeper:` block)
 tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]
 tagteam roadmap phases

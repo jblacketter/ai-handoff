@@ -349,7 +349,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** arbiter walk-through 2026-08-16 (idle cockpit dead-ends; two servers shadowing on one port; "I want to talk to my lead and start one from here").
 
 ### Phase 38: Gatekeeper Pre-checks (3.2)
-- **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-38-gatekeeper-pre-checks` (PR at the end). Release **3.2.0** after impl approval; tag after merge + green CI.
+- **Status:** In progress — plan approved (round 5, 2026-08-16); implementation complete on branch `phase-38-gatekeeper-pre-checks`, impl review open (PR at the end). Release **3.2.0** after impl approval; tag after merge + green CI.
 - **Description:** a deterministic, model-free gate between the lead's `SUBMIT_FOR_REVIEW` and the reviewer's turn: run the project's configured test command, the existing scope-diff audit and a plan-doc check; **PASS** attaches the report to the round so the reviewer starts with the facts, **BOUNCE** hands the turn straight back to the lead with the failing output so no reviewer turn is spent on a submission that doesn't build. Runs in the watcher (headless and interactive), at-most-once per submission via a claim row (briefer pattern), bounded by `max_bounces` so it can never trap a lead; `tagteam gate check|run|status|list`; cockpit feed shows gate items. Opt-in behind `gatekeeper.enabled` — flag-off is byte-identical to 3.1.1.
 - **Plan:** `docs/phases/gatekeeper-pre-checks.md`
 - **Source:** 3.0 proposal §4 candidate; promoted 2026-08-16 as the first post-arc phase (best value-to-risk of the four candidates).

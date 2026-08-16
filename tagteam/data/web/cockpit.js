@@ -200,6 +200,23 @@
       wbtn.classList.remove('hidden');
     }
 
+    // Phase 38: gate chip — only when the gate is on; last decision for this cycle.
+    var gc = $('chip-gate');
+    var gk = n.gatekeeper || {};
+    if (gc) {
+      if (gk.enabled) {
+        gc.classList.remove('hidden');
+        gc.className = 'chip' + (gk.last && gk.last.status === 'bounce' ? ' warn' : (gk.last ? ' ok' : ''));
+        if (gk.last) {
+          gc.innerHTML = 'gate ' + (gk.last.status === 'pass' ? '&#10003;' : '&#8617;') + ' r' + esc(gk.last.round);
+          gc.title = (gk.last.headline || ('gate ' + gk.last.status)) + (gk.last.ts ? ' · ' + fmtTs(gk.last.ts) : '');
+        } else {
+          gc.textContent = 'gate on';
+          gc.title = 'gatekeeper pre-checks run before each reviewer turn (' + (gk.on || []).join(', ') + ')';
+        }
+      } else gc.classList.add('hidden');
+    }
+
     var notes = $('chip-notes');
     if (n.pending_notes) { notes.classList.remove('hidden'); notes.textContent = n.pending_notes + ' queued note' + (n.pending_notes > 1 ? 's' : ''); }
     else notes.classList.add('hidden');
@@ -475,7 +492,10 @@
       rounds.forEach(function (r) {
         (r.entries || []).forEach(function (e, i) {
           var isRuling = /^\[ARBITER RULING by /.test(e.content || '');
-          items.push({ id: 'r' + r.round + '-' + i + '-' + e.ts, kind: isRuling ? 'ruling' : e.role, role: isRuling ? 'arbiter' : e.role, action: e.action, ts: e.ts, round: r.round, text: e.content || '', by: e.updated_by });
+          // Phase 38: gate entries — kind 'gate' (pass = neutral, bounce = warm).
+          var isGate = e.role === 'gatekeeper' || e.action === 'GATE_PASS' || e.action === 'GATE_BOUNCE';
+          var kind = isRuling ? 'ruling' : (isGate ? 'gate' + (e.action === 'GATE_BOUNCE' ? ' bounce' : ' pass') : e.role);
+          items.push({ id: 'r' + r.round + '-' + i + '-' + e.ts, kind: kind, role: isRuling ? 'arbiter' : (isGate ? 'gatekeeper' : e.role), action: e.action, ts: e.ts, round: r.round, text: e.content || '', by: e.updated_by });
         });
         (r.rulings || []).forEach(function (e, i) {
           if (!(r.entries || []).some(function (x) { return x.ts === e.ts; })) items.push({ id: 'ru' + r.round + '-' + i, kind: 'ruling', role: 'arbiter', action: e.action, ts: e.ts, round: r.round, text: e.content || '' });

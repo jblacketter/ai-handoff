@@ -61,6 +61,7 @@ class TestNow:
         assert n["agents"] == {"lead": "A", "reviewer": "B"}
         assert n["briefer_enabled"] is False
         assert n["cycle"] is None
+        assert n["gatekeeper"] == {"enabled": False, "last": None, "on": ["impl"]}   # Phase 38, opt-in
 
     def test_no_config_at_all(self, tmp_path):
         n = capi.now_payload(tmp_path)
