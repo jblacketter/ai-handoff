@@ -209,6 +209,8 @@ tagteam serve --theme cockpit --dir ~/projects/myproject      # http://localhost
 - **Needs you** — one card per thing only the human can do: an escalation with its Phase 33 brief and **Approve / Request changes**, a needs-human question with **Answer**, a hold with **Resume**, a missing/failed brief with **Generate brief**, a stale in-flight or missing watcher with the CLI to run. Empty when nothing needs you — and it says so.
 - **Watch** tabs — **Feed** (live round stream: entries, rulings, interjections, briefs), **Diff** (scope-diff of the current submission, per file, capped), **Usage** (round-over-round churn with the round-10 line, burn by role / cycle / process, and the Claude subscription-window signal), **Notes** (interjections: queue one, retire one).
 
+The Now strip's watcher chip is project-bound: with `serve.theme: cockpit` in `tagteam.yaml` (or `tagteam watch --pidfile`) the watcher keeps an identity-checked `.tagteam/watcher.json` for its lifetime; otherwise the cockpit finds the watcher by process scan (cwd = the project) and the in-flight turn's runner identity. A bare `tagteam watch` writes nothing new.
+
 Every button is the CLI command with the same effect (`tagteam pause`, `resume`, `interject`, `cancel-turn`, `brief --generate`, `rule …`) — final actions confirm by showing the exact CLI line the server will run, and every action reports the CLI's own message. Recorded as `by = web:<user>`. Set `serve: {theme: cockpit}` in `tagteam.yaml` to make it the default for a project.
 
 **Security note.** Cockpit mode binds **127.0.0.1** by default; a per-run token is embedded in the page and required as `X-Tagteam-Token` on every POST (`Origin`/`Referer` must match the server; no `*` CORS). That stops cross-site POSTs and non-browser clients that have not read the page — it is not remote-access authentication. `--host 0.0.0.0` deliberately exposes the server on the network; the page token is then the only guard, so do that only on a network you trust.
@@ -249,6 +251,7 @@ tagteam state
 tagteam state diagnose
 tagteam watch --mode notify
 tagteam watch --mode headless          # spawn each turn as a fresh agent process
+tagteam watch --pidfile                # keep .tagteam/watcher.json for the cockpit's liveness strip
 tagteam tail                           # follow the in-flight headless turn
 tagteam cycle rounds --phase P --type plan --tail 3
 tagteam pause --reason "..." / tagteam resume / tagteam cancel-turn

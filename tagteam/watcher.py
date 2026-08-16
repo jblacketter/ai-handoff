@@ -911,9 +911,30 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
 # project; the pidfile (pid + creation identity + mode) can. Written at
 # start, removed on clean exit; a stale file (dead pid / identity mismatch)
 # is reported, never trusted.
+#
+# OPT-IN (3.0 arc §2: flag-off behavior is identical to the previous
+# release): the file is written only when the project has opted into the
+# cockpit (`serve: {theme: cockpit}` in tagteam.yaml) or the watcher was
+# started with `--pidfile`. Otherwise `tagteam watch` writes nothing new;
+# the cockpit then falls back to the cwd-bound process scan / in-flight
+# identity (see `cockpit_api.watcher_status`).
 # ---------------------------------------------------------------------------
 
 WATCHER_PIDFILE = "watcher.json"
+
+
+def pidfile_enabled(project_root: str | Path, explicit: bool | None = None) -> bool:
+    """True when the watcher should keep a pidfile: `--pidfile` given, or
+    the project's tagteam.yaml has `serve.theme: cockpit`. Never raises."""
+    if explicit is not None:
+        return bool(explicit)
+    try:
+        cfg = read_config(Path(project_root) / "tagteam.yaml") or {}
+        serve = cfg.get("serve") if isinstance(cfg, dict) else None
+        theme = serve.get("theme") if isinstance(serve, dict) else None
+        return isinstance(theme, str) and theme.strip().lower() == "cockpit"
+    except Exception:
+        return False
 
 
 def pidfile_path(project_root: str | Path) -> Path:
@@ -986,8 +1007,12 @@ def watch(
     turn_timeout_minutes: int | None = None,
     tail_rounds: int | None = None,
     turn_retries: int = 0,
+    pidfile: bool | None = None,
 ) -> bool:
     """Main watch loop. Blocks until interrupted with Ctrl-C.
+
+    `pidfile`: True/False forces the Phase 34 liveness record on/off; None
+    (default) follows the project's cockpit opt-in (`serve.theme: cockpit`).
 
     Returns False if the watcher could not start (missing iTerm session
     IDs, headless startup validation failed); True otherwise.
@@ -1022,7 +1047,9 @@ def watch(
         _log("[trigger] headless mode uses poll trigger")
 
     pidfile_root = _pidfile_root(project_dir)
-    write_pidfile(pidfile_root, mode)
+    keep_pidfile = pidfile_enabled(pidfile_root, pidfile)
+    if keep_pidfile:
+        write_pidfile(pidfile_root, mode)
     try:
         if not force_poll:
             from tagteam import watcher_events
@@ -1042,7 +1069,8 @@ def watch(
         _run_poll_loop(processor, project_dir, interval)
         return True
     finally:
-        remove_pidfile(pidfile_root)
+        if keep_pidfile:
+            remove_pidfile(pidfile_root)
 
 
 def _run_poll_loop(processor: "_StateProcessor",
@@ -1148,11 +1176,15 @@ def watch_command(args: list[str]) -> int:
     turn_timeout_minutes = None
     tail_rounds = None
     turn_retries = 0
+    pidfile = None
 
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == "--interval" and i + 1 < len(args):
+        if arg == "--pidfile":
+            pidfile = True
+            i += 1
+        elif arg == "--interval" and i + 1 < len(args):
             interval = int(args[i + 1])
             i += 2
         elif arg == "--mode" and i + 1 < len(args):
@@ -1214,6 +1246,8 @@ def watch_command(args: list[str]) -> int:
             print("  --retry-delay N    Seconds between retries (default: 2.0)")
             print("  --send-delay N     Seconds to wait before sending (default: 1.0)")
             print("  --poll             Force polling mode (skip watchdog event detection)")
+            print("  --pidfile          Keep .tagteam/watcher.json (pid + identity) for the cockpit's")
+            print("                     liveness strip; implied by `serve: {theme: cockpit}` in tagteam.yaml")
             print()
             print("Headless mode (opt-in, --mode headless):")
             print("  --turn-timeout N   Kill a spawned turn after N minutes (default: 60)")
@@ -1245,5 +1279,6 @@ def watch_command(args: list[str]) -> int:
         turn_timeout_minutes=turn_timeout_minutes,
         tail_rounds=tail_rounds,
         turn_retries=turn_retries,
+        pidfile=pidfile,
     )
     return 0 if started else 1

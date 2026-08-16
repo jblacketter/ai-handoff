@@ -208,35 +208,90 @@ def test_done_status_with_roadmap_advance_skips_completion_message():
 # Phase 34: watch() records a project-bound pidfile for its lifetime
 # ---------------------------------------------------------------------------
 
-def test_watch_writes_and_removes_pidfile(tmp_path, monkeypatch):
-    import os
-    from tagteam import watcher as watcher_mod
-    (tmp_path / "tagteam.yaml").write_text("agents:\n  lead:\n    name: A\n  reviewer:\n    name: B\n")
-    seen = {}
+_BASE_YAML = "agents:\n  lead:\n    name: A\n  reviewer:\n    name: B\n"
+_COCKPIT_YAML = _BASE_YAML + "serve:\n  theme: cockpit\n"
 
-    def fake_poll_loop(processor, project_dir, interval):
-        rec = watcher_mod.read_pidfile(tmp_path)
-        seen["during"] = rec
 
+def _snapshot(root):
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+def _stub_watch(monkeypatch, watcher_mod, on_loop):
     monkeypatch.setattr(watcher_mod, "_build_processor", lambda **kw: MagicMock())
     monkeypatch.setattr(watcher_mod, "_log_startup_banner", lambda *a, **k: None)
-    monkeypatch.setattr(watcher_mod, "_run_poll_loop", fake_poll_loop)
+    monkeypatch.setattr(watcher_mod, "_run_poll_loop", on_loop)
+
+
+def test_flag_off_watch_creates_no_new_files(tmp_path, monkeypatch):
+    """3.0-arc hard constraint: bare `tagteam watch` (no cockpit opt-in) must
+    behave exactly as before — no watcher.json, no other new file."""
+    from tagteam import watcher as watcher_mod
+    (tmp_path / "tagteam.yaml").write_text(_BASE_YAML)
+    before = _snapshot(tmp_path)
+    seen = {}
+
+    def loop(processor, project_dir, interval):
+        seen["during"] = _snapshot(tmp_path)
+        seen["pidfile"] = watcher_mod.read_pidfile(tmp_path)
+
+    _stub_watch(monkeypatch, watcher_mod, loop)
+    assert watcher_mod.watch(mode="iterm2", project_dir=str(tmp_path), force_poll=True) is True
+    assert seen["pidfile"] is None
+    assert seen["during"] == before                 # nothing written while running
+    assert _snapshot(tmp_path) == before            # nothing left behind
+    assert not (tmp_path / ".tagteam").exists()
+    assert watcher_mod.pidfile_enabled(tmp_path) is False
+
+
+def test_watch_writes_and_removes_pidfile_when_cockpit_configured(tmp_path, monkeypatch):
+    import os
+    from tagteam import watcher as watcher_mod
+    (tmp_path / "tagteam.yaml").write_text(_COCKPIT_YAML)      # the config gate
+    assert watcher_mod.pidfile_enabled(tmp_path) is True
+    seen = {}
+
+    def loop(processor, project_dir, interval):
+        seen["during"] = watcher_mod.read_pidfile(tmp_path)
+
+    _stub_watch(monkeypatch, watcher_mod, loop)
     assert watcher_mod.watch(mode="iterm2", project_dir=str(tmp_path), force_poll=True) is True
     assert seen["during"]["pid"] == os.getpid() and seen["during"]["mode"] == "iterm2"
     assert seen["during"]["project_dir"] == str(tmp_path.resolve())
     assert watcher_mod.read_pidfile(tmp_path) is None          # removed on exit
 
 
+def test_watch_pidfile_explicit_flag_overrides_config(tmp_path, monkeypatch):
+    from tagteam import watcher as watcher_mod
+    (tmp_path / "tagteam.yaml").write_text(_BASE_YAML)         # no config gate
+    seen = {}
+    _stub_watch(monkeypatch, watcher_mod, lambda p, d, i: seen.__setitem__("rec", watcher_mod.read_pidfile(tmp_path)))
+    assert watcher_mod.watch(mode="notify", project_dir=str(tmp_path), force_poll=True, pidfile=True) is True
+    assert seen["rec"] is not None and seen["rec"]["mode"] == "notify"
+    assert watcher_mod.read_pidfile(tmp_path) is None
+    # explicit False wins over the config gate
+    (tmp_path / "tagteam.yaml").write_text(_COCKPIT_YAML)
+    seen.clear()
+    assert watcher_mod.watch(mode="notify", project_dir=str(tmp_path), force_poll=True, pidfile=False) is True
+    assert seen["rec"] is None
+    # `--pidfile` is parsed by the CLI entry point
+    called = {}
+    monkeypatch.setattr(watcher_mod, "watch", lambda **kw: called.update(kw) or True)
+    assert watcher_mod.watch_command(["--mode", "notify", "--pidfile"]) == 0
+    assert called["pidfile"] is True
+    called.clear()
+    assert watcher_mod.watch_command(["--mode", "notify"]) == 0
+    assert called["pidfile"] is None
+
+
 def test_watch_pidfile_removed_on_exception(tmp_path, monkeypatch):
     from tagteam import watcher as watcher_mod
-    monkeypatch.setattr(watcher_mod, "_build_processor", lambda **kw: MagicMock())
-    monkeypatch.setattr(watcher_mod, "_log_startup_banner", lambda *a, **k: None)
+    (tmp_path / "tagteam.yaml").write_text(_COCKPIT_YAML)
 
     def boom(processor, project_dir, interval):
         assert watcher_mod.read_pidfile(tmp_path) is not None
         raise RuntimeError("loop died")
 
-    monkeypatch.setattr(watcher_mod, "_run_poll_loop", boom)
+    _stub_watch(monkeypatch, watcher_mod, boom)
     with pytest.raises(RuntimeError):
         watcher_mod.watch(mode="notify", project_dir=str(tmp_path), force_poll=True)
     assert watcher_mod.read_pidfile(tmp_path) is None
