@@ -5,8 +5,8 @@
 - [x] In Review (round 2: dispatch seam, non-mutating registry reads, exhaustive read-only + SSE contract, per-kind shared window, abandoned ⊂ stale)
 - [x] Approved (round 2)
 - [x] Implementation
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation Review (approved round 2, 2026-08-16)
+- [x] Complete (release 0.12.0 via PR)
 
 ## Roles
 - Lead: Claude
