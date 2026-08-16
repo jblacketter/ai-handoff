@@ -9,7 +9,8 @@ project-independent, port-keyed lease file:
 
     ~/.tagteam/ports/<port>.json  {pid, ident, host, port, project, kind, started_at, token}
 
-claimed atomically (`O_CREAT|O_EXCL`) BEFORE binding, removed on normal
+published atomically (complete record via a temp file + hard link, so a
+contender never sees a half-written lease) BEFORE binding, removed on normal
 shutdown, replaced only when the holder is definitively gone (dead pid,
 or a recorded non-null identity that mismatches the live process); a
 live-but-unverifiable holder keeps the lease (fail closed).
@@ -24,6 +25,7 @@ import json
 import os
 import secrets
 import socket
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,8 +91,51 @@ class Lease:
         return True
 
 
+def _publish_atomically(path: Path, rec: dict) -> bool:
+    """Write the COMPLETE record to a private temp file, then link it into
+    place: `os.link` fails with FileExistsError if `path` exists, so a
+    contender never sees a half-written lease. Falls back to O_EXCL +
+    write only where hard links are unavailable (the record is still
+    written in one `write` call). Returns False if `path` already exists."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    data = json.dumps(rec, indent=2)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    try:
+        try:
+            os.link(str(tmp), str(path))
+            return True
+        except FileExistsError:
+            return False
+        except (OSError, NotImplementedError, AttributeError):
+            # no hard links here: exclusive create + one write of the full record
+            try:
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                return False
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+            return True
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def acquire(port: int, *, host: str, project: str | None, kind: str) -> Lease:
-    """Claim the lease for `port` or raise PortHeld naming the holder."""
+    """Claim the lease for `port` or raise PortHeld naming the holder.
+
+    An EXISTING lease is replaced only when its holder is definitively
+    gone. An unreadable / malformed lease is re-read a few times (a writer
+    may be mid-flight only on the no-hard-link fallback path) and then
+    FAILS CLOSED with an actionable message — never unlinked on the guess
+    that it is stale."""
     d = lease_dir()
     d.mkdir(parents=True, exist_ok=True)
     path = lease_path(port)
@@ -99,35 +144,28 @@ def acquire(port: int, *, host: str, project: str | None, kind: str) -> Lease:
            "project": project, "kind": kind, "started_at": datetime.now(timezone.utc).isoformat(),
            "token": secrets.token_hex(8)}
     for _attempt in range(3):
-        try:
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
+        if _publish_atomically(path, rec):
+            return Lease(port, path, rec)
+        cur = None
+        for _reread in range(5):            # bounded: an in-progress writer on the fallback path
             cur = read_lease(port)
-            if cur is None:            # unreadable/corrupt → treat as stale
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                continue
-            gone, why = holder_gone(cur)
-            if not gone:
-                who = cur.get("kind") or "server"
-                proj = cur.get("project") or "?"
-                raise PortHeld(cur, f"port {port} is held by tagteam {who} for {proj} "
-                                    f"(pid {cur.get('pid')}) — use --port {port + 1}", tagteam=True)
-            try:
-                path.unlink()          # stale: replace
-            except OSError:
-                pass
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(rec, f, indent=2)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        return Lease(port, path, rec)
+            if cur is not None:
+                break
+            time.sleep(0.05)
+        if cur is None:
+            raise PortHeld(None, f"port {port} has an unreadable lease at {path} — if no tagteam server "
+                                 f"is running, remove that file; otherwise use --port {port + 1}", tagteam=True)
+        gone, why = holder_gone(cur)
+        if not gone:
+            who = cur.get("kind") or "server"
+            proj = cur.get("project") or "?"
+            raise PortHeld(cur, f"port {port} is held by tagteam {who} for {proj} "
+                                f"(pid {cur.get('pid')}) — use --port {port + 1}", tagteam=True)
+        # definitively stale: replace it (a race here is caught by the next publish attempt)
+        try:
+            path.unlink()
+        except OSError:
+            pass
     raise PortHeld(read_lease(port), f"port {port} lease could not be claimed — use --port {port + 1}",
                    tagteam=True)
 

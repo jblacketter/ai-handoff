@@ -110,6 +110,8 @@ _CONTENT_TYPES = {
 }
 
 
+MAX_JSON_BODY = 64 * 1024   # Phase 37: cockpit POST bodies (the lead message itself is capped at 32 KiB)
+
 MODES = ("legacy", "cockpit")
 THEMES = ("saloon", "cockpit")
 DEFAULT_MAX_SSE = 8
@@ -469,9 +471,23 @@ class _ResponseMixin:
         self._send_json({"error": msg}, 404)
 
     def _read_json_body(self):
-        """(data, error). Mirrors the legacy per-route parsing."""
+        """(data, error). Mirrors the legacy per-route parsing. Phase 37: in
+        cockpit mode the JSON body is capped at MAX_JSON_BODY BEFORE it is
+        read (413 via `error == "too large"`), and a malformed / negative
+        Content-Length is a 400, so ignored fields cannot bypass the memory
+        boundary."""
+        raw_len = self.headers.get("Content-Length")
         try:
-            length = int(self.headers.get("Content-Length", 0))
+            length = int(raw_len) if raw_len not in (None, "") else 0
+        except ValueError:
+            return None, "Invalid Content-Length"
+        if length < 0:
+            return None, "Invalid Content-Length"
+        cockpit = bool(getattr(getattr(self, "router", None), "cockpit", False))
+        if cockpit and length > MAX_JSON_BODY:
+            self._body_too_large = True
+            return None, "too large"
+        try:
             body = self.rfile.read(length) if length else b""
             data = json.loads(body) if body else {}
         except (json.JSONDecodeError, ValueError):
@@ -856,7 +872,8 @@ class CockpitRouter:
             return self._phase37_post(h, path)
         data, err = h._read_json_body()
         if err:
-            h._send_json({"ok": False, "message": err}, 400)
+            h._send_json({"ok": False, "message": ("request body exceeds %d bytes" % MAX_JSON_BODY) if err == "too large" else err},
+                         413 if err == "too large" else 400)
             return True
         try:
             if data.get("dry_run"):
@@ -886,7 +903,8 @@ class CockpitRouter:
             return False
         data, err = h._read_json_body()
         if err:
-            h._send_json({"ok": False, "message": err}, 400)
+            h._send_json({"ok": False, "message": ("request body exceeds %d bytes" % MAX_JSON_BODY) if err == "too large" else err},
+                         413 if err == "too large" else 400)
             return True
         by = capi.web_user()
         cfg = read_config(Path(self.project_dir) / "tagteam.yaml") or {}
@@ -901,7 +919,8 @@ class CockpitRouter:
                 status, payload = _launch.launch(self.project_dir, intent=data.get("intent"), config=cfg, by=by,
                                                  ensure_watcher=bool(data.get("ensure_watcher", True)),
                                                  retry=bool(data.get("retry")),
-                                                 watcher_mode=str(data.get("mode") or "headless"))
+                                                 watcher_mode=str(data.get("mode") or "headless"),
+                                                 background=True)
                 h._send_json(payload, status)
                 return True
             if path == "/api/watch/start":
@@ -960,31 +979,23 @@ class CockpitRouter:
                 h._send_json({"ok": True, "dry_run": True, "message": "",
                               "cli": f"tagteam lead --conversation {cid} {json.dumps(text)}"})
                 return True
-            started = threading.Event()
-            result: dict = {}
+            # Accept synchronously (slot claimed, `running` row persisted — a
+            # Busy answers right here), run on a worker; the client follows
+            # /events from the returned reference.
+            try:
+                handle = _lc.start_turn(self.project_dir, cid, text, config=cfg, by=by)
+            except _lc.LeadBusy as busy:
+                h._send_json({"ok": False, "busy": True, "message": f"lead is busy — {busy.reason}",
+                              "slot": _slot_view(self.project_dir)}, 409)
+                return True
 
             def _worker():
                 try:
-                    _lc.send(self.project_dir, cid, text, config=cfg, by=by,
-                             on_line=lambda line: started.set())
-                except _lc.LeadBusy as busy:
-                    result["error"] = f"lead is busy — {busy.reason}"
-                    result["busy"] = True
-                except Exception as e:  # recorded on the turn row by send(); surface here too
-                    result["error"] = f"{type(e).__name__}: {e}"
-                finally:
-                    started.set()
-            t = threading.Thread(target=_worker, name=f"lead-turn-{cid}", daemon=True)
-            t.start()
-            # give the claim a moment so a Busy result answers synchronously
-            t.join(0.6)
-            if result.get("error") and not t.is_alive():
-                h._send_json({"ok": False, "busy": bool(result.get("busy")), "message": result["error"]},
-                             409 if result.get("busy") else 400)
-                return True
-            row = _lc.get_conversation(self.project_dir, cid) or {}
-            n = (row.get("turns") or [{}])[-1].get("n") if row.get("turns") else None
-            h._send_json({"ok": True, "conversation_id": cid, "turn_n": n, "message": "turn started"}, 202)
+                    _lc.run_turn(handle)
+                except Exception as e:  # run_turn already ended the row as failed
+                    h.log_message("lead turn %s/%s failed: %s", cid, handle.n, e)
+            threading.Thread(target=_worker, name=f"lead-turn-{cid}", daemon=True).start()
+            h._send_json({"ok": True, "conversation_id": cid, "turn_n": handle.n, "message": "turn started"}, 202)
             return True
         except _lc.LeadChatError as e:
             h._send_json({"ok": False, "message": str(e)}, 400)
@@ -1050,6 +1061,19 @@ class CockpitRouter:
                 h._send_json({"error": why, "ok": False}, 403)
                 return
             if self._cockpit_post(h, path):
+                return
+            # Phase 37: the body cap also guards the legacy routes in cockpit mode
+            raw_len = h.headers.get("Content-Length")
+            try:
+                blen = int(raw_len) if raw_len not in (None, "") else 0
+            except ValueError:
+                h._send_json({"error": "Invalid Content-Length", "ok": False}, 400)
+                return
+            if blen < 0:
+                h._send_json({"error": "Invalid Content-Length", "ok": False}, 400)
+                return
+            if blen > MAX_JSON_BODY:
+                h._send_json({"error": f"request body exceeds {MAX_JSON_BODY} bytes", "ok": False}, 413)
                 return
 
         if path == "/api/state":

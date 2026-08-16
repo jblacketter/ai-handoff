@@ -351,12 +351,44 @@ class TestServerEndpoints:
             it = c.get("/api/start")["json"]["intent"]
             r = c.post("/api/start/launch", {"intent": it, "dry_run": True}, headers=s.auth())
             assert "tagteam lead" in r["json"]["cli"] and "watch --mode headless" in r["json"]["cli"]
+            # the composite ACCEPTS the turn and returns while it runs (blocking-ish runner: 2 s of events)
+            monkeypatch.setenv("FAKE_AGENT_SLEEP", "1.0")
+            t0 = time.monotonic()
             r = c.post("/api/start/launch", {"intent": it}, headers=s.auth())
-            assert r["status"] == 200 and r["json"]["launched"] and r["json"]["conversation_id"]
+            assert r["status"] == 202 and r["json"]["launched"] and r["json"]["status"] == "pending"
+            assert time.monotonic() - t0 < 1.5, "the POST must not wait for the agent turn"
+            cid, n = r["json"]["conversation_id"], r["json"]["turn_n"]
+            conv = c.get("/api/lead/" + cid)["json"]
+            assert conv["turns"][0]["status"] == "running" and conv["turns"][0]["user_text"] == it["command"]
+            assert conv["slot"]["held"] and conv["slot"]["kind"] == "conversation"
+            # SSE emits while the turn is still running (before the slot is released)
+            rd = SSEReader(s.port, path=f"/api/lead/{cid}/events")
+            rd.wait_frames(1, timeout=6)
+            assert rd.frames and rd.frames[0]["event"] == "line"
+            assert c.get("/api/lead/" + cid)["json"]["turns"][0]["status"] == "running"
+            # a concurrent repeat while pending → the same reference, no second watcher/message
             r2 = c.post("/api/start/launch", {"intent": it}, headers=s.auth())
-            assert r2["status"] == 200 and r2["json"]["launched"] is False
-            conv = c.get("/api/lead/" + r["json"]["conversation_id"])["json"]
-            assert conv["turns"][0]["user_text"] == it["command"] and conv["turns"][0]["status"] == "ok"
+            assert r2["status"] == 202 and r2["json"]["launched"] is False and r2["json"]["conversation_id"] == cid
+            assert started == ["headless", "headless"]        # one from /api/watch/start above, one from the launch
+            # completion finalizes the turn and the launch
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not any(f.get("event") == "end" for f in rd.frames):
+                rd.pump(0.3)
+            rd.close()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and c.get("/api/lead/" + cid)["json"]["turns"][0]["status"] == "running":
+                time.sleep(0.1)
+            conv = c.get("/api/lead/" + cid)["json"]
+            assert conv["turns"][0]["status"] == "ok" and conv["turns"][0]["reply"].startswith("echo:")
+            assert conv["slot"]["held"] is False
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                r3 = c.post("/api/start/launch", {"intent": it}, headers=s.auth())
+                if r3["status"] == 200:
+                    break
+                time.sleep(0.1)
+            assert r3["status"] == 200 and r3["json"]["launched"] is False and r3["json"]["existing"]["conversation_id"] == cid
+            assert len(c.get("/api/lead/" + cid)["json"]["turns"]) == 1 and started == ["headless", "headless"]
             # the legacy Saloon /api/launch is untouched (different route)
             assert c.post("/api/launch", {"lead": "A", "reviewer": "B", "first_prompt": ""}, headers=s.auth())["status"] == 400
 
@@ -462,3 +494,67 @@ class TestLeadCLI:
             h.release_turn_slot(claim)
         assert lc.lead_command([], project_root=p, out=io.StringIO()) == 2
         assert lc.lead_command(["--conversation", "c-000000000000", "x"], project_root=p, out=io.StringIO()) == 2
+
+
+class TestPortLeaseAtomicity:
+    def test_publish_window_has_exactly_one_winner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TAGTEAM_PORT_LEASE_DIR", str(tmp_path / "leases"))
+        orig = os.link
+        barrier = threading.Barrier(2)
+        def slow_link(src, dst):
+            barrier.wait(timeout=5)       # both contenders have written their temp record; race the publish
+            return orig(src, dst)
+        monkeypatch.setattr(os, "link", slow_link)
+        results = []
+        def go():
+            try:
+                results.append(("ok", portlease.acquire(48777, host="127.0.0.1", project="x", kind="cockpit")))
+            except portlease.PortHeld as e:
+                results.append(("held", e))
+        ts = [threading.Thread(target=go) for _ in range(2)]
+        [t.start() for t in ts]; [t.join() for t in ts]
+        assert sorted(r[0] for r in results) == ["held", "ok"]
+        winner = [r for r in results if r[0] == "ok"][0][1]
+        assert portlease.read_lease(48777)["token"] == winner.record["token"]
+        held = [r for r in results if r[0] == "held"][0][1]
+        assert "held by tagteam cockpit for x" in held.reason
+        winner.release()
+
+    def test_malformed_lease_fails_closed_and_is_kept(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TAGTEAM_PORT_LEASE_DIR", str(tmp_path / "leases"))
+        portlease.lease_path(48778).parent.mkdir(parents=True, exist_ok=True)
+        portlease.lease_path(48778).write_text("{not json", encoding="utf-8")
+        with pytest.raises(portlease.PortHeld) as ei:
+            portlease.acquire(48778, host="127.0.0.1", project="y", kind="cockpit")
+        assert "unreadable lease" in ei.value.reason and "--port 48779" in ei.value.reason
+        assert portlease.lease_path(48778).read_text(encoding="utf-8") == "{not json"
+
+
+class TestBodyCap:
+    def test_json_body_cap_and_bad_lengths(self, tmp_path, fake_path):
+        p = _proj(tmp_path)
+        with _cockpit(p) as s:
+            c = s.client
+            cid = c.post("/api/lead/new", {}, headers=s.auth())["json"]["conversation"]["id"]
+            # >64 KiB object whose `text` is small → 413 (ignored fields cannot bypass the cap)
+            big = {"text": "hi", "padding": "x" * (65 * 1024)}
+            r = c.post(f"/api/lead/{cid}/send", big, headers=s.auth())
+            assert r["status"] == 413 and "exceeds" in r["json"]["message"]
+            assert c.get(f"/api/lead/{cid}")["json"]["turns"] == []
+            # legacy route under cockpit mode is capped too
+            r = c.post("/api/state", {"turn": "lead", "pad": "x" * (65 * 1024)}, headers=s.auth())
+            assert r["status"] == 413
+            # malformed / negative Content-Length → 400, never read
+            import http.client as hc
+            for bad in ("abc", "-5"):
+                conn = hc.HTTPConnection("127.0.0.1", s.port, timeout=5)
+                conn.putrequest("POST", "/api/pause")
+                for k, v in s.auth().items():
+                    conn.putheader(k, v)
+                conn.putheader("Content-Type", "application/json")
+                conn.putheader("Content-Length", bad)
+                conn.endheaders()
+                resp = conn.getresponse(); body = resp.read(); conn.close()
+                assert resp.status == 400, (bad, resp.status, body[:80])
+            # a normal small body still works
+            assert c.post(f"/api/lead/{cid}/send", {"text": "hi", "dry_run": True}, headers=s.auth())["status"] == 200

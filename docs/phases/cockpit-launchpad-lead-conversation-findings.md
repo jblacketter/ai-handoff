@@ -116,7 +116,7 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
   hostile reply round-trip + JS-source no-innerHTML guard, watch/session/
   launch endpoints + legacy `/api/launch` untouched, port lease both
   orders/stale/unverifiable/foreign token, `serve` refusal + Tagteam
-  holder named + immediate restart, hub rows, CLI). Suite: 969 passed / 5 skipped.
+  holder named + immediate restart, hub rows, CLI; round 2 adds lifecycle-injection, lease-atomicity and body-cap tests). Suite: 977 passed / 5 skipped.
 
 ## Deviations / notes for the reviewer
 
@@ -142,6 +142,54 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
   project (`HeadlessEngine.validate()` requires it, so Start headless is
   offered in the capture) and adds `demo-idle` with a canned two-turn
   conversation; the seed's brief path is project-relative as before.
+
+## Round 2 (reviewer impl r1)
+
+1. **Port lease publish is atomic** — the complete record is written to a
+   private temp file and `os.link`ed into place (`FileExistsError` = held;
+   O_EXCL + single write only where hard links are unavailable), so a
+   contender can never observe a half-written lease. An unreadable /
+   malformed lease is re-read a few times and then **fails closed** with
+   an actionable message (`port N has an unreadable lease at … — remove it
+   if no tagteam server is running, or use --port N+1`); it is never
+   unlinked on the guess that it is stale. Tests: a barrier race at the
+   publish window (`os.link` blocked until both contenders have written
+   their record) → exactly one `Lease`, the loser gets `PortHeld` naming
+   the winner; a malformed lease → `PortHeld`, file kept byte-for-byte.
+2. **`send` owns its post-claim lifecycle** — split into `start_turn`
+   (validate, continuity, claim, `running` row, marker fields; on ANY
+   failure after the claim the slot is released and an already-created row
+   is ended `failed: setup failed …`) and `run_turn` (spawn + finalize;
+   the slot is released in `finally`; an unexpected runner exception ends
+   the row `failed: runner error …` and re-raises; a failure while
+   finalizing ends it `failed: finalize failed …`). `send` = the two in
+   sequence. Tests inject failure before the row (`add_conversation_turn`),
+   after the row (`_append_transcript`), a non-`SpawnError` runner
+   exception, and a finalize exception — asserting the slot is free, no
+   turn stays `running`, and the conversation is usable again.
+3. **Start / Send are asynchronous** — `POST /api/lead/<cid>/send`
+   accepts synchronously (`start_turn`: slot claimed, `running` row + turn
+   number persisted; Busy answers 409 right there) and runs the turn on a
+   worker, returning **202 `{conversation_id, turn_n}`**; the composite
+   `launch(background=True)` does the same after the watcher step,
+   persists the reference on the `launches` row, returns **202 pending**
+   immediately, and the worker finalizes the row (`succeeded`, or `failed`
+   with the reason if `run_turn` raised); a repeat while pending returns
+   202 with the same reference. UI: `act()`'s `onDone` opens the Lead tab
+   and subscribes the per-conversation SSE on the 202 (the transcript
+   streams while the lead works). Test (`test_watch_session_and_launch_
+   endpoints`) with a slow fake: the POST returns in < 1.5 s while the
+   turn is `running` and the slot is held (kind=conversation), SSE emits
+   `line` frames before release, a concurrent repeat returns the same
+   `conversation_id` (one watcher start, one message), completion
+   finalizes turn (`ok`, reply) and launch (repeat → 200 `existing`).
+4. **64 KiB JSON body cap** — `_read_json_body` checks `Content-Length`
+   BEFORE reading in cockpit mode (`> 65536` → 413 "request body exceeds
+   65536 bytes"; malformed / negative → 400) and the legacy routes under
+   cockpit mode get the same check before their own reads; the 32 KiB
+   `text` cap remains. Tests: a > 64 KiB object with a small `text` → 413
+   and no turn created; `/api/state` under cockpit → 413; `Content-Length:
+   abc` / `-5` → 400 without reading; small bodies unaffected.
 
 ## In-cycle gates
 
@@ -180,6 +228,6 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
 4. **Port**: two `serve` on one port refuse (lease names the holder;
    unrelated listener → generic message; immediate restart after shutdown
    passes) — tests + the live observation above.
-5. `pytest`: **969 passed, 5 skipped** (macOS, 2 m 50 s);
+5. `pytest`: **977 passed, 5 skipped** (macOS, 2 m 54 s; round 2);
    `--theme saloon` byte-identical to the pre-3.1 bare page (test); v6 DBs
    open under v7 (test); hub read-only AST test unchanged and green.

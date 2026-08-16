@@ -251,13 +251,44 @@ def _session_id_from(provider: str, lines: list[str]) -> str | None:
 
 # ------------------------------------------------------------------ send ----
 
-def send(project_root: str | Path, cid: str, text: str, *, config: dict | None,
-         by: str = "arbiter", run: Callable | None = None,
-         on_line: Callable[[str], None] | None = None,
-         resume_probe: Callable[[str], bool] | None = None) -> dict:
-    """Run ONE lead turn for `text` in conversation `cid` (synchronous).
-    Returns the finished turn row. Raises LeadBusy when the slot is held,
-    LeadChatError on invalid input / config."""
+class TurnHandle:
+    """A started (running) conversation turn: everything `run_turn` needs.
+    Owning the slot claim + the DB row means the starter is responsible for
+    ending them — `run_turn` always does, on every path."""
+
+    def __init__(self, *, root: Path, cid: str, n: int, claim, spec: LeadSpec, argv: list[str],
+                 prompt: str, continuity: str, sid: str | None, stem: str,
+                 log_path: Path, events_path: Path, conv: dict, text: str, by: str):
+        self.root, self.cid, self.n, self.claim, self.spec = root, cid, n, claim, spec
+        self.argv, self.prompt, self.continuity, self.sid, self.stem = argv, prompt, continuity, sid, stem
+        self.log_path, self.events_path, self.conv, self.text, self.by = log_path, events_path, conv, text, by
+
+
+def _end_turn(root: Path, cid: str, n: int, *, status: str, error: str | None,
+              reply: str | None = None, continuity: str | None = None,
+              session_id: str | None = None, usage_row_id: int | None = None) -> dict | None:
+    """Finalize a turn row (never raises)."""
+    from tagteam import db
+    try:
+        conn = db.connect(project_dir=str(root))
+        try:
+            db.finish_conversation_turn(conn, cid, n, status=status, ts=_now_iso(), error=error,
+                                        reply=reply, continuity=continuity, session_id=session_id,
+                                        usage_row_id=usage_row_id)
+            return db.get_conversation_turn(conn, cid, n)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def start_turn(project_root: str | Path, cid: str, text: str, *, config: dict | None,
+               by: str = "arbiter", resume_probe: Callable[[str], bool] | None = None) -> TurnHandle:
+    """Validate, decide continuity, CLAIM the slot, create the `running`
+    turn row and the marker fields — synchronously, so a Busy answers
+    immediately and the turn number is known before the agent runs.
+    Owns cleanup: any failure after the claim releases the slot, and any
+    failure after the row exists ends the row as `failed`."""
     from tagteam import db
     root = Path(project_root)
     if not CONVERSATION_ID_RE.match(cid or ""):
@@ -278,7 +309,6 @@ def send(project_root: str | Path, cid: str, text: str, *, config: dict | None,
     prior = conv["turns"]
     n = (prior[-1]["n"] + 1) if prior else 1
     log_path, events_path = _turn_paths(root, cid, n)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     started_at = _now_iso()
     me = os.getpid()
     me_ident = procs.identity(me)
@@ -287,6 +317,7 @@ def send(project_root: str | Path, cid: str, text: str, *, config: dict | None,
     # -- continuity decision, BEFORE spawning
     adapter = h.ADAPTERS[spec.provider]
     session_id = conv.get("session_id")
+    sid = None
     if spec.provider == "claude":
         sid = session_id or str(uuid.uuid4())
         argv = h.build_conversation_argv(adapter, spec.executable, spec.user_args, root,
@@ -307,106 +338,149 @@ def send(project_root: str | Path, cid: str, text: str, *, config: dict | None,
                 root=root, name=root.name, state_line=_state_line(root))) + _replay_tail(root, cid, prior)
     prompt = prompt_prefix + text
 
-    # -- claim the slot (fail closed), then the turn row, then the marker fields
+    # -- claim the slot (fail closed)
     try:
-        st = _state_line(root)
         claim = h.claim_turn_slot(root, kind=h.SLOT_KIND_CONVERSATION, role="lead", fields={
             "phase": None, "type": None, "round": None, "role": "lead",
             "agent": spec.agent_name, "provider": spec.provider, "stem": stem,
             "log_path": str(log_path), "events_path": str(events_path),
             "started_at": started_at, "pid": None, "child_ident": None,
             "watcher_pid": me, "watcher_ident": me_ident,
-            "conversation_id": cid, "turn_n": n, "state_line": st, "by": by,
+            "conversation_id": cid, "turn_n": n, "state_line": _state_line(root), "by": by,
         })
     except h.SlotBusy as busy:
         raise LeadBusy(busy.marker, busy.reason)
-    conn = db.connect(project_dir=str(root))
+    # -- from here on the claim (and then the row) are ours to end
+    turn = None
     try:
-        turn = db.add_conversation_turn(conn, conversation_id=cid, ts=started_at, user_text=text,
-                                        owner_pid=me, owner_ident=me_ident,
-                                        log_path=str(log_path), events_path=str(events_path))
-    finally:
-        conn.close()
-    n = turn["n"]
-    _append_transcript(root, cid, n, "you", text, started_at)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = db.connect(project_dir=str(root))
+        try:
+            turn = db.add_conversation_turn(conn, conversation_id=cid, ts=started_at, user_text=text,
+                                            owner_pid=me, owner_ident=me_ident,
+                                            log_path=str(log_path), events_path=str(events_path))
+        finally:
+            conn.close()
+        n = turn["n"]
+        _append_transcript(root, cid, n, "you", text, started_at)
+    except BaseException as e:
+        h.release_turn_slot(claim)
+        if turn is not None:
+            _end_turn(root, cid, turn["n"], status="failed", error=f"setup failed: {type(e).__name__}: {e}")
+        raise
+    return TurnHandle(root=root, cid=cid, n=n, claim=claim, spec=spec, argv=argv, prompt=prompt,
+                      continuity=continuity, sid=sid, stem=stem, log_path=log_path,
+                      events_path=events_path, conv=conv, text=text, by=by)
+
+
+def run_turn(handle: TurnHandle, *, run: Callable | None = None,
+             on_line: Callable[[str], None] | None = None) -> dict:
+    """Spawn the lead for a started turn and finalize it. EVERY path ends
+    with the slot released and the row in ok|failed|cancelled — including
+    an unexpected runner exception (recorded as failed, then re-raised)."""
+    from tagteam import db
+    root, cid, n, spec = handle.root, handle.cid, handle.n, handle.spec
 
     def _on_spawn(pid: int) -> None:
-        h.update_turn_slot(claim, pid=pid, child_ident=procs.identity(pid))
+        h.update_turn_slot(handle.claim, pid=pid, child_ident=procs.identity(pid))
 
     env = dict(os.environ)
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
         env.pop(k, None)
     runner = run or h.run_process
     spawn_error = None
-    try:
-        out = runner(argv, prompt, root, events_path=events_path, log_path=log_path,
-                     provider=spec.provider, timeout_s=spec.timeout_s, on_line=on_line,
-                     on_spawn=_on_spawn, env=env)
-    except h.SpawnError as e:
-        spawn_error = str(e)
-        out = h.RunOutput(exit_code=None, timed_out=False, duration_ms=0)
-    finally:
-        h.release_turn_slot(claim)
-
-    cancel = h.read_cancel(root)
-    cancelled_by = None
-    if cancel is not None and cancel.get("stem") == stem:
-        h.clear_cancel(root)
-        cancelled_by = cancel.get("by") or "arbiter"
-
-    try:
-        lines = events_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        lines = []
-    reply = extract_reply(spec.provider, lines)
-    new_sid = _session_id_from(spec.provider, lines) or (sid if spec.provider == "claude" else None)
-
-    if cancelled_by:
-        status, error = "cancelled", f"cancelled by {cancelled_by}"
-    elif spawn_error:
-        status, error = "failed", f"could not start {spec.provider} ({spec.executable}): {spawn_error}"
-    elif out.timed_out:
-        status, error = "failed", f"turn exceeded {spec.timeout_s / 60:.0f} min timeout"
-    elif out.exit_code != 0:
-        status, error = "failed", f"{spec.provider} exited {out.exit_code}"
-    else:
-        status, error = "ok", None
-
-    # usage row (kind=conversation) — never fails the turn
-    usage_row_id = None
-    conn = db.connect(project_dir=str(root))
+    out = None
     try:
         try:
-            usage = h.parse_usage(spec.provider, lines) or {}
-            fields = dict(ts=_now_iso(), phase=None, type=None, round=None, role="lead",
-                          agent=spec.agent_name, provider=spec.provider,
-                          status=("ok" if status == "ok" else ("cancelled" if status == "cancelled" else "nonzero_exit")),
-                          exit_code=out.exit_code, duration_ms=out.duration_ms,
-                          log_path=str(log_path), kind="conversation")
-            fields.update({k: usage.get(k) for k in ("model", "input_tokens", "output_tokens",
-                                                     "cache_read_tokens", "cache_write_tokens",
-                                                     "cost_usd", "num_turns", "session_id")})
-            usage_row_id = db.add_usage(conn, **fields)
+            out = runner(handle.argv, handle.prompt, root, events_path=handle.events_path,
+                         log_path=handle.log_path, provider=spec.provider, timeout_s=spec.timeout_s,
+                         on_line=on_line, on_spawn=_on_spawn, env=env)
+        except h.SpawnError as e:
+            spawn_error = str(e)
+            out = h.RunOutput(exit_code=None, timed_out=False, duration_ms=0)
+        finally:
+            h.release_turn_slot(handle.claim)
+    except BaseException as e:   # unexpected runner failure: the row must not stay `running`
+        _end_turn(root, cid, n, status="failed", error=f"runner error: {type(e).__name__}: {e}",
+                  continuity=handle.continuity)
+        try:
+            _append_transcript(root, cid, n, spec.agent_name,
+                               f"(no reply — failed: runner error: {type(e).__name__}: {e})", _now_iso())
         except Exception:
-            usage_row_id = None
-        db.finish_conversation_turn(conn, cid, n, status=status, ts=_now_iso(),
-                                    session_id=new_sid, usage_row_id=usage_row_id, error=error,
-                                    reply=reply, continuity=continuity)
-        upd = {"last_ts": _now_iso(), "continuity": continuity}
-        if new_sid and status == "ok":
-            upd["session_id"] = new_sid
-        if not conv.get("title") and n == 1:
-            upd["title"] = " ".join(text.split())[:60]
-        db.update_conversation(conn, cid, **upd)
-        turn = db.get_conversation_turn(conn, cid, n)
-    finally:
-        conn.close()
-    with log_path.open("a", encoding="utf-8", errors="replace") as f:
-        f.write(f"[tagteam] conversation turn {status}" + (f": {error}" if error else "") + "\n")
-    _append_transcript(root, cid, n, spec.agent_name,
-                       reply if reply else f"(no reply — {status}{': ' + error if error else ''})",
-                       _now_iso())
-    return turn
+            pass
+        raise
+
+    try:
+        cancel = h.read_cancel(root)
+        cancelled_by = None
+        if cancel is not None and cancel.get("stem") == handle.stem:
+            h.clear_cancel(root)
+            cancelled_by = cancel.get("by") or "arbiter"
+        try:
+            lines = handle.events_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        reply = extract_reply(spec.provider, lines)
+        new_sid = _session_id_from(spec.provider, lines) or (handle.sid if spec.provider == "claude" else None)
+        if cancelled_by:
+            status, error = "cancelled", f"cancelled by {cancelled_by}"
+        elif spawn_error:
+            status, error = "failed", f"could not start {spec.provider} ({spec.executable}): {spawn_error}"
+        elif out.timed_out:
+            status, error = "failed", f"turn exceeded {spec.timeout_s / 60:.0f} min timeout"
+        elif out.exit_code != 0:
+            status, error = "failed", f"{spec.provider} exited {out.exit_code}"
+        else:
+            status, error = "ok", None
+        usage_row_id = None
+        conn = db.connect(project_dir=str(root))
+        try:
+            try:
+                usage = h.parse_usage(spec.provider, lines) or {}
+                fields = dict(ts=_now_iso(), phase=None, type=None, round=None, role="lead",
+                              agent=spec.agent_name, provider=spec.provider,
+                              status=("ok" if status == "ok" else ("cancelled" if status == "cancelled" else "nonzero_exit")),
+                              exit_code=out.exit_code, duration_ms=out.duration_ms,
+                              log_path=str(handle.log_path), kind="conversation")
+                fields.update({k: usage.get(k) for k in ("model", "input_tokens", "output_tokens",
+                                                         "cache_read_tokens", "cache_write_tokens",
+                                                         "cost_usd", "num_turns", "session_id")})
+                usage_row_id = db.add_usage(conn, **fields)
+            except Exception:
+                usage_row_id = None
+            db.finish_conversation_turn(conn, cid, n, status=status, ts=_now_iso(),
+                                        session_id=new_sid, usage_row_id=usage_row_id, error=error,
+                                        reply=reply, continuity=handle.continuity)
+            upd = {"last_ts": _now_iso(), "continuity": handle.continuity}
+            if new_sid and status == "ok":
+                upd["session_id"] = new_sid
+            if not handle.conv.get("title") and n == 1:
+                upd["title"] = " ".join(handle.text.split())[:60]
+            db.update_conversation(conn, cid, **upd)
+            turn = db.get_conversation_turn(conn, cid, n)
+        finally:
+            conn.close()
+        with handle.log_path.open("a", encoding="utf-8", errors="replace") as f:
+            f.write(f"[tagteam] conversation turn {status}" + (f": {error}" if error else "") + "\n")
+        _append_transcript(root, cid, n, spec.agent_name,
+                           reply if reply else f"(no reply — {status}{': ' + error if error else ''})",
+                           _now_iso())
+        return turn
+    except BaseException as e:   # persistence failure after the run: never leave `running`
+        _end_turn(root, cid, n, status="failed", error=f"finalize failed: {type(e).__name__}: {e}",
+                  continuity=handle.continuity)
+        raise
+
+
+def send(project_root: str | Path, cid: str, text: str, *, config: dict | None,
+         by: str = "arbiter", run: Callable | None = None,
+         on_line: Callable[[str], None] | None = None,
+         resume_probe: Callable[[str], bool] | None = None) -> dict:
+    """Run ONE lead turn for `text` in conversation `cid` (synchronous:
+    `start_turn` + `run_turn`). Returns the finished turn row. Raises
+    LeadBusy when the slot is held, LeadChatError on invalid input / config."""
+    handle = start_turn(project_root, cid, text, config=config, by=by, resume_probe=resume_probe)
+    return run_turn(handle, run=run, on_line=on_line)
 
 
 # ------------------------------------------------------------- cancel ----
