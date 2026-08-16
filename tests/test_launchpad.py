@@ -668,3 +668,65 @@ class TestAsyncBoundaries:
         db.update_launch(conn, L.launch_key(it), ts="t", status="failed"); conn.close()   # simulate the worker's claim having failed elsewhere
         st, res = L.launch(p, intent=it, config=cfg, by="t", retry=True, send=lambda: (_ for _ in ()).throw(AssertionError("no re-send")))
         assert st == 200 and res["status"] == "succeeded" and res["existing"] == {"conversation_id": cid, "turn_n": 1}
+
+
+class TestLaunchExceptionBoundary:
+    """Impl round 4: an unexpected exception anywhere after the claim
+    finalizes the launch as failed (never a pending row under a live PID)."""
+
+    def _prep(self, tmp_path, monkeypatch):
+        p = _proj(tmp_path)
+        cfg = read_config(p / "tagteam.yaml")
+        monkeypatch.setattr(L, "start_watcher", lambda root, mode="headless", wait_s=5.0: {"ok": True, "pid": os.getpid(), "mode": mode, "message": "fake"})
+        return p, cfg, L.launch_intent(p)
+
+    def _row(self, p, it):
+        conn = db.connect(project_dir=str(p)); row = db.get_launch(conn, L.launch_key(it)); conn.close(); return row
+
+    def test_start_turn_exception(self, tmp_path, fake_path, monkeypatch):
+        p, cfg, it = self._prep(tmp_path, monkeypatch)
+        monkeypatch.setattr(lc, "start_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("setup exploded")))
+        st, res = L.launch(p, intent=it, config=cfg, by="t", background=True)
+        assert st == 409 and res["status"] == "failed" and "setup exploded" in res["error"]
+        row = self._row(p, it)
+        assert row["status"] == "failed" and "setup exploded" in row["error"]
+        assert h.read_inflight(p) is None
+        assert all(t["status"] != "running" for c in lc.list_conversations(p) for t in lc.get_conversation(p, c["id"])["turns"])
+        # a repeat is not stuck at 202; retry proceeds without duplication
+        st, res = L.launch(p, intent=it, config=cfg, by="t")
+        assert st == 409 and res["status"] == "failed"
+        monkeypatch.undo()
+        monkeypatch.setattr(L, "start_watcher", lambda root, mode="headless", wait_s=5.0: {"ok": True, "pid": os.getpid(), "mode": mode, "message": "fake"})
+        sends = []
+        st, res = L.launch(p, intent=it, config=cfg, by="t", retry=True, send=lambda: (sends.append(1), {"n": 1, "status": "ok"})[1])
+        assert st == 200 and res["status"] == "succeeded" and sends == [1]
+
+    def test_start_watcher_exception(self, tmp_path, fake_path, monkeypatch):
+        p, cfg, it = self._prep(tmp_path, monkeypatch)
+        monkeypatch.setattr(L, "start_watcher", lambda *a, **k: (_ for _ in ()).throw(OSError("fork failed")))
+        st, res = L.launch(p, intent=it, config=cfg, by="t", background=True)
+        assert st == 409 and res["status"] == "failed" and "fork failed" in res["error"]
+        assert self._row(p, it)["status"] == "failed"
+        assert h.read_inflight(p) is None and lc.list_conversations(p) == []
+        monkeypatch.setattr(L, "start_watcher", lambda root, mode="headless", wait_s=5.0: {"ok": True, "pid": os.getpid(), "mode": mode, "message": "fake"})
+        sends = []
+        st, res = L.launch(p, intent=it, config=cfg, by="t", retry=True, send=lambda: (sends.append(1), {"n": 1, "status": "ok"})[1])
+        assert st == 200 and sends == [1]
+
+    def test_dispatch_preparation_exception_aborts_started_turn(self, tmp_path, fake_path, monkeypatch):
+        """start_turn succeeded, then persisting turn_n raised: the started
+        turn is aborted (owner-safe) and the launch fails."""
+        p, cfg, it = self._prep(tmp_path, monkeypatch)
+        real_update = db.update_launch
+        calls = {"n": 0}
+        def flaky_update(conn, key, *, ts, **fields):
+            if "turn_n" in fields and "conversation_id" not in fields:
+                raise RuntimeError("db hiccup")
+            return real_update(conn, key, ts=ts, **fields)
+        monkeypatch.setattr(db, "update_launch", flaky_update)
+        st, res = L.launch(p, intent=it, config=cfg, by="t", background=True)
+        assert st == 409 and res["status"] == "failed" and "db hiccup" in res["error"]
+        assert h.read_inflight(p) is None
+        conv = lc.get_conversation(p, lc.list_conversations(p)[0]["id"])
+        assert conv["turns"][-1]["status"] == "failed" and "aborted before running" in conv["turns"][-1]["error"]
+        assert self._row(p, it)["status"] == "failed"

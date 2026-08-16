@@ -431,6 +431,27 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
         _persist(status="failed", finished_at=_now_iso(), error=error, partial_json=json.dumps(partial))
         return 409, {"ok": False, "status": "failed", "error": error, "partial": partial}
 
+    # ---- one exception boundary for the whole post-claim attempt: an
+    # unexpected error anywhere below finalizes the claim as failed (truthful
+    # partial state) — never a `pending` row that only a dead PID could clear
+    handle_box: dict = {}
+    try:
+        return _attempt(root, key, row, live, config, by, ensure_watcher, watcher_mode, watcher_wait_s,
+                        send, background, _persist, _fail, handle_box)
+    except Exception as e:
+        hd = handle_box.get("handle")
+        if hd is not None:
+            lead_chat.abort_turn(hd, f"launch failed unexpectedly: {type(e).__name__}: {e}")
+        try:
+            return _fail(f"unexpected error during launch: {type(e).__name__}: {e}")
+        except Exception:
+            return 500, {"ok": False, "status": "failed", "error": f"{type(e).__name__}: {e}"}
+
+
+def _attempt(root: Path, key: str, row: dict, live: dict, config, by: str, ensure_watcher: bool,
+             watcher_mode: str, watcher_wait_s: float, send, background: bool, _persist, _fail,
+             handle_box: dict) -> tuple[int, dict]:
+    from tagteam import db, lead_chat
     watcher_info = None
     if ensure_watcher:
         # a recorded alive watcher (retry) is reused — never a second one
@@ -472,6 +493,7 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
         _persist(conversation_id=cid, turn_n=1)
         if background and send is None:
             handle = lead_chat.start_turn(root, cid, live["command"], config=config, by=by)
+            handle_box["handle"] = handle
             _persist(turn_n=handle.n)
 
             def _worker():
@@ -486,9 +508,11 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
                 lead_chat.start_worker(_worker, f"launch-turn-{cid}")
             except BaseException as e:
                 # no worker owns the started turn: abort it (owner-safe) and fail the claim truthfully
+                handle_box.pop("handle", None)
                 lead_chat.abort_turn(handle, f"could not start the worker thread: {type(e).__name__}: {e}")
                 return _fail(f"lead: could not start the worker thread ({type(e).__name__}: {e}); "
                              f"the accepted turn was aborted", {"watcher_result": watcher_info})
+            handle_box.pop("handle", None)     # the worker owns it now
             return 202, {"ok": True, "launched": True, "status": "pending",
                          "conversation_id": cid, "turn_n": handle.n, "watcher": watcher_info,
                          "message": f"launched: {live['command']} — the lead is on it (turn {handle.n})"}
