@@ -223,10 +223,13 @@ class TestLegacyMode:
             assert "interjections" not in rd            # cockpit-only additive field
             assert "entries" in rd and "rulings" in rd  # pre-existing fields
 
-    def test_default_bind_all_interfaces(self, project):
+    def test_saloon_theme_binds_all_interfaces_and_bare_is_cockpit(self, project):
+        # 3.1: bare `serve` is the cockpit (loopback); `--theme saloon` is the legacy path
         opts = srv.resolve_serve_options(["--dir", str(project)])
+        assert opts["mode"] == "cockpit" and opts["host"] == "127.0.0.1"
+        opts = srv.resolve_serve_options(["--dir", str(project), "--theme", "saloon"])
         assert opts["mode"] == "legacy" and opts["host"] == ""
-        opts = srv.resolve_serve_options(["--dir", str(project), "--host", "10.0.0.5"])
+        opts = srv.resolve_serve_options(["--dir", str(project), "--theme", "saloon", "--host", "10.0.0.5"])
         assert opts["host"] == "10.0.0.5"
 
 

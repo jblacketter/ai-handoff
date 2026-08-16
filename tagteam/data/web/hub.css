@@ -8,7 +8,7 @@
 .zone-toggle { color: var(--text); font-size: 15px; font-weight: 700; }
 .zone-toggle:hover { text-decoration: none; color: var(--accent); }
 .rows { display: flex; flex-direction: column; }
-.row { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(160px, 2fr) minmax(200px, 3fr) 90px auto; gap: 12px; align-items: center; padding: 9px 14px; border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(160px, 2fr) minmax(200px, 3fr) 90px auto auto; gap: 12px; align-items: center; padding: 9px 14px; border-top: 1px solid var(--line); }
 .row:first-child { border-top: none; }
 .row:hover { background: var(--bg-3); }
 .row .proj { display: flex; flex-direction: column; min-width: 0; }
@@ -35,3 +35,5 @@
   .row .why { grid-column: 1 / -1; }
   .row .age, .row .open { justify-self: end; }
 }
+
+.row .btn-start { margin-right: 6px; border-color: var(--accent); }

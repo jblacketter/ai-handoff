@@ -349,6 +349,8 @@ Commands:
   cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
   serve         Start the web dashboard server (--theme cockpit for the arbiter cockpit;
                 default is the Saloon; --host, --max-sse; `serve.theme` in tagteam.yaml)
+  lead          Talk to the lead agent from the terminal: `tagteam lead "message"`
+                (same engine as the cockpit's Lead panel; --new / --conversation ID / --list)
   hub           One surface over every registered project (Needs you / Waiting / Quiet,
                 burn, shared window; each cockpit mounted at /p/<id>/); --list for text
   registry      list | unregister PATH — the projects `tagteam setup` registered
@@ -457,6 +459,10 @@ def main() -> int:
         from tagteam.server import serve_command
 
         return serve_command(sys.argv[2:])
+    if command == "lead":
+        from tagteam.lead_chat import lead_command
+
+        return lead_command(sys.argv[2:])
     if command == "hub":
         from tagteam.hub import hub_command
 
