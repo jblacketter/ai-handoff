@@ -289,6 +289,31 @@ def test_glossary_guard():
     assert "10 consecutive stale rounds" in (REPO / "tagteam" / "data" / "web" / "cockpit.html").read_text(encoding="utf-8")
 
 
+def test_cockpit_churn_chart_draws_no_threshold_at_a_fixed_round():
+    """The churn chart's x-axis is the absolute round number; a stale-round
+    limit is a count of consecutive unchanged re-submissions and has no
+    fixed x. The chart must not draw any line/label anchored at a literal
+    round (X(10) or any X(<number>)), nor any 'stale'/'escalat' text."""
+    js = (REPO / "tagteam" / "data" / "web" / "cockpit.js").read_text(encoding="utf-8")
+    start = js.index("function drawChurn(")
+    depth, i = 0, js.index("{", start)
+    while True:                       # find the matching closing brace of drawChurn
+        c = js[i]
+        depth += (c == "{") - (c == "}")
+        i += 1
+        if depth == 0:
+            break
+    body = js[start:i]
+    assert not re.search(r"X\(\s*\d+(\.\d+)?\s*\)", body), "drawChurn anchors something at a literal round"
+    for m in re.finditer(r"text\([^;]*?'([^']*)'", body):
+        assert not re.search(r"stale|escalat|limit", m.group(1), re.I), f"drawChurn draws a threshold label: {m.group(1)!r}"
+    # no dashed rule is drawn at all: every line(...) call is a plain axis (a dash
+    # pattern is a quoted digits string passed as the 6th argument)
+    calls = re.findall(r"\bline\(([^;]*)\);", body)
+    for args in calls:
+        assert not re.search(r"'[\d ]+'\s*(,|$)", args), f"dashed rule drawn in drawChurn: line({args})"
+
+
 def test_readme_opens_with_the_loop_and_names_the_roles_first():
     text = README.read_text(encoding="utf-8")
     first_h2 = text.index("\n## ")

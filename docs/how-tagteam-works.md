@@ -128,7 +128,7 @@ tagteam serve --theme cockpit --dir ~/projects/myproject      # http://localhost
 
 - **Now** strip — phase / type / round, whose turn and for how long, the in-flight headless turn (with a `tagteam tail` drawer), the pause hold, watcher liveness, queued notes, and the connection mode (**Live** via SSE / **Polling** fallback / Disconnected).
 - **Needs you** — one card per thing only the human can do: an escalation with its brief and **Approve / Request changes**, a needs-human question with **Answer**, a hold with **Resume**, a missing/failed brief with **Generate brief**, a stale in-flight or missing watcher with the CLI to run. Empty when nothing needs you — and it says so.
-- **Watch** tabs — **Feed** (live round stream: entries, rulings, interjections, briefs), **Diff** (scope-diff of the current submission, per file, capped), **Usage** (round-over-round churn with the auto-escalation limit marked, burn by role / cycle / process, and the Claude subscription-window signal), **Notes** (interjections: queue one, retire one).
+- **Watch** tabs — **Feed** (live round stream: entries, rulings, interjections, briefs), **Diff** (scope-diff of the current submission, per file, capped), **Usage** (round-over-round churn per role — no threshold line, since auto-escalation is a count of consecutive stale rounds and not a round number — burn by role / cycle / process, and the Claude subscription-window signal), **Notes** (interjections: queue one, retire one).
 
 <p align="center"><img src="media/screenshots/cockpit-usage.png" alt="Cockpit Usage tab: round-over-round token churn for the current cycle, burn by role, and the subscription-window signal" width="100%"></p>
 
