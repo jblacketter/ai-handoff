@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics)
+- [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics; round 3: slot-first claim order, honest dispatch semantics, consistent boundary algorithm)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -79,11 +79,15 @@ check` for pre-flight.
 state.seq changed → _handle_ready(state)
   ├─ gate not applicable (type not in gatekeeper.on, or already decided
   │    for this submission) → existing behaviour (spawn / notify reviewer)
-  ├─ claim gate row for event_key (at-most-once) → None → existing behaviour
-  ├─ claim turn slot kind=gate (fail-closed like briefer; SlotBusy → set the
-  │    processor's GATE-OWED LATCH `_gate_owed_seq = state.seq`, return
-  │    without dispatching; do NOT spawn/notify the reviewer past a live slot —
-  │    later ticks with the SAME seq re-enter here (see "Gate-owed latch")
+  ├─ claim the TURN SLOT FIRST (kind=gate, fail-closed like the briefer):
+  │    SlotBusy → set the processor's GATE-OWED LATCH `_gate_owed_seq =
+  │    state.seq` and return without dispatching (no DB row was written, so
+  │    nothing is left `running` in our name); later ticks with the SAME seq
+  │    re-enter here (see "Gate-owed latch")
+  ├─ under dualwrite.writer_lock: sweep abandoned rows, then claim the gate
+  │    row for event_key (at-most-once) → refused (decided already, or a
+  │    live other runner's attempt is running) → RELEASE the slot; decided →
+  │    existing behaviour (hand off); live-other → latch + return
   ├─ run checks (subprocess test command with timeout; scope diff; plan doc)
   ├─ under dualwrite.writer_lock:
   │    re-read top-level state + cycle status; if the submission is no longer
@@ -99,8 +103,9 @@ state.seq changed → _handle_ready(state)
   │             REQUEST_CHANGES transition (state=in-progress,
   │             ready_for=lead → turn=lead, updated_by=Gatekeeper; this one
   │             DOES derive state and bump seq, like any reviewer response)
-  ├─ finish gate row (ok/bounce/superseded/error, duration, result_json)
-  ├─ release slot
+  ├─ finish gate row (pass/bounce/superseded/error, duration, result_json)
+  ├─ release slot (every exit path after the slot claim releases it —
+  │    decided, superseded, refused, error, live-other; owner-token safe)
   └─ PASS → fall through to the existing reviewer hand-off *in the same
        tick*; BOUNCE → return (next tick sees turn=lead and hands off to
        the lead as usual)
@@ -114,10 +119,20 @@ stored on the gate row and compared again under the lock at finalization.
 re-submission of the same round number after a bounce is a distinct event,
 while a watcher restart or a second watcher process cannot gate the same
 submission twice. Because `GATE_PASS` never touches `seq`, the reviewer
-dispatch that follows a PASS happens exactly once: the same tick continues
-into the existing hand-off, and every later tick / restart sees the same
-seq (dedupe) plus a decided gate row (`uq_gates_decided`) → no second gate,
-no second spawn.
+dispatch that follows a PASS is the *same tick's* existing hand-off, and
+every later tick of the same processor sees the same seq (dedupe) plus a
+decided gate row → no second gate decision. **Delivery semantics are the
+watcher's existing ones and are not changed by this phase**: within one
+processor's unchanged-tick sequence there is exactly one gate decision and
+one dispatch; a fresh `_StateProcessor` (restart) or a second watcher
+that had deferred to the winning gate picks up the still-ready state and
+may deliver the interactive notification / send-keys again — today's
+at-least-once behaviour — while headless remains protected by the turn
+slot and `verify_transition` (a second `run_owed_turn` finds the slot held
+or the state transitioned). `uq_gates_decided` dedupes *decisions* only
+and is never cited as dispatch dedupe. A durable cross-process
+reviewer-dispatch lease is out of scope (it would change delivery for
+every mode, gate or not).
 
 ### Gate-owed latch (every watcher mode)
 
@@ -144,7 +159,7 @@ and restart mid-gate.
 | id | applies to | passes when | on `skip` |
 |---|---|---|---|
 | `tests` | types in `gatekeeper.on` (default `[impl]`) | configured `gatekeeper.tests.command` exits 0 within `timeout_minutes` (default 15) | no command configured → skip with note |
-| `scope` | `impl` only | there is **implementation work since the implementation boundary** (below): the set of paths changed since the boundary — committed after `boundary.sha` ∪ currently dirty/untracked whose content hash differs from the boundary's snapshot — minus tagteam artifacts (`_TAGTEAM_ARTIFACT_FILES` / `_PREFIXES`, `.tagteam/`) and this phase's plan artifacts (`docs/roadmap.md`, `docs/phases/<phase>.md`) is non-empty | not a git repo, no HEAD (no commits yet), or no boundary recorded (plan approved before 3.2.0 / legacy cycle) → skip with the reason (never fail on missing prerequisites); the phase-baseline `compute_scope_diff` remains what the cockpit Diff tab shows |
+| `scope` | `impl` only | there is **implementation work since the implementation boundary** (below): `compute_impl_work()` is non-empty — paths that genuinely changed content (or were deleted / created) relative to the boundary snapshot, minus tagteam artifacts (`_TAGTEAM_ARTIFACT_FILES` / `_PREFIXES`, `.tagteam/`) and this phase's plan artifacts (`docs/roadmap.md`, `docs/phases/<phase>.md`) | not a git repo, or no boundary recorded (plan approved before 3.2.0 / legacy cycle) → skip with the reason (never fail on missing prerequisites); **no HEAD (unborn branch) is NOT a skip** — the hash snapshot still decides; the phase-baseline `compute_scope_diff` remains what the cockpit Diff tab shows |
 | `plan-doc` | all gated types | `docs/phases/<phase>.md` exists and is non-empty | — |
 
 **Implementation boundary.** The existing phase baseline (plan-init,
@@ -158,17 +173,24 @@ the same shape as a baseline plus content hashes of the dirty paths:
 `{sha, dirty: {path: sha256|null}, captured_at, source: "plan-approve"}`.
 It is stored on the plan cycle's status file and copied onto the impl
 status at impl init (`impl_boundary`, source `copied-from-plan`), exactly
-like `baseline`. Rules: **no HEAD** (unborn branch) → boundary `sha:
-null`, the diff is "every tracked+untracked non-artifact path with a
-content hash different from the snapshot" — still meaningful; **dirty tree
-at capture** → those paths are in the snapshot with hashes, so a path that
-is still dirty but unchanged does not count, a path whose content changed
-does; **no boundary** → skip. Tests: plan-only changes after the boundary
-(roadmap / plan doc / handoff files edited or committed) → `fail`; one
-real code change → `pass`; an intentional implementation-doc change
-(README / `docs/how-tagteam-works.md`) → `pass`; unborn HEAD; dirty at
-capture then unchanged → `fail`, dirty at capture then modified → `pass`;
-legacy cycle without boundary → `skip`.
+like `baseline`. **Algorithm (`compute_impl_work`)** — one rule for every
+path, whether it is now committed or dirty: (a) for every path in
+`boundary.dirty`, compare its *current content* (working tree if dirty,
+else HEAD blob; deletion = `null`) to the captured hash — only a
+different hash counts, regardless of whether the path has since been
+committed; (b) every path committed after `boundary.sha` that is *not* in
+`boundary.dirty` counts; (c) every currently dirty/untracked path *not* in
+`boundary.dirty` counts; then subtract the artifact and plan-artifact
+exclusions. **No HEAD** (unborn branch): `sha: null`, (b) is empty and the
+snapshot in (a)/(c) still decides — a meaningful diff, not a skip. **No
+boundary** → skip. Tests: plan-only changes after the boundary (roadmap /
+plan doc / handoff files edited or committed) → `fail`; one real code
+change → `pass`; an intentional implementation-doc change (README /
+`docs/how-tagteam-works.md`) → `pass`; unborn HEAD → the snapshot decides;
+dirty at capture then still dirty and unchanged → `fail`; **dirty at
+capture then committed with identical content → `fail`, then modified →
+`pass`**; dirty at capture then modified (still dirty) → `pass`; legacy
+cycle without boundary → `skip`.
 
 A `fail` on any check → BOUNCE; otherwise PASS. `skip` never bounces but
 is always reported so the reviewer sees what was *not* checked. Timeout →
@@ -316,7 +338,8 @@ block.
 ### In
 - **A. `gatekeeper.py`** — `GateSpec`, `run_checks()` (tests / scope /
   plan-doc), `decide()` (pass / bounce / cap-pass), `run_gate()`
-  (claim → slot → checks → locked write → finish → release), report
+  (**slot → locked sweep+claim → checks → locked re-validate+write →
+  finish → release**, slot released on every exit path), report
   formatting, log file.
 - **B. `cycle.py`** — `add_gate_entry()` (PASS = the AMEND write path:
   rounds + shadow DB + export, no state derive; BOUNCE = the
@@ -345,6 +368,8 @@ block.
   `pyproject.toml` → 3.2.0 at the end.
 - **J. Tests** — `tests/test_gatekeeper.py` (checks, decide, cap, claim
   at-most-once + concurrent claims, superseded, timeout, no-git skip,
+  **busy-slot deferral leaves no self-owned running row and a later
+  identical tick decides**, slot released on refused/decided/live-other,
   output truncation, log file; **impl-boundary matrix**: plan-only
   changes fail, code change passes, implementation-doc change passes,
   unborn HEAD, dirty-at-capture unchanged vs modified, legacy no-boundary
@@ -424,13 +449,21 @@ pyproject.toml, CITATION.cff             3.2.0 (last commit)
    submission (`uq_gates_decided`); an abandoned `running` row (dead /
    mismatched runner, or timed out with no slot marker) is swept and
    retried once; a live-unverifiable runner is left alone and reported.
-4b. A `GATE_PASS` leaves `handoff-state.json` `seq` unchanged and produces
-   exactly one reviewer dispatch across later ticks and a watcher restart;
-   the gate-owed latch retries an undecided gate on identical ticks in
-   every watcher mode without ever dispatching the reviewer first.
+4b. A `GATE_PASS` leaves `handoff-state.json` `seq` unchanged; within one
+   processor's unchanged-tick sequence there is exactly one gate decision
+   and exactly one reviewer dispatch; across a restart / second watcher
+   there is still exactly one gate decision (test), while dispatch keeps
+   the watcher's existing at-least-once semantics (interactive re-notify
+   on restart is asserted as *allowed*, headless is asserted as protected
+   by the turn slot / state transition). The gate-owed latch retries an
+   undecided gate on identical ticks in every watcher mode without ever
+   dispatching the reviewer first, and a busy-slot deferral leaves no
+   self-owned `running` row (test).
 4c. The scope check fails on plan-only changes since the implementation
-   boundary and passes on a real code or intentional implementation-doc
-   change; missing boundary / no HEAD / not-git → skip with reason.
+   boundary (including a dirty-at-approval path committed unchanged) and
+   passes on a real code or intentional implementation-doc change; missing
+   boundary / not-git → skip with reason; no HEAD → the hash snapshot
+   decides (not a skip).
 5. After `max_bounces` consecutive bounces, the next failing submission
    passes-with-findings and reaches the reviewer.
 6. `tagteam gate check` exits 1 with the same report the gate would write;
@@ -447,6 +480,25 @@ pyproject.toml, CITATION.cff             3.2.0 (last commit)
 ## Resolved questions (round 1 → 2)
 - Default `on: [impl]` — agreed by the reviewer.
 - `max_bounces` default **2** — agreed by the reviewer.
+
+## Round-3 changes (reviewer r2)
+1. Claim order is slot-first (briefer's actual order): SlotBusy → latch
+   and return with no DB row written; the DB attempt is swept+claimed under
+   the lock only after the slot is held; the slot is released on every
+   exit path (decided / superseded / refused / error / live-other); test
+   that a busy-slot deferral leaves no self-owned `running` row and a
+   later identical tick can decide.
+2. Dispatch semantics stated honestly: one gate decision and one dispatch
+   per processor's unchanged-tick sequence; restart / second watcher keep
+   the watcher's existing at-least-once delivery (interactive re-notify
+   allowed, headless protected by the turn slot + `verify_transition`);
+   `uq_gates_decided` dedupes decisions only; a durable dispatch lease is
+   out of scope. Criterion 4b rewritten.
+3. Boundary algorithm made internally consistent: no HEAD → the hash
+   snapshot decides everywhere (checks table, boundary section, criterion
+   4c); every `boundary.dirty` path is compared by content hash to its
+   current content regardless of committed status, so dirty-at-approval →
+   committed unchanged fails and modified passes (new test case).
 
 ## Round-2 changes (reviewer r1)
 1. Scope check now enforces the unchanged-implementation contract through
