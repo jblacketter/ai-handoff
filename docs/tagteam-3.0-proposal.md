@@ -300,7 +300,9 @@ flowchart LR
   table — each phase should demonstrably pay for itself.
 - Version note: 3.0 is an arc name. Releases proceed 0.8.0 → 0.9.0 →
   …; the release that completes Phase 36 ships as 3.0.0 (skipping
-  1.x/2.x to match the project's own naming history).
+  1.x/2.x to match the project's own naming history). *Shipped as 3.0.0
+  with Phase 36 (visual story), 2026-08-16 — a docs/media release,
+  behavior identical to 0.12.0.*
 
 ## 6. Documentation as-we-go (standing acceptance criterion)
 
