@@ -60,7 +60,8 @@ of `~/.tagteam/projects.json`.
 the phase findings): the page token is a `<meta>` and is never rendered
 (searched the DOM text of both pages); no absolute path in the pixels
 (hub rows show `name` + `parent/`, the full path is a tooltip only; the
-cockpit shows the project name); no entry from the live registry (the hub
+cockpit shows the project name; the seed records the brief's path
+project-relative because the Feed prints it); no entry from the live registry (the hub
 was started with `--registry` pointing at the seed); no round text from a
 real project (all of it lives in `scripts/showcase_seed.py`); no PNG text
 metadata (test).

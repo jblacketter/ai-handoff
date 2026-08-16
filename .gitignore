@@ -41,3 +41,4 @@ projects/
 # else under .tagteam/ (DB, transient sentinels, watcher state, etc.).
 /.tagteam/*
 !/.tagteam/legacy/
+.playwright-mcp/
