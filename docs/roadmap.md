@@ -348,11 +348,17 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/cockpit-launchpad-lead-conversation-31.md`
 - **Source:** arbiter walk-through 2026-08-16 (idle cockpit dead-ends; two servers shadowing on one port; "I want to talk to my lead and start one from here").
 
+### Phase 38: Gatekeeper Pre-checks (3.2)
+- **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-38-gatekeeper-pre-checks` (PR at the end). Release **3.2.0** after impl approval; tag after merge + green CI.
+- **Description:** a deterministic, model-free gate between the lead's `SUBMIT_FOR_REVIEW` and the reviewer's turn: run the project's configured test command, the existing scope-diff audit and a plan-doc check; **PASS** attaches the report to the round so the reviewer starts with the facts, **BOUNCE** hands the turn straight back to the lead with the failing output so no reviewer turn is spent on a submission that doesn't build. Runs in the watcher (headless and interactive), at-most-once per submission via a claim row (briefer pattern), bounded by `max_bounces` so it can never trap a lead; `tagteam gate check|run|status|list`; cockpit feed shows gate items. Opt-in behind `gatekeeper.enabled` — flag-off is byte-identical to 3.1.1.
+- **Plan:** `docs/phases/gatekeeper-pre-checks.md`
+- **Source:** 3.0 proposal §4 candidate; promoted 2026-08-16 as the first post-arc phase (best value-to-risk of the four candidates).
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
 - **Status:** Not started — deliberately kept out of the 3.0 arc to protect focus; see `docs/tagteam-3.0-proposal.md` §4 "Candidate later phases"
-- Gatekeeper pre-checks (deterministic-first: tests + scope-diff before reviewer sees a submission)
+- ~~Gatekeeper pre-checks~~ → promoted to Phase 38 (2026-08-16)
 - Reviewer panels (2–3 lenses merged into one `REQUEST_CHANGES`; opt-in per phase)
 - Roadmap as DAG (`depends_on`, parallel phases in worktrees)
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
