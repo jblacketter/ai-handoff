@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: launch-intent state machine, atomic lead-slot claim, composite idempotent Start, Codex resume argv + SSE replay/cursor, untrusted-content + id boundaries + turn lifecycle, bind-authoritative port rule, schema restore order)
+- [x] In Review (round 2: launch-intent state machine, atomic lead-slot claim, composite idempotent Start, Codex resume argv + SSE replay/cursor, untrusted-content + id boundaries + turn lifecycle, bind-authoritative port rule, schema restore order; round 3: codex resume argv order verified against 0.147.0, persisted launch claim, existing marker keys retained + owner_token/kind, exclusive canary bind + quick-restart test)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -133,17 +133,26 @@ provider/executable/args (from `agents.lead.headless`).
 - Port collision — **bind-authoritative.** The bind result decides:
   `OSError` (`EADDRINUSE`) → refuse, exit 2. To avoid the loopback-vs-
   wildcard shadow (a `127.0.0.1` listener and a `0.0.0.0` listener can
-  coexist on macOS/Linux), the server binds with `SO_REUSEADDR` **off** and,
-  before binding, probes the *connectable* form of the requested host
-  (wildcard `""`/`0.0.0.0` → `127.0.0.1`) at that port with a 300 ms
-  connect: if something answers, we treat the port as occupied even though
-  our bind might succeed. The message names the other project **only when
-  a verified Tagteam identity was obtained** (`GET /api/info` → `{"app":
-  "tagteam", "project": …}` — `app` added to cockpit + hub info); otherwise
-  "port <p> is in use on <addr> — use --port <p+1>". Tests: loopback vs
-  wildcard collision (both orders), an unrelated listener (no identity →
-  generic message), and the post-probe race (port taken between probe and
-  bind → the bind `OSError` path yields the same message).
+  coexist on macOS/Linux) **without** giving up quick restarts, the
+  listening socket keeps `allow_reuse_address` (TIME_WAIT-friendly, as
+  today) and the server additionally holds an **exclusive canary**: a
+  second socket bound with `SO_REUSEADDR` off (`SO_EXCLUSIVEADDRUSE` on
+  Windows) to the *connectable* form of the requested host (wildcard →
+  `127.0.0.1`) at the same port, never listened on, kept for the server's
+  lifetime. Any live listener on that port — loopback or wildcard, ours or
+  another program's, started before or after a probe — makes the canary
+  bind fail, so exclusion does not depend on timing; a normal shutdown
+  leaves no TIME_WAIT on the canary (it never accepted connections), so
+  an immediate same-port restart works. The identity probe (`GET
+  /api/info` on the connectable address, 300 ms) only improves the
+  message: the other project is named **only when a verified Tagteam
+  identity** (`{"app": "tagteam", "project": …}` — `app` added to cockpit
+  + hub info) was obtained; otherwise "port <p> is in use on <addr> — use
+  --port <p+1>". Tests (macOS/Linux/Windows CI): same-port immediate
+  restart after normal shutdown; two live servers cannot coexist —
+  loopback-then-wildcard and wildcard-then-loopback; an unrelated listener
+  → generic message; the post-probe race (listener appears between probe
+  and bind) → still refused via the canary.
 
 **B. Launchpad** (`cockpit_api.py`, `server.py`, `cockpit.html|css|js`)
 - **Launch intent (state machine, one function, one consumer set).**
@@ -192,13 +201,24 @@ provider/executable/args (from `agents.lead.headless`).
     wait ≤ 5 s for an identity-bound pidfile *or* early exit — an exit
     means "watcher rejected its config" and is reported, not "started");
     (2) claim the lead slot and send the intent's command as a Lead-panel
-    message (a conversation turn). Idempotency key = `(intent.command,
-    observed)`: a repeated/duplicate POST returns the existing conversation
-    turn (`{launched: false, existing: turn_ref}`), so a double-click or
-    retry produces one watcher and one `/handoff start`; concurrent
-    identical POSTs serialize on the project writer lock and only the first
-    claims. Partial state is reported explicitly (`watcher: started, lead:
-    slot busy (r3 in flight)` → 409 with what to do). `phase.start` alone
+    message (a conversation turn). **Idempotency is persisted, and the
+    lock stays short:** under `dualwrite.writer_lock` (a few ms) the
+    server revalidates intent + `observed`, then inserts a `launches` row
+    (schema v7: `id`, `key = sha256(intent.command + observed)` UNIQUE,
+    `status ∈ pending|succeeded|failed`, `conversation_id`, `turn_n`,
+    `watcher_pid`, `created_at`, `finished_at`, `error`) — the claim — and
+    releases the lock **before** any side effect. Watcher spawn/readiness
+    wait (≤ 5 s) and the conversation turn happen outside the lock; the
+    row is finalized `succeeded` (with the turn reference) or `failed`
+    (with the reason and whatever partial state exists: `watcher: started,
+    lead: slot busy (r3)`). A repeated / double-clicked / retried-after-
+    response-loss POST with the same key finds the row: `pending` → 202
+    "in progress" (poll the turn), `succeeded` → 200 `{launched: false,
+    existing: turn_ref}`, `failed` → the stored partial-state message and
+    a fresh attempt only with `retry: true` (which supersedes the row).
+    Concurrent identical POSTs: exactly one inserts (UNIQUE), the rest see
+    the row. Tests: double-click, concurrent POSTs (barrier), retry after
+    response loss, failed/partial then retry, observed-state drift → 409. `phase.start` alone
     (no watcher) is the same operation with `ensure_watcher=false` for the
     interactive path.
   - `watch.stop` (chip): SIGTERM the pidfile'd watcher only when identity
@@ -222,11 +242,16 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   exec resume [SESSION_ID] [PROMPT]` but no stable public contract, so:
   probe once per server (`codex exec resume --help` exit 0 + usage line),
   decide **before spawning**; when supported, a dedicated
-  `build_resume_argv()` (adapter method) produces `codex exec resume
-  <thread_id> --json <sandbox / approval defaults + validated user args>
-  --skip-git-repo-check -` (stdin prompt) — `build_argv()` is not appended
-  to, since it owns `exec`, `-C`, the defaults and the trailing `-`; the
-  same sandbox/approval policy is asserted by test. If a resume invocation
+  `build_resume_argv()` (adapter method) produces — parent options
+  **before** the subcommand, because `--sandbox`, `-C`, `-c` are `exec`
+  options and `codex exec resume <id> --sandbox …` fails with "unexpected
+  argument" on 0.147.0 (verified) —
+  `[exe, "exec", "--json", "-C", root, <sandbox/approval defaults +
+  validated user args>, "--skip-git-repo-check", "resume", thread_id, "-"]`
+  (prompt on stdin); `build_argv()` is not appended to. An exact parser
+  smoke test runs `codex exec … resume --help` with that prefix when the CLI
+  is installed (skipped otherwise) and the unit test asserts the same
+  sandbox/approval policy tokens as the first-turn argv. If a resume invocation
   then fails (nonzero / no thread event), the turn is **failed and
   surfaced** with its log — never auto-replayed (it may already have used
   tools). Without resume support the turn's stdin carries the budgeted
@@ -251,11 +276,20 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   the marker; if present and its owner is live (pid + creation identity
   verifiable, same rule as `cancel-turn`) → `Busy(marker)`; if present but
   stale (dead pid / identity mismatch / unverifiable) → treat as free and
-  log the recovery; else write the marker with an **owner token**
-  (`stem`, `kind`, `role`, `runner_pid` + `runner_ident`, `child_pid` +
-  `child_ident` once spawned, `parent_pid`, `started_at`, `log_path`,
-  `events_path`, and for conversations `conversation_id`, `turn_n`) and
-  return the claim. `release` re-reads under the lock and unlinks **only if
+  log the recovery; else write the marker **keeping the existing field
+  contract exactly** — `stem`, `role`, `phase`, `type`, `round`,
+  `started_at`, `log_path`, `events_path`, `pid` (child, set once
+  spawned), `child_ident`, `watcher_pid` (the runner: watcher process, or
+  the cockpit server / `tagteam lead` process for a conversation),
+  `watcher_ident`, and the direct-parent relationship — plus the new
+  fields `owner_token` (random per claim), `kind` (`cycle` | `conversation`
+  | `briefer`), and for conversations `conversation_id`, `turn_n`. No
+  reader is renamed: `cancel-turn` keeps binding `pid` + `child_ident` +
+  `watcher_pid` + `watcher_ident` + parent; `tail`, `now_payload`, the hub
+  payload and `watcher_status` read the same keys and additionally show
+  `kind`. Tests exercise `cancel-turn`, `tail`, `now_payload`, the hub
+  payload and `watcher_status` against both `kind=cycle` and
+  `kind=conversation` markers. `release` re-reads under the lock and unlinks **only if
   the marker's owner token is ours**. `cancel-turn` binding is unchanged
   and works for conversation turns because the same fields are present.
   `watcher_status` learns `kind`: a conversation runner (or the cockpit
@@ -275,9 +309,9 @@ adapters, `db.py` v7, `cockpit_api.py`, `server.py`, `cockpit.*`)
   `conversation` | `briefer`, nullable, default null = turn) so `tagteam
   usage` can split them (`--json` includes it; text roll-up adds a
   "conversation" line). Transcript files are the canonical human record;
-  the DB indexes them. `conversations` and `conversation_turns` join
-  `NON_FILE_BACKED_TABLES` **in parent-before-child order** (`…,
-  "conversations", "conversation_turns"`) so `snapshot_non_file_backed` /
+  the DB indexes them. `conversations`, `conversation_turns` and
+  `launches` join `NON_FILE_BACKED_TABLES` **in parent-before-child order**
+  (`…, "conversations", "conversation_turns", "launches"`) so `snapshot_non_file_backed` /
   `restore_non_file_backed` (state repair) preserve them; tests: v6 → v7
   opens and migrates, repair round-trip preserves both tables and the
   usage `kind` column, `mode=ro` hub reads still work.
@@ -346,8 +380,9 @@ for the capture); showcase untouched. Files table: `.tagteam/conversations/`.
 `test_server_cockpit.py`, `test_cockpit_api.py`, `test_docs_story.py`)
 - serve default: bare → cockpit; `--theme saloon` byte-identical to the
   pre-flip bare page (the existing identity test retargeted); banner text
-  both states; port collision: two servers → second exits 2 naming the
-  first's project; bind `OSError` path.
+  both states; port exclusion: canary (both orders, unrelated listener,
+  post-probe race), identity-named message only on verified Tagteam
+  identity, immediate same-port restart after shutdown.
 - `launch_intent` matrix (table above) incl. plan-approved → same-phase
   impl, impl-approved → next phase by name skipping the "In progress"
   just-approved entry, roadmap exhausted, terminal-status normalization
@@ -440,6 +475,23 @@ check through `scripts/upgrade_smoke.py --python <3.1.0 venv>
   is the alternative. No queueing.
 - **Q3** `phase.start` stays a visible conversation message — now inside
   the composite, idempotent `launch` operation.
+
+## Round-3 changes (reviewer r2)
+The round-2 decisions are now in the normative sections (the earlier
+submission had described them without the file being written). Plus:
+1. Codex resume argv: parent options before the subcommand
+   (`exec --json -C root <policy> --skip-git-repo-check resume <id> -`),
+   verified against codex-cli 0.147.0; parser smoke test.
+2. Launch idempotency persisted as a `launches` row claimed under a short
+   writer-lock hold, side effects outside the lock, pending/succeeded/
+   failed semantics for retries; tests for double-click, concurrent,
+   retry-after-loss, failed/partial retry.
+3. Marker keeps the existing keys (`pid`, `child_ident`, `watcher_pid`,
+   `watcher_ident`, parent) + `owner_token`, `kind`, conversation fields;
+   readers/binders enumerated and tested for both kinds.
+4. Port exclusion via an exclusive canary bind (listener keeps
+   `allow_reuse_address`); quick-restart test on all three OSes; probe only
+   for the message.
 
 ## Round-2 changes (reviewer r1)
 1. Launch-intent state machine (`launch_intent`) with the tested matrix
