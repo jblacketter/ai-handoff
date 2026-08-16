@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard)
+- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -227,10 +227,15 @@ links). The block header states the as-of date and the exact command.
 the block's footnotes and enforced by the fixture test):
 
 - **Cycle** = one `(phase, type)` pair; duplicates resolved in favor of
-  `docs/handoffs/`. **As-of filter:** entries with `ts` > as-of are
-  dropped and a cycle whose first entry is after as-of is excluded — so
-  the block is stable while later phases keep writing rounds (the guard
-  compares against a pinned date, not a moving target).
+  `docs/handoffs/`. **As-of filter:** `--as-of YYYY-MM-DD` is an
+  inclusive UTC calendar day — the cutoff is `ts < (DATE + 1 day)
+  00:00:00Z`; entries at or after the cutoff are dropped and a cycle
+  with no entry before the cutoff is excluded (a legacy entry without
+  `ts` uses the status file's `date` at 00:00Z). The block is therefore
+  stable while later phases keep writing rounds. The **same cutoff
+  function** is applied to usage turns in `export-usage` (below), and
+  `report` refuses (`exit 2`) a usage file whose embedded `as_of` differs
+  from its own `--as-of`.
 - **Outcome** from the (filtered) entries: last entry `APPROVE` →
   *approved*; last entry `ESCALATE` / `NEED_HUMAN` → *escalated*; last
   entry a lead submission or `REQUEST_CHANGES` → *in progress* (counted,
@@ -244,16 +249,24 @@ the block's footnotes and enforced by the fixture test):
 - **Pushback rate** = `REQUEST_CHANGES` entries ÷ `SUBMIT_FOR_REVIEW`
   entries (a submission draws at most one response). **First-round
   approvals** = cycles approved at round 1.
-- **Stale streaks**: for each cycle, the longest run of consecutive lead
-  submissions with byte-identical content (the same rule as
-  `cycle._count_stale_rounds`); reported as the max streak observed
-  against the limit "10 consecutive stale rounds → auto-escalation". No
-  "round 10" line: total rounds is reported as a distribution + max only.
+- **Stale streaks**: for each cycle, the number of consecutive
+  *unchanged re-submissions* — equal adjacent transitions between
+  successive lead `SUBMIT_FOR_REVIEW` contents, counted with the exact
+  production algorithm (`cycle._count_stale_rounds`: the first submission
+  is the baseline and is never itself stale, so 11 identical submissions
+  = a streak of **10**; the script's function is a copy of that loop and
+  the fixture expectation is computed by that loop). Reported as the max
+  streak observed against the limit "10 consecutive stale rounds →
+  auto-escalation"; the showcase footnote states the baseline rule in one
+  sentence. No "round 10" line: total rounds is reported as a
+  distribution + max only.
 - **Usage** (only with `--usage`, from the sanitized snapshot): turns by
   role and provider; failed / cancelled / timed-out attempts counted by
   outcome and **excluded** from duration and token statistics; where a
-  `(cycle, round, role)` has several `ok` rows (a retry), the last one is
-  used for the curve and the extras are reported as retries; null token
+  `(cycle, round, role)` has several `ok` rows (a retry), the row with
+  the **highest `attempt`** is used for the curve and the extras are
+  reported as retries (`attempt` is assigned deterministically at export
+  — see below — because `id`/`ts` are stripped); null token
   fields are excluded from sums and reported as "unknown". **The
   round-over-round curve is per (cycle, role, provider) series only** and
   is labeled *descriptive*: input-token accounting differs by provider
@@ -262,15 +275,21 @@ the block's footnotes and enforced by the fixture test):
   never states a cross-provider efficiency claim. Cost is shown only
   where the provider priced the turn (`n priced / total`).
 
-*`export-usage < usage.json > docs/showcase-data/usage-<date>.json`* is
-the deterministic sanitizer: reads `tagteam usage --json` on stdin and
-writes `{"schema": "showcase-usage/1", "as_of": DATE, "turns": [...]}`
-where each turn has **only** `phase, type, round, role, provider,
-status, duration_ms, input_tokens, output_tokens, cache_read_tokens,
-cache_write_tokens, cost_usd` — no `id`, `ts`, `agent`, `model`,
-`exit_code`, `num_turns`, `session_id`, `log_path`; turns sorted by
-`(phase, type, round, role)`, `sort_keys=True`, so re-export is
-byte-stable. Exit 2 with a message on unreadable input.
+*`export-usage --as-of YYYY-MM-DD < usage.json > docs/showcase-data/usage-<date>.json`*
+is the deterministic sanitizer: reads `tagteam usage --json` on stdin,
+**first** drops raw turns whose `ts` is at or after the as-of cutoff
+(same inclusive-UTC-day function as `report`), **then** assigns each
+surviving turn an `attempt` ordinal — 1, 2, … within its `(phase, type,
+round, role)` group in `(ts, id)` order — and only then strips the
+sensitive fields. Output: `{"schema": "showcase-usage/1", "as_of": DATE,
+"turns": [...]}` where each turn has **only** `phase, type, round, role,
+attempt, provider, status, duration_ms, input_tokens, output_tokens,
+cache_read_tokens, cache_write_tokens, cost_usd` — no `id`, `ts`,
+`agent`, `model`, `exit_code`, `num_turns`, `session_id`, `log_path`;
+turns sorted by `(phase, type, round, role, attempt)`, `sort_keys=True`,
+so re-exporting after later turns have been recorded is byte-identical
+for the same `--as-of`. Exit 2 with a message on unreadable input or a
+missing `--as-of`.
 
 **F. Tests** — `tests/test_docs_story.py`:
 - every `docs/media/*.svg` parses as XML, root has `viewBox`,
@@ -296,13 +315,22 @@ byte-stable. Exit 2 with a message on unreadable input.
   `docs/handoffs` must win; entries after as-of dropped; a stale streak
   of 3; usage fixture with a failed attempt, a retry, a null token field
   and both providers — asserting the failed/retry/null rules and that no
-  series mixes providers).
+  series mixes providers; the stale-streak expectation is produced by the
+  copied production loop on 3 identical + 1 changed submissions → 2, and
+  on 11 identical → 10).
+- `export-usage`: fixture with duplicate `(cycle, round, role)` attempts
+  in shuffled input order plus unrelated rows interleaved → `attempt`
+  ordinals follow `(ts, id)`, output sorted and byte-identical across two
+  runs and across an input that has extra turns after the cutoff; a turn
+  exactly at `DATE+1 00:00:00Z` is excluded, one at `DATE 23:59:59Z`
+  included; `report --as-of` with a snapshot whose `as_of` differs →
+  exit 2.
 - **Byte-compare guard:** the test runs `report --as-of <date from the
   block header> --usage docs/showcase-data/usage-<date>.json` over the
   repo's tracked files and asserts the output equals the block in
   `docs/showcase.md` byte for byte.
 - **Snapshot safety:** every `docs/showcase-data/*.json` has exactly the
-  allowed schema (allowed keys, no extras), no string value that looks
+  allowed schema (allowed keys incl. `attempt`, no extras), no string value that looks
   like an absolute path (`^/`, `^[A-Za-z]:\\`, `~/`), and no
   `session_id` / `log_path` / `agent` / `model` / `ts` key anywhere
   (recursive walk); `export-usage` on a fixture with those fields drops
@@ -380,10 +408,43 @@ license / link-back paragraph (139e099) is kept verbatim in §8.
    the wheel's `tagteam/` file list + hashes equal the 0.12.0 wheel's
    (downloaded from PyPI into the scratchpad, compared in findings);
    `tagteam upgrade` from the source install on a disposable project set
-   up by 0.12.0 (`pip install tagteam==0.12.0` in a scratch venv →
-   `tagteam setup`, then the source `tagteam upgrade`) changes no file
-   (checksums before/after in findings). None of these needs a PR, a
-   tag, or PyPI.
+   up by 0.12.0 changes no file — run **only** through the isolated
+   harness `scripts/upgrade_smoke.py` (below), never bare `tagteam
+   upgrade` (which reads `~/.tagteam/projects.json`, prunes it, and runs
+   setup over every real registered project). Findings record the
+   harness output: checksums of the disposable project before/after
+   (equal), checksum of the real `~/.tagteam/projects.json` before/after
+   (equal), and checksums of every framework file `setup` manages in
+   every real registered project before/after (equal). None of these
+   needs a PR, a tag, or PyPI.
+
+**`scripts/upgrade_smoke.py --project DIR [--sentinel DIR]`** — the
+isolated harness. In the parent: snapshot checksums of the real registry
+file and of the framework files under every real registered project
+(read via the non-mutating `registry.read_registry_raw()`); create a
+temporary registry directory containing a `projects.json` that lists
+only `--project` (and `--sentinel`, an empty dir with no marker files);
+spawn a **fresh helper process** (`sys.executable -c …`) with
+`HOME=<tmp>` and, before anything reads the registry, `tagteam.registry
+.REGISTRY_DIR` / `REGISTRY_FILE` set to the temporary paths, then call
+`tagteam.cli.upgrade_command()`; back in the parent, re-checksum the
+real registry + real projects and fail loudly on any difference, and
+report the disposable project's before/after diff (empty = no-op) and
+that the sentinel was not visited (its dir is still empty; the helper's
+stdout names only the disposable project). The real registry is never
+replaced, edited or copied over. Recipe for the 3.0.0 gate: `pip install
+tagteam==0.12.0` in a scratch venv → `tagteam setup` in a scratch dir
+(the 0.12.0 CLI's own registry write goes to that venv's `HOME` override
+too — the recipe sets `HOME` for that step as well) → source-install
+`python scripts/upgrade_smoke.py --project <dir>`.
+
+Regression test (`tests/test_docs_story.py::test_upgrade_smoke_isolated`):
+a source-`setup` disposable project + an unrelated sentinel dir; run the
+harness; assert the sentinel is untouched and not named in the helper's
+output, the harness's own temporary registry lists exactly the two dirs
+afterwards (pruning applied only there), and the real registry file — if
+one exists on the machine — is byte-identical before/after (checked by
+the test itself, independent of the harness's own check).
 
 ## Post-approval checklist (release operations, not review gates)
 
@@ -404,6 +465,26 @@ roadmap status line; reviewer approval never depends on them.
 - **Q3** One `docs/how-tagteam-works.md` with stable per-section anchors
   (`#loop`, `#cycle`, `#modes`, `#headless`, `#controls`, `#escalations`,
   `#cockpit`, `#hub`, `#saloon`, `#files`).
+
+## Round-3 changes (reviewer r2)
+
+1. *Upgrade smoke isolation:* `scripts/upgrade_smoke.py` — fresh helper
+   process with `HOME` overridden **and** `registry.REGISTRY_DIR` /
+   `REGISTRY_FILE` patched to a temp registry listing only the disposable
+   project (+ sentinel) before `upgrade_command()` runs; parent checksums
+   the real registry and every real registered project's framework files
+   before/after; regression test with an unvisited sentinel; the real
+   registry is never replaced or edited.
+2. *Snapshot contract:* `export-usage --as-of YYYY-MM-DD` (required);
+   inclusive UTC day, cutoff `ts < DATE+1 00:00Z`, filter before strip;
+   identical cutoff in `report`; per-`(phase,type,round,role)` `attempt`
+   ordinal in `(ts, id)` order added to schema + sort key; `report`
+   rejects a snapshot whose `as_of` ≠ its `--as-of`; tests for shuffled
+   duplicates, boundary timestamps and byte-stability with later turns.
+3. *Stale streak:* defined as consecutive unchanged re-submissions (equal
+   adjacent transitions) using the exact production loop; 11 identical →
+   10; fixture expectations computed by that loop; footnote states the
+   baseline rule.
 
 ## Round-2 changes (reviewer r1)
 
