@@ -438,18 +438,27 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
             if not watcher_info.get("ok"):
                 return _fail(f"watcher: {watcher_info.get('message')}", {"watcher_result": watcher_info})
 
-    # an existing turn reference (retry) is returned — never a second message
-    if row.get("conversation_id") and row.get("turn_n"):
-        _persist(status="succeeded", finished_at=_now_iso())
-        return 200, {"ok": True, "launched": False, "status": "succeeded",
-                     "existing": {"conversation_id": row["conversation_id"], "turn_n": row["turn_n"]},
-                     "watcher": watcher_info, "message": "the lead turn already exists"}
+    # an existing turn (retry) is returned — never a second message; a
+    # persisted conversation whose turn never got created is reused
+    cid = row.get("conversation_id")
+    if cid and row.get("turn_n"):
+        c = db.connect(project_dir=str(root))
+        try:
+            existing = db.get_conversation_turn(c, cid, int(row["turn_n"]))
+        finally:
+            c.close()
+        if existing is not None:
+            _persist(status="succeeded", finished_at=_now_iso())
+            return 200, {"ok": True, "launched": False, "status": "succeeded",
+                         "existing": {"conversation_id": cid, "turn_n": row["turn_n"]},
+                         "watcher": watcher_info, "message": "the lead turn already exists"}
     try:
-        conv = lead_chat.new_conversation(root, provider=lead_chat.resolve_lead(config, root).provider,
-                                          title=live["command"])
-        cid = conv["id"]
+        if not cid or lead_chat.get_conversation(root, cid) is None:
+            conv = lead_chat.new_conversation(root, provider=lead_chat.resolve_lead(config, root).provider,
+                                              title=live["command"])
+            cid = conv["id"]
         # persist the conversation reference before the turn runs, so a crash
-        # mid-turn leaves a recoverable trace
+        # mid-turn leaves a recoverable trace (turn_n is the expected number)
         _persist(conversation_id=cid, turn_n=1)
         sender = send or (lambda: lead_chat.send(root, cid, live["command"], config=config, by=by))
         turn = sender()
