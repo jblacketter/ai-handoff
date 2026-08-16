@@ -358,14 +358,20 @@ class TestRoadmapTerminal:
         from tagteam import roadmap
         src = (REPO / "docs" / "roadmap.md").read_text(encoding="utf-8")
         rp = tmp_path / "roadmap.md"; rp.write_text(src, encoding="utf-8")
-        phases = roadmap.get_incomplete_phases(rp)
-        assert phases, "the real roadmap should have at least one open phase"
-        # nothing terminal leaks through, and Phase 20-era Complete/Absorbed/Deferred are gone
-        for p in phases:
-            assert not roadmap.is_terminal_status(p.status), (p.slug, p.status)
         allp = roadmap.parse_roadmap(rp)
-        first_open = next(p for p in allp if not roadmap.is_terminal_status(p.status))
-        assert phases[0].slug == first_open.slug
+        assert len(allp) > 30                                   # the real roadmap: many phases, many status forms
+        # Phase 20-era "Complete" / "Absorbed" / "Deferred" / "✅ Complete …" are all terminal now
+        terminal = [p for p in allp if roadmap.is_terminal_status(p.status)]
+        assert len(terminal) >= 30
+        assert any(p.status.startswith("✅") for p in terminal) and any(p.status.startswith("Absorbed") for p in terminal)
+        open_ = [p for p in allp if not roadmap.is_terminal_status(p.status)]
+        if open_:
+            phases = roadmap.get_incomplete_phases(rp)
+            assert [p.slug for p in phases] == [p.slug for p in open_]
+            assert phases[0].slug == open_[0].slug
+        else:   # every phase shipped: the queue is honestly empty (was: started at Phase 20)
+            with pytest.raises(ValueError, match="complete"):
+                roadmap.get_incomplete_phases(rp)
 
 
 # ------------------------------------------------ watcher: slot re-dispatch ----
