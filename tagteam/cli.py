@@ -349,6 +349,9 @@ Commands:
   cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
   serve         Start the web dashboard server (--theme cockpit for the arbiter cockpit;
                 default is the Saloon; --host, --max-sse; `serve.theme` in tagteam.yaml)
+  hub           One surface over every registered project (Needs you / Waiting / Quiet,
+                burn, shared window; each cockpit mounted at /p/<id>/); --list for text
+  registry      list | unregister PATH — the projects `tagteam setup` registered
   tui           Launch the Handoff Saloon terminal UI
   migrate       Migrate legacy projects to use tagteam.yaml
   upgrade       Re-run setup on all registered projects (after pip upgrade)
@@ -454,6 +457,14 @@ def main() -> int:
         from tagteam.server import serve_command
 
         return serve_command(sys.argv[2:])
+    if command == "hub":
+        from tagteam.hub import hub_command
+
+        return hub_command(sys.argv[2:])
+    if command == "registry":
+        from tagteam.hub import registry_command
+
+        return registry_command(sys.argv[2:])
     if command == "tui":
         try:
             from tagteam.tui import tui_command

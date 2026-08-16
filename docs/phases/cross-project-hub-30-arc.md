@@ -4,7 +4,7 @@
 - [x] Planning
 - [x] In Review (round 2: dispatch seam, non-mutating registry reads, exhaustive read-only + SSE contract, per-kind shared window, abandoned ⊂ stale)
 - [x] Approved (round 2)
-- [ ] Implementation
+- [x] Implementation
 - [ ] Implementation Review
 - [ ] Complete
 
