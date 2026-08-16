@@ -536,11 +536,13 @@
     line(padL, H - padB, W - padR, H - padB, '#2b333d'); line(padL, padT, padL, H - padB, '#2b333d');
     for (var r = 1; r <= maxR; r++) { if (maxR <= 12 || r % 2 === 1) text(X(r), H - 8, 'r' + r, 'middle'); }
     text(padL - 4, padT + 8, fmtInt(maxY), 'end'); text(padL - 4, H - padB, '0', 'end');
-    // round-10 escalation line
+    // stale-round limit marker (auto-escalation fires after 10 consecutive
+    // stale rounds — unchanged re-submissions — not at a fixed round number;
+    // the marker only gives the curve a scale)
     if (maxR >= 10) {
       line(X(10), padT, X(10), H - padB, '#f85149', '4 3');
-      var nearRight = X(10) > W - padR - 110;
-      text(X(10) + (nearRight ? -3 : 3), padT + 10, 'r10 auto-escalate', nearRight ? 'end' : 'start', '#f85149');
+      var nearRight = X(10) > W - padR - 150;
+      text(X(10) + (nearRight ? -3 : 3), padT + 10, '10-stale-round limit', nearRight ? 'end' : 'start', '#f85149');
     }
     var colors = { lead: '#5aa9ff', reviewer: '#c58af9', briefer: '#d29922' };
     Object.keys(byRole).forEach(function (role) {

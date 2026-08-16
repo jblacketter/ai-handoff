@@ -5,7 +5,7 @@
 - [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots; round 5: post-approval installed-wheel check goes through the harness with `--python`, helper reports imported tagteam version/path; round 6: exact launch `<--python> -I -c` with cwd outside the repo, helper reports executable/prefix/version/file, parent verifies before any registry call, temp-venv shadowing test)
 - [x] Approved (round 6)
 - [x] Implementation
-- [ ] Implementation Review
+- [x] Implementation Review (round 2: canonical-key precedence before the as-of filter, cockpit stale-round wording + recapture, arbiter ruling routing split in the loop diagram)
 - [ ] Complete (release **3.0.0** via PR — the release that completes Phase 36 ships as 3.0.0, proposal §5)
 
 ## Roles
@@ -354,7 +354,10 @@ license / link-back paragraph (139e099) is kept verbatim in §8.
 - The portfolio repo (`jblacketter.github.io`) — not touched; the
   manifest tells it what to consume.
 - Any package code, CLI, flags, schema, or `tagteam/data/` (SKILL.md,
-  templates) changes. Version bump only.
+  templates) changes. Version bump only. *(Impl round 2 exception, at the
+  reviewer's request: the cockpit chart's incorrect "round-10" wording is
+  corrected — two text-only edits under `tagteam/data/web/`, no
+  behavior change.)*
 - Animated / interactive diagrams, mermaid rendering pipelines, or
   auto-generating the SVGs from mermaid (hand-authored on purpose: the
   portfolio look is not mermaid's; the consistency test guards drift).
@@ -403,7 +406,14 @@ license / link-back paragraph (139e099) is kept verbatim in §8.
    HTW verbatim).
 6. **Release-readiness gate, all local:** `pytest` green (macOS; CI runs
    on the PR after approval); `git diff origin/main -- tagteam/` empty
-   (origin/main == v0.12.0 at branch time; re-checked at submission);
+   (origin/main == v0.12.0 at branch time; re-checked at submission) —
+   **amended in impl round 2 (reviewer):** the one permitted exception is
+   the text-only correction of the cockpit Usage chart's wording
+   (`tagteam/data/web/cockpit.html` caption + `cockpit.js` marker label:
+   "round-10 line / r10 auto-escalate" → "stale-round limit … 10
+   consecutive stale rounds"), disclosed in findings, guarded by a test,
+   and verified narrowly: the diff is those two files only and the wheel
+   comparison differs in exactly those two entries; no behavior change;
    `pip wheel . --no-deps` builds, `METADATA` says `Version: 3.0.0`, and
    the wheel's `tagteam/` file list + hashes equal the 0.12.0 wheel's
    (downloaded from PyPI into the scratchpad, compared in findings);

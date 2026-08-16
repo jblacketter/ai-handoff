@@ -34,8 +34,8 @@ tests only; the `tagteam/` package tree is byte-identical to 0.12.0.
   `export-usage --as-of …`), **`scripts/showcase_seed.py DIR`**,
   **`scripts/upgrade_smoke.py`** (`--project --sentinel --python
   --expect-version --json`).
-- **Tests:** `tests/test_docs_story.py` (20), `tests/test_showcase_numbers.py`
-  (7), `tests/test_upgrade_smoke.py` (5). Full suite: **931 passed, 5
+- **Tests:** `tests/test_docs_story.py` (21), `tests/test_showcase_numbers.py`
+  (7), `tests/test_upgrade_smoke.py` (5). Full suite: **932 passed, 5
   skipped**.
 - Bookkeeping: `pyproject.toml` and `CITATION.cff` → 3.0.0; roadmap;
   proposal §5 "shipped as 3.0.0" note.
@@ -66,14 +66,22 @@ command.
   three `<details>` platform blocks) which the ledger keeps verbatim; the
   narrative part (top through "Watch and steer") is 222 lines including
   the four mermaid blocks (~50 lines). Left as is rather than cutting reference material.
-- **Cockpit UI wording**: the shipped Phase 34 Usage chart labels its
-  marker "r10 auto-escalate" and its caption says "the round-10 line is
-  auto-escalation" (`tagteam/data/web/cockpit.js`). That is the imprecise
-  wording this phase removes from the docs — but the plan's contract is a
-  zero-diff `tagteam/` tree, so it is **not** changed here; the
-  `cockpit-usage.png` screenshot shows it. Proposed follow-up: a 3.0.1
-  wording fix ("stale-round limit") in `cockpit.js`. The docs never call it
-  a round-10 line.
+- **Cockpit UI wording (round 2, reviewer)**: the shipped Phase 34 Usage
+  chart labelled its marker "r10 auto-escalate" and its caption said "the
+  round-10 line is auto-escalation" — the false rule this phase removes
+  from the docs. Round 1 left it untouched to honor the zero-diff
+  `tagteam/` contract; the reviewer ruled a knowingly false portfolio
+  visual cannot ship, so it is corrected as a **disclosed, text-only
+  package change**: `tagteam/data/web/cockpit.html` (caption → "dashed
+  line: the stale-round limit (auto-escalation after 10 consecutive stale
+  rounds; a progressing cycle can go past it)") and `cockpit.js` (marker
+  label → "10-stale-round limit", comment). `git diff origin/main --
+  tagteam/` is exactly those two files (6+/4−); the wheel comparison
+  against 0.12.0 differs in exactly those two entries; no behavior change;
+  `tagteam/data/web` is not among the files `setup`/`upgrade` copy, so the
+  upgrade no-op is unaffected. `cockpit-usage.png` recaptured from the
+  seed with the new wording (visible in the caption and marker); a test
+  forbids the old wording in both files.
 - **Test module split**: the harness tests live in
   `tests/test_upgrade_smoke.py` (the plan named
   `tests/test_docs_story.py::test_upgrade_smoke_isolated`); the assertions
@@ -93,6 +101,30 @@ command.
 - **Windows note for `upgrade_smoke.py`**: `Path.is_relative_to` and
   `os.path.samefile` behave the same; the harness compares resolved paths
   and the tests run in CI on `windows-latest`.
+
+## Round 2 (reviewer impl r1)
+
+1. **Canonical precedence before the as-of filter** —
+   `load_cycles` now reserves a `(phase, type)` key for the first directory
+   (`docs/handoffs/`) that has a status file, *before* filtering, so a
+   canonical cycle whose entries are all after the cutoff is excluded and
+   the older `.tagteam/legacy/` duplicate can never resurface. Regression
+   case added to the fixture (canonical `dup/plan` dated 2026-05-09,
+   legacy duplicate approved 2026-05-01, as-of 2026-05-08 → the cycle is
+   absent). This repo has no such duplicates, so the committed block is
+   unchanged (byte-compare still green).
+2. **Cockpit wording** — see the deviation entry above; screenshot
+   recaptured; guard test added.
+3. **Loop diagram ruling routing** — the mermaid and `tagteam-loop.svg` no
+   longer send a generic "ruling" back to the Lead: `A → P` "request
+   changes (plan)", `A → I` "approve (plan) / request changes (impl)",
+   `A → R` "approve (impl)"; README role bullet, SVG `aria-label`, manifest
+   and showcase alt texts say the ruling takes the reviewer's seat.
+   `test_loop_diagram_routes_the_arbiters_ruling_correctly` parses the
+   README block's edges (both escalations, the three ruling outcomes with
+   their labels, no generic "ruling" edge) and the SVG's `class="edge"`
+   labels (also checked ⊆ the mermaid text). Re-rendered:
+   `docs/phases/media/phase-36-loop-render-r2.jpg`.
 
 ## In-cycle gates (all local, none needs a PR / tag / PyPI)
 
@@ -126,13 +158,17 @@ command.
    "10 rounds" / "round-10" / "review cycle" / "handoff session" /
    "handoff cycle" in the story docs or SVG labels).
 6. **Release readiness** —
-   - `pytest`: 931 passed, 5 skipped (macOS, 2 m 40 s).
-   - `git diff origin/main -- tagteam/`: **0 lines** (origin/main =
-     688daa8 = v0.12.0).
+   - `pytest`: 932 passed, 5 skipped (macOS, 2 m 37 s; round 2).
+   - `git diff origin/main -- tagteam/`: round 1 **0 lines**; after the
+     round-2 wording fix exactly `tagteam/data/web/cockpit.html` (1 line)
+     and `cockpit.js` (marker label + comment) — nothing else (origin/main
+     = 688daa8 = v0.12.0).
    - `pip wheel . --no-deps` → `tagteam-3.0.0-py3-none-any.whl`,
      `METADATA` `Version: 3.0.0`; the wheel's 86 `tagteam/` entries have
-     the **same file list and the same sha256 hashes** as the
-     `tagteam-0.12.0-py3-none-any.whl` downloaded from PyPI.
+     the **same file list** as the `tagteam-0.12.0-py3-none-any.whl`
+     downloaded from PyPI and the same sha256 hashes for 84 of them — the
+     two differing entries are exactly `tagteam/data/web/cockpit.html` and
+     `cockpit.js` (the round-2 wording fix).
    - Upgrade smoke, only through the harness: a scratch venv with the
      0.12.0 wheel; 0.12.0's `setup.main` run in a fresh `-I` process with
      `registry.REGISTRY_DIR/REGISTRY_FILE` patched to a scratch registry

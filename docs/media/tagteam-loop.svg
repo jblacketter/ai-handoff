@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 260" fill="none" role="img" aria-label="The tagteam loop: a roadmap phase goes to the Lead who writes the plan, the Reviewer reviews the plan and either requests changes or approves, the Lead implements, the Reviewer reviews the implementation and either requests changes or approves and the roadmap advances; either review can escalate to the Arbiter, whose ruling goes back to the Lead">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 260" fill="none" role="img" aria-label="The tagteam loop: a roadmap phase goes to the Lead who writes the plan, the Reviewer reviews the plan and either requests changes or approves, the Lead implements, the Reviewer reviews the implementation and either requests changes or approves and the roadmap advances; either review can escalate to the Arbiter, whose ruling takes the reviewer's seat: request changes hands the turn back to the Lead, approving the plan sends it to implementation, approving the implementation advances the roadmap">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8899aa"/></marker>
     <marker id="ar-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#34d399"/></marker>
@@ -35,19 +35,21 @@
   <rect x="644" y="48" width="146" height="70" rx="10" fill="#1a2332" stroke="#a78bfa" stroke-width="2"/>
   <text class="node" x="717" y="72" text-anchor="middle" fill="#c6b5fc" font-family="monospace" font-size="12" font-weight="bold"><tspan x="717">Reviewer reviews</tspan> <tspan x="717" dy="15">the</tspan> <tspan x="717" dy="15">implementation</tspan></text>
   <!-- approve → back to the roadmap -->
-  <path d="M717 120 L717 240 L58 240 L58 122" stroke="#34d399" stroke-width="1.5" marker-end="url(#ar-green)"/>
+  <path d="M740 120 L740 240 L58 240 L58 122" stroke="#34d399" stroke-width="1.5" marker-end="url(#ar-green)"/>
   <text x="400" y="234" text-anchor="middle" fill="#34d399" font-family="monospace" font-size="9">approve → next phase</text>
   <!-- Arbiter -->
   <rect x="330" y="166" width="140" height="48" rx="10" fill="#1a2332" stroke="#f97066" stroke-width="1.5"/>
   <text class="node" x="400" y="186" text-anchor="middle" fill="#f97066" font-family="monospace" font-size="12" font-weight="bold"><tspan x="400">Arbiter (you)</tspan> <tspan x="400" dy="15" font-weight="normal" font-size="10">rules</tspan></text>
   <!-- escalate (dashed, red): from each review into the arbiter -->
   <path d="M374 120 L390 162" stroke="#f97066" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-red)"/>
-  <text x="368" y="150" text-anchor="end" fill="#f97066" font-family="monospace" font-size="9">escalate</text>
-  <path d="M700 120 L474 178" stroke="#f97066" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-red)"/>
-  <text x="600" y="164" text-anchor="middle" fill="#f97066" font-family="monospace" font-size="9">escalate</text>
-  <!-- ruling (dashed, violet): from the arbiter back to the lead -->
-  <path d="M330 178 L228 122" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-violet)"/>
-  <text x="252" y="164" text-anchor="middle" fill="#a78bfa" font-family="monospace" font-size="9">ruling</text>
-  <path d="M470 200 L560 122" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-violet)"/>
-  <text x="530" y="180" text-anchor="start" fill="#a78bfa" font-family="monospace" font-size="9">ruling</text>
+  <text class="edge" x="368" y="150" text-anchor="end" fill="#f97066" font-family="monospace" font-size="9">escalate</text>
+  <path d="M690 120 L690 190 L474 190" stroke="#f97066" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-red)"/>
+  <text class="edge" x="600" y="184" text-anchor="middle" fill="#f97066" font-family="monospace" font-size="9">escalate</text>
+  <!-- rulings (dashed, violet): the arbiter takes the reviewer's seat -->
+  <path d="M330 176 L232 122" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-violet)"/>
+  <text class="edge" x="272" y="160" text-anchor="end" fill="#a78bfa" font-family="monospace" font-size="9"><tspan x="272">request changes</tspan> <tspan x="272" dy="11">(plan)</tspan></text>
+  <path d="M470 176 L532 122" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-violet)"/>
+  <text class="edge" x="520" y="152" fill="#a78bfa" font-family="monospace" font-size="9"><tspan x="520">approve (plan) /</tspan> <tspan x="520" dy="11">request changes (impl)</tspan></text>
+  <path d="M330 200 L96 200 L96 122" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar-violet)"/>
+  <text class="edge" x="200" y="195" text-anchor="middle" fill="#a78bfa" font-family="monospace" font-size="9">approve (impl)</text>
 </svg>

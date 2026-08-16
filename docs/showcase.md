@@ -16,7 +16,7 @@ itself and call you only when it needs a decision.
 
 ## The loop
 
-<p align="center"><img src="media/tagteam-loop.svg" alt="The tagteam loop: a roadmap phase goes to the Lead who writes the plan, the Reviewer reviews it and requests changes or approves, the Lead implements, the Reviewer reviews the implementation and approves (next phase) or requests changes; either review can escalate to the Arbiter, whose ruling goes back to the Lead" width="100%"></p>
+<p align="center"><img src="media/tagteam-loop.svg" alt="The tagteam loop: a roadmap phase goes to the Lead who writes the plan, the Reviewer reviews it and requests changes or approves, the Lead implements, the Reviewer reviews the implementation and approves (next phase) or requests changes; either review can escalate to the Arbiter, whose ruling takes the reviewer's seat: request changes hands the turn back to the Lead, approving the plan sends it to implementation, approving the implementation advances the roadmap" width="100%"></p>
 
 Every phase goes through two cycles — **plan**, then **impl** — and every
 cycle is a sequence of rounds: the Lead submits, the Reviewer approves,

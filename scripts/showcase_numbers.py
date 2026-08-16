@@ -115,8 +115,15 @@ def _stale_streak(submissions: list[str]) -> int:
 
 
 def load_cycles(root: Path, cutoff: _dt.datetime) -> list[dict]:
-    """Every (phase, type) with a status file, docs/handoffs winning."""
+    """Every (phase, type) with a status file, docs/handoffs winning.
+
+    Precedence is decided BEFORE the as-of filter: the first directory in
+    CYCLE_DIRS that has a status file for a (phase, type) owns that key,
+    even if none of its entries survives the cutoff — a superseded legacy
+    copy must never resurface just because the canonical cycle is newer
+    than the as-of date."""
     seen: dict[tuple[str, str], dict] = OrderedDict()
+    reserved: set[tuple[str, str]] = set()
     for sub in CYCLE_DIRS:
         d = root / sub
         if not d.is_dir():
@@ -130,8 +137,9 @@ def load_cycles(root: Path, cutoff: _dt.datetime) -> list[dict]:
             phase = status.get("phase") or stem.rsplit("_", 1)[0]
             ctype = status.get("type") or stem.rsplit("_", 1)[1]
             key = (phase, ctype)
-            if key in seen:
+            if key in reserved:
                 continue
+            reserved.add(key)
             rounds_file = d / f"{stem}_rounds.jsonl"
             entries: list[dict] = []
             if rounds_file.exists():

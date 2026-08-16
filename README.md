@@ -19,13 +19,14 @@ flowchart LR
     IR -- "approve" --> R
     PR -. "escalate" .-> A["Arbiter (you)<br/>rules"]
     IR -. "escalate" .-> A
-    A -. "ruling" .-> P
-    A -. "ruling" .-> I
+    A -. "request changes (plan)" .-> P
+    A -. "approve (plan) /<br/>request changes (impl)" .-> I
+    A -. "approve (impl)" .-> R
 ```
 
 - **Lead** (one AI agent) plans each phase, then implements the approved plan.
 - **Reviewer** (a second AI agent) reviews both — the plan, then the implementation — and approves, requests changes, or escalates.
-- **Arbiter** (you) enters only when the two cannot settle it: an escalation, a question only a human can answer, or a cycle that stopped making progress.
+- **Arbiter** (you) enters only when the two cannot settle it: an escalation, a question only a human can answer, or a cycle that stopped making progress. Your ruling takes the reviewer's seat: **request changes** hands the turn back to the Lead; **approve** closes the cycle — an approved plan goes to implementation, an approved implementation advances the roadmap.
 
 Each phase in `docs/roadmap.md` goes through two cycles — **plan**, then **impl** — and each cycle is a sequence of **rounds** (one lead submission, one reviewer response). Every round is appended to `docs/handoffs/`, and `handoff-state.json` says whose turn it is; either agent can pick up where the other left off.
 
