@@ -503,3 +503,84 @@ def get_briefer_spec(config: dict) -> dict:
         "args": list(args) if isinstance(args, list) else (args if args is not None else []),
         "timeout_minutes": tmo,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 38: gatekeeper (deterministic pre-checks before the reviewer's turn)
+# ---------------------------------------------------------------------------
+
+GATEKEEPER_KEYS = {"enabled", "on", "tests", "scope", "max_bounces", "max_output_chars"}
+GATEKEEPER_TESTS_KEYS = {"command", "timeout_minutes"}
+GATEKEEPER_DEFAULTS = {
+    "on": ["impl"], "scope": True, "max_bounces": 2, "max_output_chars": 4000,
+    "tests_timeout_minutes": 15,
+}
+
+
+def validate_gatekeeper_config(config: dict) -> list[str]:
+    """Return problems with the `gatekeeper:` block (empty when absent/valid)."""
+    if not isinstance(config, dict):
+        return []
+    block = config.get("gatekeeper")
+    if block is None:
+        return []
+    errors: list[str] = []
+    if not isinstance(block, dict):
+        return ["'gatekeeper' must be a mapping"]
+    enabled = block.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append("'gatekeeper.enabled' must be true or false")
+    on = block.get("on")
+    if on is not None:
+        if not isinstance(on, list) or not all(isinstance(t, str) for t in on):
+            errors.append("'gatekeeper.on' must be a list of cycle types (plan, impl)")
+        elif any(t not in ("plan", "impl") for t in on):
+            errors.append("'gatekeeper.on' entries must be plan or impl")
+    tests = block.get("tests")
+    if tests is not None:
+        if not isinstance(tests, dict):
+            errors.append("'gatekeeper.tests' must be a mapping (command, timeout_minutes)")
+        else:
+            cmd = tests.get("command")
+            if cmd is not None:
+                if isinstance(cmd, str):
+                    if not cmd.strip():
+                        errors.append("'gatekeeper.tests.command' must be a non-empty string or a list of strings")
+                elif not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) and a for a in cmd):
+                    errors.append("'gatekeeper.tests.command' must be a non-empty string or a list of strings")
+            tmo = tests.get("timeout_minutes")
+            if tmo is not None and (isinstance(tmo, bool) or not isinstance(tmo, (int, float)) or tmo <= 0):
+                errors.append("'gatekeeper.tests.timeout_minutes' must be a positive number")
+            unknown = set(tests) - GATEKEEPER_TESTS_KEYS
+            if unknown:
+                errors.append(f"'gatekeeper.tests' has unknown keys: {sorted(unknown)}")
+    scope = block.get("scope")
+    if scope is not None and not isinstance(scope, bool):
+        errors.append("'gatekeeper.scope' must be true or false")
+    for key in ("max_bounces", "max_output_chars"):
+        v = block.get(key)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            errors.append(f"'gatekeeper.{key}' must be a non-negative integer")
+    unknown = set(block) - GATEKEEPER_KEYS
+    if unknown:
+        errors.append(f"'gatekeeper' has unknown keys: {sorted(unknown)}")
+    return errors
+
+
+def get_gatekeeper_spec(config: dict) -> dict:
+    """{"enabled", "on", "tests_command", "tests_timeout_s", "scope",
+    "max_bounces", "max_output_chars"}. `enabled` is True only when
+    `gatekeeper.enabled: true` is explicit. Callers validate first."""
+    block = config.get("gatekeeper") if isinstance(config, dict) else None
+    block = block if isinstance(block, dict) else {}
+    tests = block.get("tests") if isinstance(block.get("tests"), dict) else {}
+    tmo = tests.get("timeout_minutes")
+    return {
+        "enabled": block.get("enabled") is True,
+        "on": list(block.get("on") or GATEKEEPER_DEFAULTS["on"]),
+        "tests_command": tests.get("command"),
+        "tests_timeout_s": float(tmo if tmo is not None else GATEKEEPER_DEFAULTS["tests_timeout_minutes"]) * 60.0,
+        "scope": block.get("scope") if block.get("scope") is not None else GATEKEEPER_DEFAULTS["scope"],
+        "max_bounces": int(block.get("max_bounces") if block.get("max_bounces") is not None else GATEKEEPER_DEFAULTS["max_bounces"]),
+        "max_output_chars": int(block.get("max_output_chars") if block.get("max_output_chars") is not None else GATEKEEPER_DEFAULTS["max_output_chars"]),
+    }

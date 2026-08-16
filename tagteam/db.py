@@ -24,7 +24,7 @@ from pathlib import Path
 # 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
 # ONLY — new tables / nullable columns, never renames or drops — so an
 # older release can still open a newer DB after a downgrade.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed",
                   "cancelled"}
@@ -34,13 +34,14 @@ BRIEF_KINDS = {"auto", "manual"}
 # Non-file-backed tables: preserved verbatim across `repair` rebuilds.
 # parent-before-child order matters for restore_non_file_backed()
 NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs", "rate_limits",
-                          "conversations", "conversation_turns", "launches")
+                          "conversations", "conversation_turns", "launches", "gates")
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
     "ESCALATE", "NEED_HUMAN", "AMEND",
+    "GATE_PASS", "GATE_BOUNCE",          # Phase 38: gatekeeper entries
 }
-VALID_ROLES = {"lead", "reviewer"}
+VALID_ROLES = {"lead", "reviewer", "gatekeeper"}
 VALID_TYPES = {"plan", "impl"}
 TERMINAL_CYCLE_STATES = {"approved", "escalated", "aborted"}
 _ACTION_TO_STATUS = {
@@ -50,6 +51,10 @@ _ACTION_TO_STATUS = {
     "ESCALATE": ("escalated", "human"),
     "NEED_HUMAN": ("needs-human", "human"),
     "AMEND": ("in-progress", "reviewer"),
+    # Phase 38 gatekeeper entries: PASS keeps the reviewer's turn, BOUNCE
+    # is the REQUEST_CHANGES-shaped hand-back to the lead.
+    "GATE_PASS": ("in-progress", "reviewer"),
+    "GATE_BOUNCE": ("in-progress", "lead"),
 }
 
 DEFAULT_DB_RELPATH = Path(".tagteam") / "tagteam.db"
@@ -285,6 +290,54 @@ CREATE TABLE IF NOT EXISTS launches (
 );
 """
 
+# Phase 38 (3.2): gatekeeper decisions. Additive.
+_SCHEMA_V8 = """
+-- Phase 38: the gatekeeper writes round entries (role 'gatekeeper',
+-- actions GATE_PASS / GATE_BOUNCE). The v1 `rounds` role CHECK forbade a
+-- third role, so the table is rebuilt in place with a widened CHECK —
+-- same columns, same ids, same index; nothing else changes.
+CREATE TABLE IF NOT EXISTS rounds_v8 (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id    INTEGER NOT NULL REFERENCES cycles(id) ON DELETE CASCADE,
+    round       INTEGER NOT NULL,
+    role        TEXT NOT NULL CHECK (role IN ('lead','reviewer','gatekeeper')),
+    action      TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    ts          TEXT NOT NULL,
+    updated_by  TEXT,
+    summary     TEXT
+);
+INSERT INTO rounds_v8 (id, cycle_id, round, role, action, content, ts, updated_by, summary)
+    SELECT id, cycle_id, round, role, action, content, ts, updated_by, summary FROM rounds ORDER BY id;
+DROP TABLE rounds;
+ALTER TABLE rounds_v8 RENAME TO rounds;
+CREATE INDEX IF NOT EXISTS idx_rounds_cycle ON rounds(cycle_id, round, id);
+
+CREATE TABLE IF NOT EXISTS gates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key      TEXT NOT NULL,
+    phase          TEXT NOT NULL,
+    type           TEXT NOT NULL,
+    round          INTEGER NOT NULL,
+    submission_seq INTEGER NOT NULL,
+    kind           TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    attempt        INTEGER NOT NULL,
+    runner_pid     INTEGER,
+    runner_ident   TEXT,
+    started_at     TEXT NOT NULL,
+    updated_at     TEXT,
+    finished_at    TEXT,
+    duration_s     REAL,
+    result_json    TEXT,
+    stem           TEXT,
+    reason         TEXT,
+    applied_seq    INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gates_running ON gates(event_key) WHERE status = 'running';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gates_decided ON gates(event_key) WHERE status IN ('pass', 'bounce');
+"""
+
 
 def _resolve_db_path(project_dir: str | Path | None) -> Path:
     """Resolve where the database lives.
@@ -345,6 +398,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE usage ADD COLUMN kind TEXT")
         conn.execute("PRAGMA user_version = 7")
         current = 7
+    if current < 8:
+        conn.executescript(_SCHEMA_V8)
+        conn.execute("PRAGMA user_version = 8")
+        current = 8
     # Future migrations land here.
     # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
     # deliberately tolerated — additive-only migrations mean older code
@@ -1071,6 +1128,109 @@ def retry_launch(conn: sqlite3.Connection, key: str, *, ts: str, owner_pid: int,
 
 def pending_launches(conn: sqlite3.Connection) -> list[dict]:
     return _rows(conn.execute("SELECT * FROM launches WHERE status='pending' ORDER BY id"))
+
+
+# ---------- Phase 38: gates ----------
+
+GATE_KINDS = ("auto", "manual")
+GATE_STATUSES = ("running", "pass", "bounce", "superseded", "error", "abandoned")
+
+
+def claim_gate(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str,
+               round_: int, submission_seq: int, event_key: str, kind: str,
+               runner_pid: int | None, runner_ident: str | None,
+               max_attempts: int = 2) -> tuple[int, int] | None:
+    """Atomically claim a gate attempt for `event_key`: one INSERT … SELECT
+    … WHERE NOT EXISTS (a decided row) AND NOT EXISTS (a running row) AND
+    the attempt count is below `max_attempts`; allocates
+    `attempt = 1 + max(attempt)`. Returns (row_id, attempt) or None when
+    refused. Caller holds the writer lock. Commits."""
+    if kind not in GATE_KINDS:
+        raise ValueError(f"Invalid gate kind: {kind!r}")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            """INSERT INTO gates
+               (event_key, phase, type, round, submission_seq, kind, status, attempt,
+                runner_pid, runner_ident, started_at, updated_at)
+               SELECT ?, ?, ?, ?, ?, ?, 'running',
+                      COALESCE((SELECT MAX(attempt) FROM gates WHERE event_key = ?), 0) + 1,
+                      ?, ?, ?, ?
+               WHERE NOT EXISTS (SELECT 1 FROM gates WHERE event_key = ? AND status IN ('pass','bounce'))
+                 AND NOT EXISTS (SELECT 1 FROM gates WHERE event_key = ? AND status = 'running')
+                 AND COALESCE((SELECT MAX(attempt) FROM gates WHERE event_key = ?), 0) < ?""",
+            (event_key, phase, cycle_type, int(round_), int(submission_seq), kind,
+             event_key, runner_pid, runner_ident, ts, ts,
+             event_key, event_key, event_key, int(max_attempts)),
+        )
+        if cur.rowcount != 1:
+            conn.execute("ROLLBACK")
+            return None
+        row_id = cur.lastrowid
+        attempt = conn.execute("SELECT attempt FROM gates WHERE id=?", (row_id,)).fetchone()[0]
+        conn.execute("COMMIT")
+        return row_id, attempt
+    except sqlite3.IntegrityError:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            pass
+        return None
+
+
+def finish_gate(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
+                duration_s: float | None = None, result_json: str | None = None,
+                stem: str | None = None, reason: str | None = None,
+                applied_seq: int | None = None) -> None:
+    if status not in GATE_STATUSES or status == "running":
+        raise ValueError(f"Invalid final gate status: {status!r}")
+    conn.execute(
+        """UPDATE gates SET status=?, finished_at=?, updated_at=?, duration_s=COALESCE(?, duration_s),
+               result_json=COALESCE(?, result_json), stem=COALESCE(?, stem), reason=?,
+               applied_seq=COALESCE(?, applied_seq) WHERE id=?""",
+        (status, ts, ts, duration_s, result_json, stem, reason, applied_seq, int(id_)))
+    conn.commit()
+
+
+def update_gate(conn: sqlite3.Connection, id_: int, *, ts: str, **fields) -> None:
+    allowed = {"stem", "result_json", "reason", "applied_seq", "runner_pid", "runner_ident"}
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"unknown gate fields: {sorted(bad)}")
+    fields["updated_at"] = ts
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE gates SET {sets} WHERE id=?", [*fields.values(), int(id_)])
+    conn.commit()
+
+
+def get_gate(conn: sqlite3.Connection, id_: int) -> dict | None:
+    return _row(conn.execute("SELECT * FROM gates WHERE id=?", (int(id_),)))
+
+
+def gates_for_event(conn: sqlite3.Connection, event_key: str) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM gates WHERE event_key=? ORDER BY attempt, id", (event_key,)))
+
+
+def decided_gate_for_event(conn: sqlite3.Connection, event_key: str) -> dict | None:
+    return _row(conn.execute("SELECT * FROM gates WHERE event_key=? AND status IN ('pass','bounce') ORDER BY id DESC LIMIT 1",
+                             (event_key,)))
+
+
+def gates_for_cycle(conn: sqlite3.Connection, phase: str, cycle_type: str) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM gates WHERE phase=? AND type=? ORDER BY id", (phase, cycle_type)))
+
+
+def last_gate(conn: sqlite3.Connection, phase: str, cycle_type: str) -> dict | None:
+    return _row(conn.execute("SELECT * FROM gates WHERE phase=? AND type=? ORDER BY id DESC LIMIT 1", (phase, cycle_type)))
+
+
+def running_gates(conn: sqlite3.Connection) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM gates WHERE status='running' ORDER BY id"))
+
+
+def unfinished_gates(conn: sqlite3.Connection) -> list[dict]:
+    """running / abandoned / error rows — candidates for reconciliation."""
+    return _rows(conn.execute("SELECT * FROM gates WHERE status IN ('running','abandoned','error') ORDER BY id"))
 
 
 def snapshot_non_file_backed(conn: sqlite3.Connection) -> dict[str, list[tuple]]:
