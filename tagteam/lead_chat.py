@@ -472,6 +472,32 @@ def run_turn(handle: TurnHandle, *, run: Callable | None = None,
         raise
 
 
+def start_worker(target: Callable[[], None], name: str) -> None:
+    """Run `target` on a daemon thread. One seam for both the cockpit's Send
+    and the composite launch, so a dispatch failure (thread resource
+    exhaustion) is handled — and testable — in one place."""
+    import threading
+    threading.Thread(target=target, name=name, daemon=True).start()
+
+
+def abort_turn(handle: TurnHandle, reason: str) -> dict | None:
+    """Owner-safe abort of a STARTED turn that no worker will run (e.g. the
+    dispatch thread could not be started): release only this handle's slot
+    token and end its row as failed. Never raises."""
+    try:
+        h.release_turn_slot(handle.claim)
+    except Exception:
+        pass
+    row = _end_turn(handle.root, handle.cid, handle.n, status="failed",
+                    error=f"aborted before running: {reason}", continuity=handle.continuity)
+    try:
+        _append_transcript(handle.root, handle.cid, handle.n, handle.spec.agent_name,
+                           f"(no reply — aborted before running: {reason})", _now_iso())
+    except Exception:
+        pass
+    return row
+
+
 def send(project_root: str | Path, cid: str, text: str, *, config: dict | None,
          by: str = "arbiter", run: Callable | None = None,
          on_line: Callable[[str], None] | None = None,

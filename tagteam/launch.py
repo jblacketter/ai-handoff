@@ -446,8 +446,10 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
             if not watcher_info.get("ok"):
                 return _fail(f"watcher: {watcher_info.get('message')}", {"watcher_result": watcher_info})
 
-    # an existing turn (retry) is returned — never a second message; a
-    # persisted conversation whose turn never got created is reused
+    # an existing turn (retry) is never re-sent — at most one message; but a
+    # failed/cancelled turn is not relabelled a success, and a running one
+    # stays pending. A persisted conversation whose turn never got created
+    # is reused.
     cid = row.get("conversation_id")
     if cid and row.get("turn_n"):
         c = db.connect(project_dir=str(root))
@@ -455,11 +457,11 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
             existing = db.get_conversation_turn(c, cid, int(row["turn_n"]))
         finally:
             c.close()
-        if existing is not None:
-            _persist(status="succeeded", finished_at=_now_iso())
-            return 200, {"ok": True, "launched": False, "status": "succeeded",
-                         "existing": {"conversation_id": cid, "turn_n": row["turn_n"]},
-                         "watcher": watcher_info, "message": "the lead turn already exists"}
+        if existing is not None and not _never_ran(existing):
+            return _finalize_from_turn(root, key, cid, existing, watcher_info, launched=False,
+                                       persist=_persist, fail=_fail)
+        # a turn that never reached the agent (aborted before running / setup
+        # failed) delivered nothing — a retry may send
     try:
         if not cid or lead_chat.get_conversation(root, cid) is None:
             conv = lead_chat.new_conversation(root, provider=lead_chat.resolve_lead(config, root).provider,
@@ -474,23 +476,65 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
 
             def _worker():
                 try:
-                    lead_chat.run_turn(handle)
-                    _persist(status="succeeded", finished_at=_now_iso())
+                    turn = lead_chat.run_turn(handle)
                 except Exception as e:      # run_turn already ended the row as failed
                     _fail(f"lead turn: {type(e).__name__}: {e}", {"watcher_result": watcher_info})
-            import threading
-            threading.Thread(target=_worker, name=f"launch-turn-{cid}", daemon=True).start()
+                    return
+                _finalize_from_turn(root, key, cid, turn, watcher_info, launched=True,
+                                    persist=_persist, fail=_fail)
+            try:
+                lead_chat.start_worker(_worker, f"launch-turn-{cid}")
+            except BaseException as e:
+                # no worker owns the started turn: abort it (owner-safe) and fail the claim truthfully
+                lead_chat.abort_turn(handle, f"could not start the worker thread: {type(e).__name__}: {e}")
+                return _fail(f"lead: could not start the worker thread ({type(e).__name__}: {e}); "
+                             f"the accepted turn was aborted", {"watcher_result": watcher_info})
             return 202, {"ok": True, "launched": True, "status": "pending",
                          "conversation_id": cid, "turn_n": handle.n, "watcher": watcher_info,
                          "message": f"launched: {live['command']} — the lead is on it (turn {handle.n})"}
-        sender = send or (lambda: lead_chat.send(root, cid, live["command"], config=config, by=by))
-        turn = sender()
+        if send is not None:
+            import inspect
+            turn = send(cid) if inspect.signature(send).parameters else send()
+        else:
+            turn = lead_chat.send(root, cid, live["command"], config=config, by=by)
     except lead_chat.LeadBusy as busy:
         return _fail(f"lead: slot busy — {busy.reason} (stem {busy.marker.get('stem')})",
                      {"watcher_result": watcher_info})
     except lead_chat.LeadChatError as e:
         return _fail(f"lead: {e}", {"watcher_result": watcher_info})
-    _persist(status="succeeded", finished_at=_now_iso())
-    return 200, {"ok": True, "launched": True, "status": "succeeded",
-                 "conversation_id": cid, "turn": turn, "watcher": watcher_info,
-                 "message": f"launched: {live['command']}"}
+    return _finalize_from_turn(root, key, cid, turn, watcher_info, launched=True,
+                               persist=_persist, fail=_fail)
+
+
+NEVER_RAN_PREFIXES = ("aborted before running", "setup failed")
+
+
+def _never_ran(turn: dict) -> bool:
+    """True for a failed turn that never reached the agent — no message was
+    delivered, so re-sending keeps at-most-once."""
+    return turn.get("status") == "failed" and str(turn.get("error") or "").startswith(NEVER_RAN_PREFIXES)
+
+
+def _finalize_from_turn(root: Path, key: str, cid: str, turn: dict, watcher_info, *,
+                        launched: bool, persist, fail) -> tuple[int, dict]:
+    """The launch's status follows the PERSISTED turn status: only `ok`
+    succeeds; `failed` / `cancelled` → failed launch with the turn
+    reference + error in `partial` (never re-sent — send again from the
+    Lead panel); `running` → still pending (202)."""
+    status = (turn or {}).get("status")
+    n = (turn or {}).get("n")
+    ref = {"conversation_id": cid, "turn_n": n}
+    if status == "ok":
+        persist(status="succeeded", finished_at=_now_iso())
+        payload = {"ok": True, "launched": launched, "status": "succeeded", "conversation_id": cid,
+                   "turn": turn, "watcher": watcher_info,
+                   "message": "launched" if launched else "the lead turn already exists"}
+        if not launched:
+            payload["existing"] = ref
+        return 200, payload
+    if status == "running":
+        return 202, {"ok": True, "launched": launched, "status": "pending", "conversation_id": cid,
+                     "turn_n": n, "watcher": watcher_info, "message": "the lead is still on it"}
+    return fail(f"lead turn {status or 'unknown'}: {(turn or {}).get('error') or 'no reply'} — "
+                f"send again from the Lead panel (this launch will not re-send)",
+                {"watcher_result": watcher_info, "turn": {**ref, "status": status, "error": (turn or {}).get("error")}})
