@@ -1466,11 +1466,13 @@ def serve_command(args: list[str]) -> int:
     try:
         if portlease.probe_occupied(opts["host"], port):
             print(portlease.occupied_message(opts["host"], port))
+            lease.release()
             return 2
         try:
             server = TagteamHTTPServer((opts["host"], port), handler)
         except OSError as e:
             print(portlease.occupied_message(opts["host"], port) + f" ({e.strerror or e})")
+            lease.release()
             return 2
     except BaseException:
         lease.release()
