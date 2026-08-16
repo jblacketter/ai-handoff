@@ -357,8 +357,15 @@ def _partial_state(root: Path, row: dict) -> dict:
 
 def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: str,
            ensure_watcher: bool = True, retry: bool = False, watcher_mode: str = "headless",
-           send=None, watcher_wait_s: float = WATCHER_READY_WAIT_S) -> tuple[int, dict]:
-    """The composite Start. Returns (http_status, payload)."""
+           send=None, watcher_wait_s: float = WATCHER_READY_WAIT_S,
+           background: bool = False) -> tuple[int, dict]:
+    """The composite Start. Returns (http_status, payload).
+
+    `background=True` (the server): the lead's turn is STARTED synchronously
+    (slot claimed, `running` row + reference persisted) and RUN on a worker
+    thread that finalizes the launch row; the call returns 202 with the
+    persisted reference right away. `send=` (tests / sync callers) runs the
+    turn inline."""
     from tagteam import db, lead_chat
     from tagteam.dualwrite import writer_lock
     root = Path(project_dir)
@@ -396,6 +403,7 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
     if not created:
         if row["status"] == "pending":
             return 202, {"ok": True, "launched": False, "status": "pending",
+                         "conversation_id": row.get("conversation_id"), "turn_n": row.get("turn_n"),
                          "message": "a launch for this state is already in progress", "launch": row}
         if row["status"] == "succeeded":
             return 200, {"ok": True, "launched": False, "status": "succeeded",
@@ -460,6 +468,21 @@ def launch(project_dir: str | Path, *, intent: dict, config: dict | None, by: st
         # persist the conversation reference before the turn runs, so a crash
         # mid-turn leaves a recoverable trace (turn_n is the expected number)
         _persist(conversation_id=cid, turn_n=1)
+        if background and send is None:
+            handle = lead_chat.start_turn(root, cid, live["command"], config=config, by=by)
+            _persist(turn_n=handle.n)
+
+            def _worker():
+                try:
+                    lead_chat.run_turn(handle)
+                    _persist(status="succeeded", finished_at=_now_iso())
+                except Exception as e:      # run_turn already ended the row as failed
+                    _fail(f"lead turn: {type(e).__name__}: {e}", {"watcher_result": watcher_info})
+            import threading
+            threading.Thread(target=_worker, name=f"launch-turn-{cid}", daemon=True).start()
+            return 202, {"ok": True, "launched": True, "status": "pending",
+                         "conversation_id": cid, "turn_n": handle.n, "watcher": watcher_info,
+                         "message": f"launched: {live['command']} — the lead is on it (turn {handle.n})"}
         sender = send or (lambda: lead_chat.send(root, cid, live["command"], config=config, by=by))
         turn = sender()
     except lead_chat.LeadBusy as busy:

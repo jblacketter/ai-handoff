@@ -407,3 +407,66 @@ class TestWatcherSlotRedispatch:
         assert calls == [5, 5] and eng.slot_busy is None
         w.tick(state)
         assert calls == [5, 5]
+
+
+# ------------------------------------------ lifecycle ownership (impl r2) ----
+
+class TestSendLifecycle:
+    def _proj(self, tmp_path):
+        p = _project(tmp_path)
+        return p, read_config(p / "tagteam.yaml")
+
+    def test_failure_before_the_row_releases_the_slot(self, tmp_path, fake_path, monkeypatch):
+        p, cfg = self._proj(tmp_path)
+        cid = lc.new_conversation(p, provider="claude")["id"]
+        monkeypatch.setattr(db, "add_conversation_turn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")))
+        with pytest.raises(RuntimeError):
+            lc.send(p, cid, "hi", config=cfg)
+        assert h.read_inflight(p) is None
+        assert lc.get_conversation(p, cid)["turns"] == []
+
+    def test_failure_after_the_row_ends_it_and_releases(self, tmp_path, fake_path, monkeypatch):
+        p, cfg = self._proj(tmp_path)
+        cid = lc.new_conversation(p, provider="claude")["id"]
+        monkeypatch.setattr(lc, "_append_transcript", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+        with pytest.raises(OSError):
+            lc.send(p, cid, "hi", config=cfg)
+        assert h.read_inflight(p) is None
+        turns = lc.get_conversation(p, cid)["turns"]
+        assert len(turns) == 1 and turns[0]["status"] == "failed" and "setup failed" in turns[0]["error"]
+
+    def test_unexpected_runner_exception_ends_the_turn(self, tmp_path, fake_path):
+        p, cfg = self._proj(tmp_path)
+        cid = lc.new_conversation(p, provider="claude")["id"]
+        def boom(*a, **k):
+            raise ValueError("runner exploded")
+        with pytest.raises(ValueError):
+            lc.send(p, cid, "hi", config=cfg, run=boom)
+        assert h.read_inflight(p) is None
+        turns = lc.get_conversation(p, cid)["turns"]
+        assert turns[-1]["status"] == "failed" and "runner error" in turns[-1]["error"]
+        assert "no reply" in lc.transcript_path(p, cid).read_text()
+        # the conversation is usable again
+        t = lc.send(p, cid, "again", config=cfg)
+        assert t["status"] == "ok" and lc.reconcile(p) == []
+
+    def test_finalize_failure_ends_the_turn(self, tmp_path, fake_path, monkeypatch):
+        p, cfg = self._proj(tmp_path)
+        cid = lc.new_conversation(p, provider="claude")["id"]
+        monkeypatch.setattr(lc, "extract_reply", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("parse bug")))
+        with pytest.raises(RuntimeError):
+            lc.send(p, cid, "hi", config=cfg)
+        assert h.read_inflight(p) is None
+        turns = lc.get_conversation(p, cid)["turns"]
+        assert turns[-1]["status"] == "failed" and "finalize failed" in turns[-1]["error"]
+
+    def test_start_turn_then_run_turn_split(self, tmp_path, fake_path):
+        p, cfg = self._proj(tmp_path)
+        cid = lc.new_conversation(p, provider="claude")["id"]
+        handle = lc.start_turn(p, cid, "split", config=cfg)
+        assert h.read_inflight(p)["conversation_id"] == cid and h.read_inflight(p)["turn_n"] == handle.n
+        assert lc.get_conversation(p, cid)["turns"][0]["status"] == "running"
+        with pytest.raises(lc.LeadChatError, match="still running"):
+            lc.start_turn(p, cid, "second", config=cfg)
+        t = lc.run_turn(handle)
+        assert t["status"] == "ok" and h.read_inflight(p) is None
