@@ -132,6 +132,47 @@ def cwd(pid: int) -> str | None:
     return None
 
 
+def list_processes(pattern: str | None = None) -> list[tuple[int, str]]:
+    """[(pid, command line)] for visible processes — /proc on Linux (no
+    subprocess), `ps -axo pid=,command=` elsewhere; empty on Windows.
+    `pattern` (regex) filters command lines. Never raises."""
+    import re
+    rx = re.compile(pattern) if pattern else None
+    out: list[tuple[int, str]] = []
+    if sys.platform == "win32":  # pragma: no cover - Windows CI
+        return out
+    if sys.platform.startswith("linux"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            entries = []
+        for name in entries:
+            if not name.isdigit():
+                continue
+            try:
+                raw = Path(f"/proc/{name}/cmdline").read_bytes()
+            except OSError:
+                continue
+            argv = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            if not argv or (rx and not rx.search(argv)):
+                continue
+            out.append((int(name), argv))
+        return out
+    text = _run(["ps", "-axo", "pid=,command="]) or ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_s, _, argv = line.partition(" ")
+        if not pid_s.isdigit():
+            continue
+        argv = argv.strip()
+        if rx and not rx.search(argv):
+            continue
+        out.append((int(pid_s), argv))
+    return out
+
+
 def kill_tree(pid: int) -> bool:
     """Kill `pid` and everything it spawned. Best-effort; returns True if a
     signal was sent."""

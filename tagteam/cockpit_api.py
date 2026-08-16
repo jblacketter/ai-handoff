@@ -75,6 +75,20 @@ def _same_dir(a: str | None, b: str | Path) -> bool:
         return False
 
 
+# A real watcher invocation, anchored at the START of the command line:
+# `python -m tagteam watch …`, `python …/bin/tagteam watch …` (console
+# script), `…/bin/tagteam watch …`, or `tagteam watch …`. Deliberately NOT a
+# loose "tagteam.*watch" — a shell whose command text merely mentions the
+# words (with the project as cwd) must not count as a watcher.
+import re as _re
+_PY = r"\S*python[\w.]*(?:\.exe)?"
+WATCH_ARGV_RE = _re.compile(
+    r"^(?:" + _PY + r"\s+-m\s+tagteam"                       # python -m tagteam watch
+    r"|" + _PY + r"\s+\S*[/\\]tagteam(?:\.exe)?"           # python /path/bin/tagteam watch
+    r"|(?:\S*[/\\])?tagteam(?:\.exe)?"                     # [/path/]tagteam watch
+    r")\s+watch(?:\s|$)")
+
+
 def watcher_status(project_dir: str | Path, inflight: dict | None = None) -> dict:
     """Is a watcher running FOR THIS PROJECT?  Signals, in order:
 
@@ -104,25 +118,14 @@ def watcher_status(project_dir: str | Path, inflight: dict | None = None) -> dic
                         "source": "pidfile", "started_at": rec.get("started_at")})
             return out
         out["stale_pidfile"] = True
-    # process scan
-    try:
-        r = subprocess.run(["pgrep", "-f", "tagteam.*watch"], capture_output=True, text=True, timeout=5)
-        pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-        pids = []
+    # process scan (Linux: /proc, no subprocess; macOS/BSD: one `ps -axo`)
     me = os.getpid()
-    for pid in pids:
+    for pid, argv in procs.list_processes(WATCH_ARGV_RE.pattern):
         if pid == me or not procs.pid_alive(pid):
             continue
-        argv = ""
-        try:
-            argv = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
-                                  text=True, timeout=5).stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            argv = ""
-        if argv and " watch" not in f" {argv}":
-            continue
-        if (argv and str(root.resolve()) in argv) or _same_dir(procs.cwd(pid), root):
+        names_project = any(_same_dir(tok.rstrip("/\\"), root) for tok in argv.split()
+                            if tok.startswith(("/", "~", "\\")) or (len(tok) > 2 and tok[1] == ":"))
+        if names_project or _same_dir(procs.cwd(pid), root):
             mode = None
             if argv and "--mode" in argv:
                 try:
