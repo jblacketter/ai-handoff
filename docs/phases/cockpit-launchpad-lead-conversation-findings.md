@@ -116,7 +116,7 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
   hostile reply round-trip + JS-source no-innerHTML guard, watch/session/
   launch endpoints + legacy `/api/launch` untouched, port lease both
   orders/stale/unverifiable/foreign token, `serve` refusal + Tagteam
-  holder named + immediate restart, hub rows, CLI; round 2 adds lifecycle-injection, lease-atomicity and body-cap tests). Suite: 981 passed / 5 skipped.
+  holder named + immediate restart, hub rows, CLI; round 2 adds lifecycle-injection, lease-atomicity and body-cap tests). Suite: 984 passed / 5 skipped.
 
 ## Deviations / notes for the reviewer
 
@@ -217,6 +217,26 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
    on retry; a persisted running turn → pending; an ok existing turn →
    succeeded without a second message.
 
+## Round 4 (reviewer impl r3)
+
+1. **One exception boundary around the whole post-claim attempt**
+   (`launch` → `_attempt`): any unexpected exception in the watcher step,
+   conversation setup, `start_turn` or dispatch preparation finalizes the
+   claim as `failed` with the truthful persisted partial state (`unexpected
+   error during launch: …`), and a turn that was started but not yet handed
+   to a worker is aborted owner-safely first (`abort_turn`); once the
+   worker owns the handle the boundary no longer touches it. Tests: injected
+   `start_turn` RuntimeError, injected `start_watcher` OSError, and a
+   failure while persisting `turn_n` after `start_turn` — launch `failed`
+   (not stuck at 202), slot free, no running turn, `retry: true` proceeds
+   with exactly one message.
+2. **Scope hygiene**: `docs/saloon-rethink.md` (the arbiter's unscheduled
+   brainstorm) had been swept into commit 4b2ffc5 by `git add -A`; it is
+   now on its own branch `arbiter/saloon-rethink` (off `main`, commit
+   ae1fc95), removed from this branch's tree (working copy kept and
+   excluded locally), and the Phase 37 diff is back to the approved
+   plan + findings.
+
 ## In-cycle gates
 
 1. **Walk-through as a user (seed, Chrome/Playwright, 1280×800):** idle
@@ -254,6 +274,6 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
 4. **Port**: two `serve` on one port refuse (lease names the holder;
    unrelated listener → generic message; immediate restart after shutdown
    passes) — tests + the live observation above.
-5. `pytest`: **981 passed, 5 skipped** (macOS, 2 m 55 s; round 3);
+5. `pytest`: **984 passed, 5 skipped** (macOS, 2 m 58 s; round 4);
    `--theme saloon` byte-identical to the pre-3.1 bare page (test); v6 DBs
    open under v7 (test); hub read-only AST test unchanged and green.
