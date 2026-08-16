@@ -9,7 +9,7 @@ Usage:
     python -m tagteam tail        - Follow the in-flight headless turn log
     python -m tagteam state       - View/update orchestration state
     python -m tagteam session     - Manage orchestration sessions
-    python -m tagteam serve       - Start the web dashboard server
+    python -m tagteam serve       - Start the web dashboard server (--theme cockpit)
 """
 
 from __future__ import annotations
@@ -347,7 +347,8 @@ Commands:
   state         View or update the orchestration state file
   roadmap       Query roadmap phases and build execution queue
   cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
-  serve         Start the web dashboard server
+  serve         Start the web dashboard server (--theme cockpit for the arbiter cockpit;
+                default is the Saloon; --host, --max-sse; `serve.theme` in tagteam.yaml)
   tui           Launch the Handoff Saloon terminal UI
   migrate       Migrate legacy projects to use tagteam.yaml
   upgrade       Re-run setup on all registered projects (after pip upgrade)

@@ -197,12 +197,28 @@ tagteam rule answer --to reviewer --content "…"  # for NEED_HUMAN: answer deli
 
 Briefs land in `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (unique per escalation event and attempt; `…_latest.md` is an alias) and in the project DB. It fires **at most once automatically per escalation event** (a pre-spawn claim guarantees this even with two watchers), never retries on its own, never pauses the loop, and its tokens show up in `tagteam usage`. Everything it does is read-only except writing the brief file.
 
-## The Saloon
+## The Cockpit
 
-A graphical dashboard for monitoring and controlling handoff cycles:
+A browser dashboard built around the arbiter's actual job — *does anything need me?* then *is it healthy and what is it doing?* — over the data the headless engine, controls and briefer record:
 
 ```bash
-tagteam serve --dir ~/projects/myproject
+tagteam serve --theme cockpit --dir ~/projects/myproject      # http://localhost:8080
+```
+
+- **Now** strip — phase / type / round, whose turn and for how long, the in-flight headless turn (with a `tagteam tail` drawer), the pause hold, watcher liveness, queued notes, and the connection mode (**Live** via SSE / **Polling** fallback / Disconnected).
+- **Needs you** — one card per thing only the human can do: an escalation with its Phase 33 brief and **Approve / Request changes**, a needs-human question with **Answer**, a hold with **Resume**, a missing/failed brief with **Generate brief**, a stale in-flight or missing watcher with the CLI to run. Empty when nothing needs you — and it says so.
+- **Watch** tabs — **Feed** (live round stream: entries, rulings, interjections, briefs), **Diff** (scope-diff of the current submission, per file, capped), **Usage** (round-over-round churn with the round-10 line, burn by role / cycle / process, and the Claude subscription-window signal), **Notes** (interjections: queue one, retire one).
+
+Every button is the CLI command with the same effect (`tagteam pause`, `resume`, `interject`, `cancel-turn`, `brief --generate`, `rule …`) — final actions confirm by showing the exact CLI line the server will run, and every action reports the CLI's own message. Recorded as `by = web:<user>`. Set `serve: {theme: cockpit}` in `tagteam.yaml` to make it the default for a project.
+
+**Security note.** Cockpit mode binds **127.0.0.1** by default; a per-run token is embedded in the page and required as `X-Tagteam-Token` on every POST (`Origin`/`Referer` must match the server; no `*` CORS). That stops cross-site POSTs and non-browser clients that have not read the page — it is not remote-access authentication. `--host 0.0.0.0` deliberately exposes the server on the network; the page token is then the only guard, so do that only on a network you trust.
+
+### The Saloon (theme)
+
+The original western-themed dashboard survives as a theme — bare `tagteam serve` (no `--theme`, no config key) is unchanged from 0.10.0: the Saloon at `/`, all interfaces, no token, no cockpit endpoints. In cockpit mode it lives at `/?theme=saloon` (and works there, token included).
+
+```bash
+tagteam serve --dir ~/projects/myproject           # legacy Saloon (0.10.0-identical)
 ```
 
 ## Configuration
@@ -238,6 +254,7 @@ tagteam cycle rounds --phase P --type plan --tail 3
 tagteam pause --reason "..." / tagteam resume / tagteam cancel-turn
 tagteam interject "note" [--to lead|reviewer] / --list / --retire ID
 tagteam usage [--json]
+tagteam serve [--theme cockpit] [--host H] [--port N] [--max-sse N]   # dashboard; cockpit is opt-in
 tagteam brief [--list | --generate | --event KEY]
 tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]

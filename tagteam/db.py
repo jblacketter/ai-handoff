@@ -24,7 +24,7 @@ from pathlib import Path
 # 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
 # ONLY — new tables / nullable columns, never renames or drops — so an
 # older release can still open a newer DB after a downgrade.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed",
                   "cancelled"}
@@ -32,7 +32,7 @@ INTERJECTION_ROLES = {"lead", "reviewer"}
 BRIEF_STATUSES = {"running", "ok", "partial", "failed", "abandoned"}
 BRIEF_KINDS = {"auto", "manual"}
 # Non-file-backed tables: preserved verbatim across `repair` rebuilds.
-NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs")
+NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs", "rate_limits")
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
@@ -214,6 +214,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_briefs_running ON briefs(event_key) WHERE s
 """
 
 
+# Schema v6 (Phase 34): latest provider rate-limit signal. One row per
+# (provider, kind) — e.g. ("claude", "five_hour") — upserted from the
+# `rate_limit_event` frames of the Claude stream after each headless turn /
+# brief. Non-file-backed (preserved verbatim across `repair` rebuilds).
+# `resets_at` is ISO-8601 UTC; `payload_json` keeps the raw frame.
+_SCHEMA_V6 = """
+CREATE TABLE IF NOT EXISTS rate_limits (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider     TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    status       TEXT,
+    resets_at    TEXT,
+    payload_json TEXT,
+    ts           TEXT NOT NULL,
+    UNIQUE(provider, kind)
+);
+"""
+
+
 def _resolve_db_path(project_dir: str | Path | None) -> Path:
     """Resolve where the database lives.
 
@@ -262,6 +281,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_V5)
         conn.execute("PRAGMA user_version = 5")
         current = 5
+    if current < 6:
+        conn.executescript(_SCHEMA_V6)
+        conn.execute("PRAGMA user_version = 6")
+        current = 6
     # Future migrations land here.
     # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
     # deliberately tolerated — additive-only migrations mean older code
@@ -797,6 +820,52 @@ def brief_history(conn: sqlite3.Connection, phase: str | None = None,
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC"
     return _rows(conn.execute(sql, params))
+
+
+# ---------- Rate limits (Phase 34) ----------
+
+_RATE_LIMIT_COLS = ["id", "provider", "kind", "status", "resets_at", "payload_json", "ts"]
+
+
+def upsert_rate_limit(conn: sqlite3.Connection, *, provider: str, kind: str,
+                      status: str | None, resets_at: str | None,
+                      payload: dict | None, ts: str) -> int:
+    """Insert or replace the latest signal for (provider, kind). Commits.
+    Returns the row id (stable across updates)."""
+    if not provider or not kind:
+        raise ValueError("rate_limits.provider and .kind are required")
+    if not ts:
+        raise ValueError("rate_limits.ts is required")
+    payload_json = json.dumps(payload) if payload is not None else None
+    conn.execute(
+        """INSERT INTO rate_limits (provider, kind, status, resets_at, payload_json, ts)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(provider, kind) DO UPDATE SET
+               status=excluded.status, resets_at=excluded.resets_at,
+               payload_json=excluded.payload_json, ts=excluded.ts""",
+        (provider, kind, status, resets_at, payload_json, ts),
+    )
+    conn.commit()
+    row = conn.execute("SELECT id FROM rate_limits WHERE provider=? AND kind=?",
+                       (provider, kind)).fetchone()
+    return int(row[0])
+
+
+def latest_rate_limits(conn: sqlite3.Connection, provider: str | None = None) -> list[dict]:
+    """All (provider, kind) rows, ordered by provider then kind. `payload`
+    is the decoded JSON (or None)."""
+    sql = "SELECT " + ", ".join(_RATE_LIMIT_COLS) + " FROM rate_limits"
+    params: list = []
+    if provider is not None:
+        sql += " WHERE provider=?"; params.append(provider)
+    sql += " ORDER BY provider, kind"
+    rows = _rows(conn.execute(sql, params))
+    for r in rows:
+        try:
+            r["payload"] = json.loads(r["payload_json"]) if r.get("payload_json") else None
+        except ValueError:
+            r["payload"] = None
+    return rows
 
 
 def snapshot_non_file_backed(conn: sqlite3.Connection) -> dict[str, list[tuple]]:

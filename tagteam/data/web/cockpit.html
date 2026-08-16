@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tagteam Cockpit</title>
+<link rel="stylesheet" href="/cockpit.css">
+</head>
+<body>
+
+<!-- NOW strip: what state am I in, what is running, am I connected -->
+<header class="now" id="now">
+  <div class="now-row">
+    <div class="brand">
+      <span class="brand-name">Tagteam</span>
+      <span class="brand-sub">Cockpit</span>
+      <span class="project" id="now-project" title="project directory">…</span>
+    </div>
+    <div class="now-chips" id="now-chips">
+      <span class="chip" id="chip-cycle" title="phase / type / round">—</span>
+      <span class="chip" id="chip-owed" title="whose turn, and for how long">—</span>
+      <span class="chip chip-inflight hidden" id="chip-inflight" title="in-flight headless turn">—</span>
+      <span class="chip chip-hold hidden" id="chip-paused" title="dispatch is on hold">paused</span>
+      <span class="chip" id="chip-watcher" title="watcher liveness">—</span>
+      <span class="chip hidden" id="chip-notes" title="queued interjections">—</span>
+    </div>
+    <div class="now-actions">
+      <button class="btn btn-toggle" id="btn-tail" title="show the in-flight turn log (tagteam tail)">Tail</button>
+      <button class="btn" id="btn-pause" title="tagteam pause / tagteam resume">Pause</button>
+      <span class="conn" id="conn" data-mode="connecting"><span class="conn-dot"></span><span id="conn-text">Connecting…</span></span>
+      <a class="theme-link" href="/?theme=saloon" title="the Saloon theme">Saloon ↗</a>
+    </div>
+  </div>
+  <div class="tail-drawer hidden" id="tail-drawer">
+    <div class="tail-head">
+      <span id="tail-title">tagteam tail --no-follow</span>
+      <span class="spacer"></span>
+      <button class="btn btn-danger btn-small hidden" id="btn-cancel-turn" title="tagteam cancel-turn">Cancel turn</button>
+    </div>
+    <pre class="tail" id="tail-body">—</pre>
+  </div>
+</header>
+
+<main class="grid">
+
+  <!-- NEEDS YOU: the one primary region -->
+  <section class="zone needs" id="needs-you" aria-label="Needs you">
+    <h2 class="zone-title">Needs you <span class="count" id="needs-count"></span></h2>
+    <div id="needs-cards"></div>
+    <div class="empty" id="needs-empty">
+      <div class="empty-title">Nothing needs you.</div>
+      <div class="empty-body" id="needs-empty-body">Loading…</div>
+    </div>
+  </section>
+
+  <!-- WATCH: everything else, tabbed -->
+  <section class="zone watch" id="watch" aria-label="Watch">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="feed" id="tab-feed" role="tab">Feed</button>
+      <button class="tab" data-tab="diff" id="tab-diff" role="tab">Diff</button>
+      <button class="tab" data-tab="usage" id="tab-usage" role="tab">Usage</button>
+      <button class="tab" data-tab="notes" id="tab-notes" role="tab">Notes <span class="count" id="notes-count"></span></button>
+    </nav>
+
+    <div class="panel active" id="panel-feed" role="tabpanel">
+      <div class="panel-head"><span id="feed-title">Round stream</span><span class="spacer"></span><span class="muted" id="feed-meta"></span></div>
+      <div id="feed-list"></div>
+      <div class="empty small hidden" id="feed-empty">No rounds yet for this cycle.</div>
+    </div>
+
+    <div class="panel" id="panel-diff" role="tabpanel">
+      <div class="panel-head">
+        <span id="diff-title">Scope diff of the current submission</span>
+        <span class="spacer"></span>
+        <button class="btn btn-small" id="btn-diff-expand">Expand all</button>
+        <button class="btn btn-small" id="btn-diff-refresh">Refresh</button>
+      </div>
+      <div class="banner hidden" id="diff-banner"></div>
+      <div id="diff-list"></div>
+      <div class="empty small hidden" id="diff-empty">No attributable paths yet.</div>
+    </div>
+
+    <div class="panel" id="panel-usage" role="tabpanel">
+      <div class="panel-head"><span>Tokens, cost, and the rate-limit signal</span><span class="spacer"></span><button class="btn btn-small" id="btn-usage-refresh">Refresh</button></div>
+      <div class="rate-line" id="rate-line">—</div>
+      <div class="chart-wrap">
+        <div class="chart-title">Round-over-round churn (tokens per turn, this cycle) — the round-10 line is auto-escalation</div>
+        <svg id="churn" class="churn" viewBox="0 0 640 220" preserveAspectRatio="none" role="img" aria-label="churn curve"></svg>
+        <div class="legend"><span class="lg lead">lead</span><span class="lg reviewer">reviewer</span><span class="lg briefer">briefer</span></div>
+      </div>
+      <details open><summary>By role</summary><div id="usage-role"></div></details>
+      <details><summary>By cycle</summary><div id="usage-cycle"></div></details>
+      <details><summary>By process</summary><div id="usage-agent"></div></details>
+      <div class="empty small hidden" id="usage-empty">No headless turns recorded yet — <code>tagteam watch --mode headless</code> writes usage rows.</div>
+    </div>
+
+    <div class="panel" id="panel-notes" role="tabpanel">
+      <div class="panel-head"><span>Interjections — a note the next eligible turn receives in its prompt</span></div>
+      <form class="note-form" id="note-form">
+        <textarea id="note-text" rows="2" placeholder="Note for the next turn (tagteam interject)…"></textarea>
+        <div class="row">
+          <label>to <select id="note-to"><option value="">next turn</option><option value="lead">lead</option><option value="reviewer">reviewer</option></select></label>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" type="submit" id="btn-interject">Interject</button>
+        </div>
+      </form>
+      <div id="notes-list"></div>
+      <div class="empty small hidden" id="notes-empty">No interjections for this cycle.</div>
+    </div>
+  </section>
+</main>
+
+<!-- Confirmation: shows the exact CLI the server will run -->
+<div class="modal-overlay hidden" id="confirm">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h3 id="confirm-title">Confirm</h3>
+    <p class="muted" id="confirm-body"></p>
+    <pre class="cli" id="confirm-cli"></pre>
+    <div class="modal-btns">
+      <button class="btn" id="confirm-cancel">Cancel</button>
+      <button class="btn btn-primary" id="confirm-ok">Run</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/cockpit.js"></script>
+</body>
+</html>

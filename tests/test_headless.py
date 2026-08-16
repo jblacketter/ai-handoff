@@ -1070,3 +1070,53 @@ class TestSchemaV3:
         with pytest.raises(ValueError):
             db.add_usage(c, status="ok")
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34: rate-limit signal capture (schema v6 `rate_limits`)
+# ---------------------------------------------------------------------------
+
+class TestRateLimitCapture:
+    def test_parse_from_recorded_fixture(self):
+        lines = (FIXTURES / "claude_stream.jsonl").read_text().splitlines()
+        sig = h.parse_rate_limits("claude", lines)
+        assert len(sig) == 1
+        s = sig[0]
+        assert s["kind"] == "five_hour" and s["status"] == "allowed"
+        assert s["resets_at"] == "2026-08-15T09:10:00+00:00"       # 1786785000 → ISO UTC
+        assert s["payload"]["rateLimitType"] == "five_hour"
+        assert h.parse_rate_limits("codex", lines) == []              # no equivalent
+        assert h.parse_rate_limits("claude", ["garbage", '{"type": "assistant"}']) == []
+        # latest per kind wins
+        two = ['{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1,"rateLimitType":"five_hour"}}',
+               '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":2,"rateLimitType":"five_hour"}}',
+               '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day"}}']
+        got = {s["kind"]: s for s in h.parse_rate_limits("claude", two)}
+        assert got["five_hour"]["status"] == "rejected" and got["seven_day"]["resets_at"] is None
+
+    def test_engine_records_latest_signal(self, project, fake_path, monkeypatch):
+        st = _init_cycle(project)
+        eng = _engine(project)
+        res = eng.run_owed_turn(st)                    # codex reviewer: no signal
+        assert res.outcome == "ok", res.reason
+        conn = db.connect(project_dir=str(project))
+        try:
+            assert db.latest_rate_limits(conn) == []
+        finally:
+            conn.close()
+        st2 = state_mod.read_state(str(project))
+        res2 = eng.run_owed_turn(st2)                  # claude lead: fake emits five_hour
+        assert res2.outcome == "ok", res2.reason
+        conn = db.connect(project_dir=str(project))
+        try:
+            rows = db.latest_rate_limits(conn)
+        finally:
+            conn.close()
+        assert len(rows) == 1 and rows[0]["provider"] == "claude" and rows[0]["kind"] == "five_hour"
+        assert rows[0]["status"] == "allowed" and rows[0]["resets_at"].startswith("2026-08-15T")
+        assert h.record_rate_limits(project, "codex", []) == 0
+
+    def test_record_never_raises_without_db(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db, "connect", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no db")))
+        line = '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1,"rateLimitType":"five_hour"}}'
+        assert h.record_rate_limits(tmp_path, "claude", [line], log=lambda m: None) == 0

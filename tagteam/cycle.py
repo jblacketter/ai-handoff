@@ -1287,8 +1287,13 @@ def _cli_render(args: list[str]) -> int:
     return 1
 
 
-def _cli_scope_diff(args: list[str]) -> int:
-    """Print paths attributable to this phase, filtering out pre-existing drift.
+class ScopeDiffError(Exception):
+    """Raised by `compute_scope_diff` with the exact message the CLI prints."""
+
+
+def compute_scope_diff(phase: str, cycle_type: str, project_dir: str = ".") -> dict:
+    """Programmatic scope-diff (Phase 34): the paths attributable to this
+    phase, filtering out pre-existing drift.
 
     Reads the cycle's `baseline` block (captured at plan-init, copied into
     impl on init), then computes:
@@ -1300,33 +1305,27 @@ def _cli_scope_diff(args: list[str]) -> int:
 
     When baseline.sha is null (plan-init in a no-commit repo), the
     committed-side comparison is against git's empty-tree object.
-    """
-    allowed = {"--phase", "--type"}
-    parsed = _parse_args(args, allowed)
-    phase = parsed.get("--phase")
-    cycle_type = parsed.get("--type")
-    if not phase or not cycle_type:
-        print("Required: --phase, --type")
-        return 1
 
-    project_dir = _resolve(".")
+    Returns {"paths": [...sorted], "baseline": {...}, "diff_base": sha,
+    "head_resolves": bool, "committed": [...], "uncommitted": [...]}.
+    Raises `ScopeDiffError(message)` for the same conditions the CLI
+    reports (message text identical to `tagteam cycle scope-diff`).
+    """
+    project_dir = _resolve(project_dir)
     sp = _status_path(phase, cycle_type, project_dir)
     if not sp.exists():
-        print(f"No cycle found: {phase}_{cycle_type}")
-        return 1
+        raise ScopeDiffError(f"No cycle found: {phase}_{cycle_type}")
 
     try:
         status = json.loads(sp.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        print(f"Failed to read cycle status: {e}")
-        return 1
+        raise ScopeDiffError(f"Failed to read cycle status: {e}")
 
     if "baseline" not in status or status["baseline"] is None:
-        print(
+        raise ScopeDiffError(
             "Cycle has no baseline (created before phase: "
             "cycle-baseline-snapshot). Cannot compute scope-diff."
         )
-        return 1
 
     baseline = status["baseline"]
     baseline_sha = baseline.get("sha")
@@ -1337,9 +1336,9 @@ def _cli_scope_diff(args: list[str]) -> int:
     head_rc, _ = _git(project_dir, "rev-parse", "--verify", "HEAD")
     head_resolves = (head_rc == 0)
 
+    diff_base = baseline_sha if baseline_sha else _GIT_EMPTY_TREE
     committed: set[str] = set()
     if head_resolves:
-        diff_base = baseline_sha if baseline_sha else _GIT_EMPTY_TREE
         rc, out = _git(project_dir, "diff", "--name-only", diff_base, "HEAD")
         if rc == 0:
             committed = {p for p in out.splitlines() if p}
@@ -1355,9 +1354,39 @@ def _cli_scope_diff(args: list[str]) -> int:
     attributable = (committed | attributable_uncommitted)
     # Strip tagteam's own bookkeeping artifacts; they are review-system
     # output, not phase work.
-    attributable = sorted(p for p in attributable if not _is_tagteam_artifact(p))
+    paths = sorted(p for p in attributable if not _is_tagteam_artifact(p))
+    return {
+        "paths": paths,
+        "baseline": baseline,
+        "diff_base": diff_base,
+        "head_resolves": head_resolves,
+        "committed": sorted(p for p in committed if not _is_tagteam_artifact(p)),
+        "uncommitted": sorted(p for p in attributable_uncommitted
+                              if not _is_tagteam_artifact(p)),
+    }
 
-    for path in attributable:
+
+def _cli_scope_diff(args: list[str]) -> int:
+    """Print paths attributable to this phase, filtering out pre-existing drift.
+
+    Thin CLI over `compute_scope_diff` — output is unchanged from before
+    the extraction (one path per line; the same error messages).
+    """
+    allowed = {"--phase", "--type"}
+    parsed = _parse_args(args, allowed)
+    phase = parsed.get("--phase")
+    cycle_type = parsed.get("--type")
+    if not phase or not cycle_type:
+        print("Required: --phase, --type")
+        return 1
+
+    try:
+        result = compute_scope_diff(phase, cycle_type, ".")
+    except ScopeDiffError as e:
+        print(str(e))
+        return 1
+
+    for path in result["paths"]:
         print(path)
     return 0
 

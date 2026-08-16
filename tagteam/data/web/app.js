@@ -1,6 +1,33 @@
 (function() {
   'use strict';
 
+  // --- Token-aware fetch (Phase 34) ---
+  // In cockpit mode the server embeds a per-run token as
+  // <meta name="tagteam-token"> and requires it on every POST. In legacy
+  // mode the meta is absent and this is a plain fetch (identical request).
+  var tagteamTokenMeta = document.querySelector('meta[name="tagteam-token"]');
+  var tagteamToken = tagteamTokenMeta ? tagteamTokenMeta.getAttribute('content') : null;
+  function tagteamFetch(url, opts) {
+    opts = opts || {};
+    if (tagteamToken && opts.method && opts.method.toUpperCase() === 'POST') {
+      var headers = Object.assign({}, opts.headers || {});
+      headers['X-Tagteam-Token'] = tagteamToken;
+      opts = Object.assign({}, opts, { headers: headers });
+    }
+    return fetch(url, opts);
+  }
+  // Cockpit mode only: a small way back to the cockpit from the Saloon theme.
+  if (tagteamToken) {
+    document.addEventListener('DOMContentLoaded', function() {
+      var conn = document.querySelector('.conn-status');
+      if (!conn) return;
+      var a = document.createElement('a');
+      a.href = '/'; a.textContent = 'Cockpit \u2197'; a.className = 'cockpit-link';
+      a.style.marginLeft = '12px'; a.style.color = 'inherit'; a.style.opacity = '0.8';
+      conn.appendChild(a);
+    });
+  }
+
   // --- DOM refs ---
   var bannerMayor    = document.getElementById('banner-mayor');
   var bannerRabbit   = document.getElementById('banner-rabbit');
@@ -551,7 +578,7 @@
   // interrupting the guided sequence with "all set" dialogue.
   async function saveConfigSilent(lead, reviewer) {
     try {
-      var r = await fetch('/api/config', {
+      var r = await tagteamFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lead: lead, reviewer: reviewer }),
@@ -560,7 +587,7 @@
         agentConfig = await r.json();
       } else if (r.status === 409) {
         // Config exists — overwrite silently during setup flow
-        var r2 = await fetch('/api/config', {
+        var r2 = await tagteamFetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ lead: lead, reviewer: reviewer, overwrite: true }),
@@ -574,7 +601,7 @@
 
   async function submitSetupFromDialogue(lead, reviewer) {
     try {
-      var r = await fetch('/api/config', {
+      var r = await tagteamFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lead: lead, reviewer: reviewer }),
@@ -627,7 +654,7 @@
 
   async function submitSetupOverwrite(lead, reviewer) {
     try {
-      var r = await fetch('/api/config', {
+      var r = await tagteamFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lead: lead, reviewer: reviewer, overwrite: true }),
@@ -661,7 +688,7 @@
 
     setupSubmit.disabled = true;
     try {
-      var r = await fetch('/api/config', {
+      var r = await tagteamFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lead: lead, reviewer: reviewer }),
@@ -738,7 +765,7 @@
 
     phaseSubmit.disabled = true;
     try {
-      var r = await fetch('/api/start-phase', {
+      var r = await tagteamFetch('/api/start-phase', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phase: phase, type: type }),
@@ -951,7 +978,7 @@
   // --- Control actions ---
   async function postState(updates) {
     try {
-      var r = await fetch('/api/state', {
+      var r = await tagteamFetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -1200,7 +1227,7 @@
         { speaker: 'mayor', text: "Opening the saloon. Spinning up " + payload.lead + " and " + payload.reviewer + "\u2026" },
       ]);
 
-      fetch('/api/launch', {
+      tagteamFetch('/api/launch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

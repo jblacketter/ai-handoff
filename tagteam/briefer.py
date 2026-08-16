@@ -656,6 +656,7 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
         except OSError:
             lines = []
         usage = h.parse_usage(spec.provider, lines) or {}
+        h.record_rate_limits(root, spec.provider, lines, log=log)
         usage_row_id = None
         content = None
         conn = db.connect(project_dir=root)

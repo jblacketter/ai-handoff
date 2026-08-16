@@ -323,8 +323,9 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 33
 
 ### Phase 34: Arbiter Cockpit (3.0 arc)
-- **Status:** Not started
-- **Description:** Dashboard redesigned around arbitration and monitoring: SSE live round feed, open-threads/blockers panel, submission diff view, escalation inbox with in-browser rulings, and token-usage panels (burn by role/phase/process + subscription-window gauge). Saloon becomes an optional theme. Hand-rolled server stays.
+- **Status:** 🔨 Implementation in review — plan approved 2026-08-15 (round 3, incl. a UX-design round; reviewer turns headless). Release 0.11.0 via PR from `phase-34-arbiter-cockpit`; tag after merge + green CI.
+- **Description:** `tagteam serve --theme cockpit` (or `serve.theme: cockpit`) serves a plain-JS cockpit organised by the arbiter's questions: a **Now** strip (state, owed turn + age, in-flight + tail drawer, hold, watcher, connection mode), **Needs you** (typed cards with one action each: escalation + brief + Approve/Request changes, question + Answer, hold + Resume, missing brief + Generate, stale in-flight/no watcher), and **Watch** tabs (Feed via SSE, per-file scope Diff, Usage with churn curve + rate-limit signal, Notes). Backend: `ThreadingHTTPServer`, per-run POST token + Origin check (cockpit mode only), read endpoints (`/api/now`, extended `/api/rounds`, `/api/interjections`, `/api/briefs`, `/api/brief/<id>|current`, `/api/usage`, `/api/scope-diff/<cycle>`, `/api/tail`), SSE `/api/events` (1 s sampler, heartbeat, `--max-sse` cap), action endpoints wrapping the Phase 32/33 command functions (`by = web:<user>`), `cycle.compute_scope_diff` extracted (CLI byte-identical), schema v6 `rate_limits` (latest Claude `rate_limit_event`, repair-preserved). **Bare `tagteam serve` is 0.10.0-identical** (Saloon, bind all, no token, new endpoints 404); the Saloon is served at `/?theme=saloon` in cockpit mode with a token-aware `tagteamFetch()`.
+- **Plan:** `docs/phases/arbiter-cockpit-30-arc.md` (approved round 3). **Findings:** `docs/phases/arbiter-cockpit-findings.md`.
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 34
 
 ### Phase 35: Cross-Project Hub (3.0 arc)
