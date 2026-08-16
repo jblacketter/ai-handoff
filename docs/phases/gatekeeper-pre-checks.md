@@ -3,8 +3,8 @@
 ## Status
 - [x] Planning
 - [x] In Review (round 2: implementation-work boundary, gate-owed latch for every watcher mode, owner-aware gate rows + sweep policy, pinned submission identity + PASS write semantics; round 3: slot-first claim order, honest dispatch semantics, consistent boundary algorithm; round 4: idempotent decision application across stores + fault-injection matrix, pre-test scope snapshot; round 5: outcome-aware, submission-pinned reconciliation (compare-and-apply on (phase,type,round,submission_seq)))
-- [ ] Approved
-- [ ] Implementation
+- [x] Approved (round 5)
+- [x] Implementation
 - [ ] Implementation Review
 - [ ] Complete (release **3.2.0** via PR)
 
