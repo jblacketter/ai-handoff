@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review
+- [x] In Review (round 2: dispatch seam, non-mutating registry reads, exhaustive read-only + SSE contract, per-kind shared window, abandoned ⊂ stale)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -62,8 +62,9 @@ stuck, and how much am I burning?"
 1. `tagteam hub` → `http://localhost:8090/`. **Top strip:** `N projects ·
    M live` (a live = watcher running or turn in flight), burn across
    projects (24 h / 7 d / all: tokens, cost where priced), the **shared
-   subscription window** (the newest `rate_limits` row across all projects
-   — one pool, one truth), and the connection mode (Live / Polling).
+   subscription window** (the newest `rate_limits` row per `(provider,
+   kind)` across all projects — one pool, one truth per window), and the
+   connection mode (Live / Polling).
    *[Visibility of status]*
 2. **Needs you** — projects whose cycle is `escalated` / `needs-human`, or
    paused after a failed turn. One row: project (basename + parent),
@@ -72,9 +73,10 @@ stuck, and how much am I burning?"
    primary action. Empty state: "Nothing needs you across N projects."
    *[Von Restorff, IA by intent]*
 3. **Waiting** — turns owed to an agent, sorted by age; badges: `in
-   flight`, `watcher`, `paused`; **stale** when owed > 30 min with no
-   in-flight and no watcher, **abandoned?** past 24 h — each with the CLI
-   hint (`tagteam watch --mode headless`, `tagteam resume`).
+   flight`, `watcher`, `paused`; **stale** when owed ≥ 30 min with no
+   live in-flight and no watcher, **abandoned?** when stale for ≥ 24 h
+   (never for a live long-running turn) — each with the CLI hint
+   (`tagteam watch --mode headless`, `tagteam resume`).
    *[Smart defaults, Recover-don't-scold]*
 4. **Quiet** — done / idle projects collapsed to a count ("31 quiet",
    expandable), sorted by last activity; scratch (`/tmp`, `/private/tmp`,
@@ -120,47 +122,105 @@ thresholds, noise filter, cockpit mounting, read-only DB access.
    Nothing changes for any other command; the registry file format is
    unchanged (**flag-off identical**: no new files, no behavior change
    unless `tagteam hub` runs).
-2. **`tagteam/hub_api.py` (new, pure)** — `project_summary(project_dir)`
-   (reuses `cockpit_api.now_payload` pieces but **read-only and cheap**:
-   state, cycle status, pause marker, inflight + pid liveness, watcher
-   liveness, last activity, brief-ready flag), `hub_payload(projects, *,
-   now, thresholds)` → `{groups: {needs_you, waiting, quiet, hidden},
-   totals, rate_limit, ts}` with the ranking rules above,
-   `aggregate_usage(projects, windows)` and `latest_rate_limit(projects)`.
-   **Read-only DB access:** every hub read opens the project DB with
-   `sqlite3.connect("file:…?mode=ro", uri=True)` and NEVER runs
-   `_migrate` — the hub must not touch another project's schema (a v3
-   project stays v3); missing tables/columns → nulls. Errors per project
-   are captured into the row (`error`), never raised. §8 Q7: WAL readers do
-   not block writers or vice versa; connections are opened per request and
-   closed immediately; a test holds a writer connection with an open
-   transaction while the hub reads.
-3. **Hub server** (`tagteam/hub.py`, reusing `server.TagteamHTTPServer`
-   and the cockpit handler): `GET /` hub page; `GET /api/hub` (payload);
-   `GET /api/hub/usage?window=24h|7d|all`; `GET /api/hub/events` (SSE,
-   signature = per-project cheap file signals — state seq, rounds file
-   mtime, pause marker, inflight stem/pid alive, watcher pidfile alive —
-   sampled every `--interval` (default 3 s), heartbeat, cap); **mounted
-   cockpits** `GET|POST /p/<id>/…` → the Phase 34 handler for that project
-   with all cockpit routes, the hub's per-run token, loopback default, same
-   Origin check; `<id>` = a short stable slug from the registry path
-   (basename + hash). Static assets shared (`/cockpit.css` etc. resolve
-   both at root and under `/p/<id>/`).
-4. **Cockpit base path** (`tagteam/data/web/cockpit.js|html`): one
-   mode-agnostic change — a `<meta name="tagteam-base">` (absent → `""`,
-   i.e. identical requests to today) prefixes every `/api/…` and asset
-   URL; a "← Hub" link rendered only when the base is set. Regression: the
-   standalone cockpit's requests are byte-identical (test asserts no
-   base meta and root-relative URLs still work).
+2. **`tagteam/hub_api.py` (new, pure)** — `project_summary(project_dir,
+   procs_snapshot)` built ONLY from non-migrating readers: `state.read_state`,
+   `cycle.read_status`, `headless.read_pause` / `read_inflight`,
+   `watcher.read_pidfile`, `procs.*` (via `cockpit_api.watcher_status`, which
+   is DB-free), and `hub_api.read_only_connect(dir)` for the DB-derived bits
+   (brief-ready for the current escalation event, usage totals, rate
+   limits). It **never calls `cockpit_api.now_payload()`, `db.connect()`,
+   or any aggregate that connects+migrates** — a lint-style test greps
+   `hub_api.py` for `db.connect(` / `now_payload(` and fails if present.
+   `hub_payload(projects, *, now, thresholds, procs_snapshot)` →
+   `{groups: {needs_you, waiting, quiet, hidden}, totals, rate_limits,
+   ts}` with the ranking rules below; `aggregate_usage(projects, windows)`;
+   `shared_rate_limits(projects)` (per-`(provider, kind)`, see below).
+   **Read-only DB access:** `read_only_connect(dir)` returns
+   `sqlite3.connect("file:<db>?mode=ro", uri=True)` or `None` when the
+   file is absent — it never creates `.tagteam/` or the DB, and NEVER runs
+   `_migrate`; missing tables/columns → nulls. Errors per project are
+   captured into the row (`error`), never raised. Tests: an absent DB stays
+   absent after a hub read (no `.tagteam/` created); v3, v4, v5 DBs keep
+   their `user_version` byte-for-byte; a project whose DB is corrupt renders
+   a row with `error`. §8 Q7: WAL readers do not block writers or vice
+   versa; connections are opened per request and closed immediately; a test
+   holds a writer connection with an open `BEGIN IMMEDIATE` transaction while
+   the hub reads and asserts the read completes with pre-transaction data.
+3. **Hub server + the dispatch seam** (`tagteam/hub.py`, `tagteam/server.py`):
+   `BaseHTTPRequestHandler` instances are per-request and enter handling in
+   their constructor, so nothing caches or delegates to handler instances.
+   Instead the cockpit's routing is factored out of `make_handler` into a
+   **`CockpitRouter`** (in `server.py`): an object holding only immutable
+   per-project context — `project_dir`, `token`, `max_sse`, `base_path`,
+   its own SSE lock + active count — with `handle_get(h, parsed, path) ->
+   bool`, `handle_post(h, path) -> bool`, `check_write_auth(h)`,
+   `sse(h)`, all taking the live handler `h` and using `h._send_json` etc.
+   `make_handler(...)` builds ONE router and its handler class delegates to
+   it (standalone cockpit: behavior unchanged, `base_path=""`). The hub's
+   `HubHandler` owns `{project_id: CockpitRouter}` (created lazily, cached
+   — routers are context, not handlers) and for `/p/<id>/<rest>` strips the
+   prefix and calls `router.handle_get(self, parsed, "/"+rest)` /
+   `handle_post(self, "/"+rest)`. Isolation is by construction — each
+   router has its own `project_dir` (every read/write resolves against it),
+   its own SSE counter/cap, and never sees another mount's path — plus
+   tests with **two projects mounted concurrently**: a POST to
+   `/p/a/api/pause` pauses A only; a ruling through `/p/a/api/rule` records
+   in A's DB/rounds only; SSE on `/p/a` and `/p/b` each receive their own
+   change frames and their caps are counted per mount; a wrong/missing
+   token on either mount → 403; `/p/<unknown>/…` → 404 JSON. The hub's
+   own routes: `GET /` hub page; `GET /api/hub`; `GET /api/hub/usage?window=
+   24h|7d|all`; `GET /api/hub/events` (SSE, Scope 3b); `GET /api/hub/info`.
+   One per-run token for the hub and all mounts (embedded in every served
+   page), loopback default, same Origin/Referer check, no `*` CORS.
+
+   3b. **Hub SSE signature — exhaustive.** Every value `/api/hub` displays
+   has a cheap change signal: per project — state file mtime+size,
+   current-cycle rounds file mtime+size, pause marker presence, inflight
+   stem/pid **and pid-alive**, watcher pidfile pid-alive, **watcher
+   liveness from the process scan** (one `procs.list_processes` snapshot
+   per tick shared by all projects — not N scans), and the **DB and its
+   `-wal` file mtimes+sizes** (covers usage / rate_limits / briefs /
+   interjections writes without opening the DB per tick); plus the
+   registry file mtime (a project added/removed). Sampled every
+   `--interval` (default 3 s), heartbeat, `--max-sse` cap. Belt and
+   braces: the page also does a slow periodic snapshot refresh (30 s) in
+   live mode. Tests: a DB-only update (a usage row inserted through a
+   normal writer connection in project A) → change frame; a watcher process
+   started and then exited **without a pidfile** (cwd = project) → change
+   frames both ways; a registry edit → change.
+4. **Cockpit base path — server-injected, base-aware HTML.** JS cannot
+   retroactively prefix `<link href="/cockpit.css">` / `<script
+   src="/cockpit.js">`, so `_get_dashboard_html(theme, token, base_path)`
+   rewrites the page's root-relative asset URLs to `<base_path>/…` and
+   injects `<meta name="tagteam-base" content="<base_path>">`; cockpit.js
+   reads the meta (absent → `""`) and prefixes every `fetch`, `EventSource`
+   and navigation URL (`/?theme=saloon` → `<base>/?theme=saloon`); a "←
+   Hub" link renders only when the base is set. Assets are served **under
+   the mount** (`/p/<id>/cockpit.css`) by the router's static branch — the
+   exact mounted URLs are tested; root-level assets remain served by the hub
+   for its own page. Standalone: `base_path=""` → no rewrite, no meta —
+   the served `cockpit.html` bytes and every request URL are **identical to
+   0.11.0** (test compares the served page to the packaged file with only
+   the token meta injected, as today).
 5. **Frontend** `hub.html|css|js` (plain JS; reuses cockpit.css tokens):
    top strip, the three groups + hidden toggle, rows with the primary
    **Open** link, staleness badges with CLI hints, empty states, Live /
    Polling indicator, SSE with polling fallback (`?nosse=1` as in 34).
-6. **Registry hygiene** (`registry.py`, additive): `tagteam registry list |
-   unregister PATH` CLI (thin, existing functions), and `hub` classifies
-   entries: missing dir → hidden (registry already prunes), no
-   `tagteam.yaml` → hidden, scratch paths → hidden by default. No format
-   change.
+6. **Registry: non-mutating reads** (`registry.py`, additive):
+   `get_registered_projects()` prunes missing dirs and REWRITES
+   `~/.tagteam/projects.json` on read, so the hub cannot use it. Add a
+   public `read_registry_raw() -> list[str]` (no pruning, no write) and
+   `registry_path()`; `hub`, `hub --list` and `tagteam registry list` use
+   the raw read; `registry list` shows every raw entry with a marker
+   (`missing` / `no tagteam.yaml` / `scratch` / `ok`) — the hub classifies
+   the same way: missing dir → hidden (revealable with `--all`), no
+   `tagteam.yaml` → hidden, scratch prefixes → hidden. `tagteam registry
+   unregister PATH` is the ONLY mutation in this phase (existing
+   `unregister_project`). Tests: `hub --list`, `hub --list --json`,
+   `hub --list --all`, `/api/hub` and `registry list` leave the registry
+   file **byte-for-byte unchanged** (including with a missing dir present);
+   `unregister` changes exactly that entry. `get_registered_projects()`
+   itself is untouched (upgrade/rollback keep their pruning behavior).
 7. **Docs**: README "The Hub" section, roadmap, findings
    `docs/phases/cross-project-hub-findings.md` (dogfood over the REAL
    registry: the two stale projects surface in Waiting with correct ages;
@@ -183,38 +243,57 @@ thresholds, noise filter, cockpit mounting, read-only DB access.
 
 ### Files
 - `tagteam/hub.py` — new: `hub_command(args)`, `resolve_hub_options`,
-  `HubHandler` (hub routes + per-project cockpit mounting; delegates to
-  `server.make_handler(project_dir, mode="cockpit", token=…)` handler
-  instances cached per project id; path rewriting `/p/<id>/x` → `/x`),
-  `--list` text/JSON rendering.
+  `make_hub_handler(registry_reader, token, …)` → `HubHandler` (hub routes;
+  `{project_id: CockpitRouter}` cache of per-project context; prefix strip
+  for `/p/<id>/…` and delegation to the router), `--list` text/JSON.
 - `tagteam/hub_api.py` — new, pure: `project_id(path)`,
-  `classify_registry(paths)`, `project_summary(dir)`, `hub_payload(…)`,
-  `aggregate_usage(…)`, `latest_rate_limit(…)`, `hub_signature(…)`,
-  `read_only_connect(dir)`.
-- `tagteam/server.py` — small: `make_handler` gains an optional
-  `base_path` (injected as `<meta name="tagteam-base">` and used to strip
-  the mount prefix), a `hub_link` flag; nothing else changes (legacy path
-  untouched; cockpit standalone unchanged).
+  `classify_registry(paths)`, `read_only_connect(dir)`,
+  `project_summary(dir, procs_snapshot)`, `hub_payload(…)`,
+  `aggregate_usage(…)`, `shared_rate_limits(…)`, `hub_signature(…,
+  procs_snapshot)`.
+- `tagteam/server.py` — refactor: cockpit routing extracted into
+  `CockpitRouter(project_dir, token, max_sse, base_path, …)`;
+  `make_handler` builds one router and delegates (standalone behavior and
+  the legacy path unchanged — existing tests unmodified);
+  `_get_dashboard_html(theme, token, base_path="")` rewrites asset URLs and
+  injects the base meta only when `base_path` is non-empty.
+- `tagteam/registry.py` — additive: `read_registry_raw()`, `registry_path()`.
 - `tagteam/data/web/cockpit.js|html` — base-path meta support + "← Hub"
   link (only when base set); `hub.html|css|js` new.
 - `tagteam/registry.py` — `list`/`unregister` CLI glue in `cli.py`;
   `registry.py` unchanged in format.
 - `tagteam/cli.py` — `hub` and `registry` dispatch + help.
-- Tests: `tests/test_hub_api.py` (classification, ranking, staleness
-  thresholds, read-only connect never migrates, per-project error
-  isolation, aggregate usage windows, shared rate limit, signature),
-  `tests/test_hub_server.py` (real server: `/`, `/api/hub`, SSE, mounted
-  cockpit GET/POST with the hub token incl. a ruling through
-  `/p/<id>/api/rule`, standalone cockpit unchanged, `--list` output,
-  a writer holding a transaction while the hub reads), `tests/test_registry.py`
-  additions.
+- Tests: `tests/test_hub_api.py` (classification, ranking, stale /
+  abandoned incl. the boundary + live long turn, read-only connect never
+  migrates / never creates, absent DB stays absent, per-project error
+  isolation, aggregate usage windows, per-kind shared rate limits with
+  competing timestamps, signature: DB-only update, watcher without pidfile
+  start/exit, registry edit; the no-migrating-call grep),
+  `tests/test_hub_server.py` (real server: `/`, `/api/hub`, SSE, two
+  projects mounted concurrently — isolation of reads/writes/SSE/auth,
+  ruling through `/p/<id>/api/rule` records in that project only, exact
+  mounted asset URLs, standalone cockpit page + requests identical to
+  0.11.0, `--list` output, writer-holds-transaction read), `tests/
+  test_registry.py` additions (raw read; byte-for-byte unchanged across
+  all read/list modes; `unregister` only mutation).
 
 ### Ranking / staleness rules (pure, tested)
 - **needs_you**: cycle state `escalated` | `needs-human`, or pause marker
   with `outcome` (failed turn). Sort: escalations first, then by age desc.
 - **waiting**: state `ready|working` with `turn` set. Badges from
-  liveness. `stale` = owed ≥ 30 min ∧ no in-flight ∧ no watcher;
-  `abandoned` = owed ≥ 24 h. Sort: stale/abandoned first, then age desc.
+  liveness. `stale` = owed ≥ 30 min ∧ no live in-flight ∧ no watcher;
+  **`abandoned` = stale ∧ owed ≥ 24 h** (a refinement of stale — a
+  demonstrably live long-running turn or a running watcher is never
+  labelled abandoned, whatever its age). Sort: abandoned, stale, then age
+  desc. Tests: owed 29 m 59 s vs 30 m; owed 25 h with a live in-flight
+  process → waiting, not stale; owed 25 h with nothing → abandoned.
+- **shared subscription window**: `rate_limits` holds one current row per
+  `(provider, kind)` per project (e.g. `five_hour` and `seven_day`), so
+  the hub takes the **newest row per `(provider, kind)` across projects**
+  (tie-break: later `ts`, then registry order); payload `rate_limits:
+  [{provider, kind, status, resets_at, ts, project}]`, all kinds shown in
+  the strip. Test: project A newer for `five_hour`, project B newer for
+  `seven_day` → both selected from their respective projects.
 - **quiet**: everything else with a state (done/approved/aborted/idle).
   Sort by last activity desc.
 - **hidden**: no `tagteam.yaml`, no state file, scratch path prefixes,
@@ -251,26 +330,47 @@ warning. The hub itself has no write endpoints of its own.
   three groups with correct membership, ages and stale/abandoned flags;
   `--json` returns the documented shape; hidden entries listed with
   `--all`.
-- [ ] Hub reads are **read-only**: a v3/v4/v5 project DB keeps its
-  `user_version` after the hub reads it (test); a project with a broken DB
-  or unreadable state renders as a row with `error`, not a page error; a
-  writer holding an open transaction does not block or corrupt hub reads
-  (test).
+- [ ] Hub reads are **read-only and non-mutating**: an absent DB stays
+  absent (no `.tagteam/` created); v3/v4/v5 project DBs keep their
+  `user_version` byte-for-byte; `hub_api.py` contains no `db.connect(` /
+  `now_payload(` call (grep test); a broken DB / unreadable state renders
+  as a row with `error`; a writer holding an open transaction does not
+  block or corrupt hub reads (test); every hub read/list mode leaves
+  `~/.tagteam/projects.json` byte-for-byte unchanged (test).
 - [ ] Hub server: `/` serves the hub with the token; `/api/hub` returns the
   payload; SSE emits a snapshot then a `change` within 2× interval of a
-  state change in ANY registered project; cap → 503; polling fallback.
-- [ ] Mounted cockpit at `/p/<id>/`: page + assets resolve with the base
-  meta; every cockpit read works; POSTs require the hub token + Origin;
-  a ruling made through `/p/<id>/api/rule` records exactly what the CLI
-  records in THAT project (test); "← Hub" link present only when mounted.
-- [ ] Shared subscription window: the strip shows the newest `rate_limits`
-  row across projects; aggregate burn for 24 h / 7 d / all matches
-  `tagteam usage` totals summed (test).
+  change in ANY registered project — including a DB-only write and a
+  watcher starting/exiting without a pidfile (tests); cap → 503; polling
+  fallback; the page refreshes its snapshot every 30 s in live mode.
+- [ ] Mounted cockpits at `/p/<id>/` via `CockpitRouter`: page served with
+  base-aware asset URLs + base meta, the exact mounted asset URLs resolve;
+  every cockpit read works; POSTs require the hub token + Origin; two
+  projects mounted concurrently are isolated (reads, writes, SSE slots,
+  auth) — a ruling through `/p/a/api/rule` records exactly what the CLI
+  records in A only (test); `/p/<unknown>/` → 404; "← Hub" only when
+  mounted; the standalone cockpit page and requests are identical to
+  0.11.0 (test).
+- [ ] Shared subscription window: newest row per `(provider, kind)` across
+  projects with the documented tie-break (test with competing timestamps
+  for two kinds); aggregate burn for 24 h / 7 d / all matches `tagteam
+  usage` totals summed (test).
+- [ ] Staleness: `abandoned` ⊂ `stale`; boundary and live-long-turn cases
+  tested.
 - [ ] UX contract (dogfood-recorded): Needs you empty state, a stale
   Waiting row with its CLI hint, Quiet collapsed with count, hidden
   toggle, Live/Polling indicator, Open → mounted cockpit → action → back.
 - [ ] Docs + findings over the real registry; released as 0.12.0 via PR →
   merge → tag (CI green).
+
+## Decisions (round 1)
+- Mount cockpits under the hub via a shared `CockpitRouter` seam (not
+  handler instances); server-injected base-aware HTML; assets served under
+  the mount. Non-mutating registry reads (`read_registry_raw`). Read-only,
+  never-migrating DB access with an enforced no-`db.connect` rule in
+  `hub_api.py`. Exhaustive SSE signature incl. DB/WAL mtimes and process
+  liveness from one shared scan per tick. Newest row per `(provider,
+  kind)` across projects. `abandoned` ⊂ `stale`. Defaults kept: port 8090,
+  30 min / 24 h, hidden scratch / no-yaml / missing entries with `--all`.
 
 ## Open Questions (recommendations)
 
