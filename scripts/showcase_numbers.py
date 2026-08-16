@@ -404,6 +404,11 @@ def main(argv: list[str] | None = None) -> int:
     e = sub.add_parser("export-usage", help="sanitize `tagteam usage --json` from stdin")
     e.add_argument("--as-of", required=True)
     args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stdin):      # the block carries "→" / "÷"; Windows consoles default to cp1252
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     try:
         if args.cmd == "report":
             cycles, usage = build_report(args.root, args.as_of, args.usage)
