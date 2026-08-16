@@ -435,7 +435,7 @@ def is_cockpit_artifact(path: str) -> bool:
 def _git_out(project_dir: str, *args: str, timeout: float = 30.0) -> tuple[int, str]:
     try:
         r = subprocess.run(["git", "-C", project_dir, *args], capture_output=True,
-                           text=True, timeout=timeout, errors="replace")
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return r.returncode, r.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return 1, ""

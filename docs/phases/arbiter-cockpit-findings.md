@@ -81,7 +81,9 @@ UX-design round). Branch `phase-34-arbiter-cockpit`, release 0.11.0.
   what finds watchers without a pidfile, e.g. this repo's live `--mode
   iterm2` (pid 74337, verified: `{running: True, pid: 74337, mode:
   'iterm2', source: 'process-scan'}`); (3) the in-flight pointer's watcher
-  identity. So the two ways of turning the cockpit on get liveness like this:
+  identity. (Windows: no `/proc`/`ps`, so the scan returns nothing —
+  liveness there is the pidfile or the in-flight identity.) So the two ways
+  of turning the cockpit on get liveness like this:
   **CLI-only `tagteam serve --theme cockpit`** (no config key) → the watcher
   keeps no pidfile; liveness comes from the cwd-bound scan (all launch
   shapes Tagteam itself creates — session backends run the watcher from the

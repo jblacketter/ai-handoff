@@ -318,7 +318,7 @@ class TestScopeDiff:
     def test_statuses_added_modified_deleted(self, project):
         self._cycle_with_changes(project)               # src/a.py committed since baseline (+ edited)
         gone = project / h.SKILL_RELPATH                  # existed at baseline
-        n_lines = len(gone.read_text().splitlines())
+        n_lines = len(gone.read_text(encoding="utf-8").splitlines())
         gone.unlink()                                     # deleted in the working tree (unstaged)
         (project / "docs" / "handoffs" / ".gitkeep").unlink()   # deleted tagteam artifact → filtered
         p = capi.scope_diff_payload(project, "feat-x", "plan")
@@ -377,7 +377,7 @@ class TestWatcherLiveness:
         assert watcher_mod.read_pidfile(project) is None
 
     def test_pidfile_running_and_stale(self, project, monkeypatch):
-        monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no pgrep")))
+        monkeypatch.setattr(procs, "list_processes", lambda *a, **k: [])   # no process scan
         # own pid, real identity → running via pidfile even with no process scan
         watcher_mod.write_pidfile(project, "headless")
         st = capi.watcher_status(project)
@@ -397,6 +397,8 @@ class TestWatcherLiveness:
         assert n["watcher"]["running"] is False and n["watcher"]["stale_pidfile"] is True
 
     @needs_proc_inspection
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="process scan (/proc, ps, cwd) is POSIX-only; Windows binds via pidfile/inflight")
     def test_process_scan_binds_by_cwd_not_argv(self, project, tmp_path):
         """A `… tagteam watch --mode iterm2` process started from the project
         cwd (no project path on argv) is detected; the same shape started
