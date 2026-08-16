@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions)
+- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -419,32 +419,47 @@ license / link-back paragraph (139e099) is kept verbatim in §8.
    needs a PR, a tag, or PyPI.
 
 **`scripts/upgrade_smoke.py --project DIR [--sentinel DIR]`** — the
-isolated harness. In the parent: snapshot checksums of the real registry
-file and of the framework files under every real registered project
-(read via the non-mutating `registry.read_registry_raw()`); create a
-temporary registry directory containing a `projects.json` that lists
-only `--project` (and `--sentinel`, an empty dir with no marker files);
-spawn a **fresh helper process** (`sys.executable -c …`) with
-`HOME=<tmp>` and, before anything reads the registry, `tagteam.registry
-.REGISTRY_DIR` / `REGISTRY_FILE` set to the temporary paths, then call
-`tagteam.cli.upgrade_command()`; back in the parent, re-checksum the
-real registry + real projects and fail loudly on any difference, and
-report the disposable project's before/after diff (empty = no-op) and
-that the sentinel was not visited (its dir is still empty; the helper's
-stdout names only the disposable project). The real registry is never
-replaced, edited or copied over. Recipe for the 3.0.0 gate: `pip install
-tagteam==0.12.0` in a scratch venv → `tagteam setup` in a scratch dir
-(the 0.12.0 CLI's own registry write goes to that venv's `HOME` override
-too — the recipe sets `HOME` for that step as well) → source-install
-`python scripts/upgrade_smoke.py --project <dir>`.
+isolated harness. `HOME` is never overridden (workspace rule; and it is
+unnecessary). In the parent: snapshot the real registry file
+(`registry.read_registry_raw()`, non-mutating) and, for every real
+registered project, the **existence and sha256** of every managed
+destination `setup` writes (the framework file list from
+`tagteam.setup`), plus the same existence+hash snapshot of `--project`
+and of `--sentinel` (an unrelated dir that is listed in **no** registry
+— not the real one, not the temporary one). Create a temporary registry
+directory whose `projects.json` lists **exactly one** entry:
+`--project`. Spawn a **fresh helper process** (`sys.executable -c …`)
+that imports `tagteam.registry`, sets the module globals `REGISTRY_DIR`
+and `REGISTRY_FILE` to the explicit temporary paths, **asserts
+fail-closed immediately before the call** that both resolved globals
+are descendants of the expected temporary directory (`Path.resolve()`,
+`is_relative_to`), and only then calls `tagteam.cli.upgrade_command()`.
+Back in the parent: re-snapshot everything and fail loudly if the real
+registry bytes, or any real project's existence+hash set, or the
+sentinel's existence+hash set changed, or if the helper's stdout names
+any path other than `--project`; report the disposable project's
+before/after diff (empty = no-op) and that the temporary registry still
+lists exactly one entry. The real registry is never replaced, edited or
+copied over.
+
+Recipe for the 3.0.0 gate: `pip install tagteam==0.12.0` in a scratch
+venv → run the 0.12.0 `setup` **the same way** (a fresh process from
+that venv: import `tagteam.registry`, patch `REGISTRY_DIR` /
+`REGISTRY_FILE` to a scratch registry, assert the same fail-closed
+check, then call the 0.12.0 setup function on a scratch project dir — so
+0.12.0's own registry write lands in the scratch registry, not the real
+one) → source-install `python scripts/upgrade_smoke.py --project <dir>
+--sentinel <unrelated dir>`.
 
 Regression test (`tests/test_docs_story.py::test_upgrade_smoke_isolated`):
-a source-`setup` disposable project + an unrelated sentinel dir; run the
-harness; assert the sentinel is untouched and not named in the helper's
-output, the harness's own temporary registry lists exactly the two dirs
-afterwards (pruning applied only there), and the real registry file — if
-one exists on the machine — is byte-identical before/after (checked by
-the test itself, independent of the harness's own check).
+a source-`setup` disposable project (set up with the registry globals
+patched the same way, in-process via monkeypatch) + an unrelated sentinel
+dir containing one file; run the harness; assert the sentinel's
+existence+hash set is identical before/after and its path is absent from
+the helper's output, the temporary registry lists exactly **one** entry
+afterwards, and the real registry file — if one exists on the machine —
+is byte-identical before/after (checked by the test itself, independent
+of the harness's own check).
 
 ## Post-approval checklist (release operations, not review gates)
 
@@ -469,12 +484,17 @@ roadmap status line; reviewer approval never depends on them.
 ## Round-3 changes (reviewer r2)
 
 1. *Upgrade smoke isolation:* `scripts/upgrade_smoke.py` — fresh helper
-   process with `HOME` overridden **and** `registry.REGISTRY_DIR` /
-   `REGISTRY_FILE` patched to a temp registry listing only the disposable
-   project (+ sentinel) before `upgrade_command()` runs; parent checksums
-   the real registry and every real registered project's framework files
-   before/after; regression test with an unvisited sentinel; the real
-   registry is never replaced or edited.
+   process with `registry.REGISTRY_DIR` / `REGISTRY_FILE` patched to a
+   temp registry listing only the disposable project before
+   `upgrade_command()` runs; parent checksums the real registry and every
+   real registered project's framework files before/after; regression
+   test with an unvisited sentinel; the real registry is never replaced
+   or edited. (Round 4: sentinel kept outside every registry, temp
+   registry = exactly one entry, no `HOME` override anywhere, fail-closed
+   assertion that both registry globals resolve under the temp dir
+   immediately before each call — for the 0.12.0 setup step too —
+   snapshots record existence + hash so files created in unrelated paths
+   are detected.)
 2. *Snapshot contract:* `export-usage --as-of YYYY-MM-DD` (required);
    inclusive UTC day, cutoff `ts < DATE+1 00:00Z`, filter before strip;
    identical cutoff in `report`; per-`(phase,type,round,role)` `attempt`
