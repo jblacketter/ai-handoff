@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots; round 5: post-approval installed-wheel check goes through the harness with `--python`, helper reports imported tagteam version/path)
+- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots; round 5: post-approval installed-wheel check goes through the harness with `--python`, helper reports imported tagteam version/path; round 6: exact launch `<--python> -I -c` with cwd outside the repo, helper reports executable/prefix/version/file, parent verifies before any registry call, temp-venv shadowing test)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -422,13 +422,24 @@ license / link-back paragraph (139e099) is kept verbatim in §8.
 — the isolated harness, and the **only** permitted way to run an upgrade
 in any recipe of this phase; **bare `tagteam upgrade` is forbidden in
 both the in-cycle gate and the post-approval checklist.** `--python`
-selects the interpreter for the helper process (default:
-`sys.executable`); the helper prints, before anything else, the imported
-`tagteam.__version__` and `tagteam.__file__`, and the parent echoes them
-and refuses to proceed (exit 2) unless — when `--expect-version` is given
-— the reported version matches and the reported path is under the
-`--python` interpreter's `sys.prefix` (so a post-release check cannot
-silently exercise the source checkout). `HOME` is never overridden (workspace rule; and it is
+selects the interpreter for the helper process (default: the harness's
+own interpreter). **Exact launch:** `<selected --python> -I -c <helper>`
+with `cwd` set to a harness-created temporary directory outside the
+repository — `-I` is mandatory for the real helper (isolated mode: no
+user site, no `PYTHONPATH`, no script-dir/cwd on `sys.path`, so the
+source checkout can never shadow the target interpreter's installed
+package). The helper prints, **before anything else**, one JSON line:
+`sys.executable`, `sys.prefix`, `tagteam.__version__`, resolved
+`tagteam.__file__`. The parent verifies, before permitting any
+registry/setup call (the helper waits for a `go` line on stdin): the
+reported executable resolves to the selected interpreter (`Path.resolve()`
+equality, following venv symlinks); when `--expect-version` is given, the
+version matches **and** `tagteam.__file__` is under the reported
+`sys.prefix` (installed-wheel mode: a path outside the prefix — e.g. an
+editable install of the checkout — is rejected); without
+`--expect-version` (in-cycle source mode) the identity line is echoed and
+recorded in findings. On any mismatch the parent exits 2 naming it and
+the helper never receives `go`. `HOME` is never overridden (workspace rule; and it is
 unnecessary). In the parent: snapshot the real registry file
 (`registry.read_registry_raw()`, non-mutating) and, for every real
 registered project, the **existence and sha256** of every managed
@@ -437,8 +448,9 @@ destination `setup` writes (the framework file list from
 and of `--sentinel` (an unrelated dir that is listed in **no** registry
 — not the real one, not the temporary one). Create a temporary registry
 directory whose `projects.json` lists **exactly one** entry:
-`--project`. Spawn a **fresh helper process** (`sys.executable -c …`)
-that imports `tagteam.registry`, sets the module globals `REGISTRY_DIR`
+`--project`. Spawn the **fresh helper process** exactly as above
+(`<--python> -I -c`, cwd = temp dir outside the repo); after the identity
+handshake it imports `tagteam.registry`, sets the module globals `REGISTRY_DIR`
 and `REGISTRY_FILE` to the explicit temporary paths, **asserts
 fail-closed immediately before the call** that both resolved globals
 are descendants of the expected temporary directory (`Path.resolve()`,
@@ -469,13 +481,23 @@ the helper's output, the temporary registry lists exactly **one** entry
 afterwards, and the real registry file — if one exists on the machine —
 is byte-identical before/after (checked by the test itself, independent
 of the harness's own check). A second test proves the interpreter
-contract: run the harness with `--python sys.executable` and assert the
-echoed version equals `tagteam.__version__` and the echoed path is the
-source checkout's `tagteam/__init__.py`; run it with `--python` pointing
-at a tiny fake interpreter script (a shim that prints a different
-version/path in the helper protocol) plus `--expect-version 3.0.0` and
-assert exit 2 with the mismatch named — the harness selects the target
-interpreter and refuses a wrong one.
+contract with a **real temporary venv**: `python -m venv` in tmp, install
+into it (`pip install --no-deps` from a tmp sdist built by the test) a
+same-named stub `tagteam` package (`__version__ = "9.9.9"`, a
+`registry` module with the two globals and `read_registry_raw`, a
+`cli.upgrade_command()` that prints which registry file it read); run
+the harness **from the source checkout's cwd** with `--python
+<venv>/bin/python --expect-version 9.9.9` → the identity line reports the
+venv's executable/prefix and a `tagteam/__init__.py` under that prefix
+(the checkout's `tagteam` did not shadow it — `-I` + external cwd), the
+run proceeds and the stub reports the temporary registry; then run with
+`--expect-version 3.0.0` against the same venv → exit 2 naming the
+version mismatch, no `go` sent (the stub's marker file is absent). A
+third case runs the harness with the default interpreter (this
+checkout, editable install) and no `--expect-version` and asserts the
+identity line names the checkout's `tagteam/__init__.py`. (venv creation
+is a few seconds; the test is marked `slow` but runs in CI on all three
+OSes — `Scripts\\python.exe` on Windows.)
 
 ## Post-approval checklist (release operations, not review gates)
 
@@ -504,6 +526,17 @@ line; reviewer approval never depends on them.
 - **Q3** One `docs/how-tagteam-works.md` with stable per-section anchors
   (`#loop`, `#cycle`, `#modes`, `#headless`, `#controls`, `#escalations`,
   `#cockpit`, `#hub`, `#saloon`, `#files`).
+
+## Round-6 change (reviewer r5)
+
+Helper launch fixed to `<selected --python> -I -c <helper>` with cwd in a
+temp dir outside the repository (`-I` mandatory); helper prints an
+identity line (`sys.executable`, `sys.prefix`, `tagteam.__version__`,
+resolved `tagteam.__file__`) and waits for `go`; parent verifies
+executable identity, expected version and file-under-prefix
+(installed-wheel mode) before sending `go`; lingering `sys.executable -c`
+wording removed; interpreter test uses a real temporary venv with a
+same-named stub package to prove the checkout cannot shadow it.
 
 ## Round-5 change (reviewer r4)
 
