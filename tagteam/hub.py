@@ -71,19 +71,30 @@ class HubContext:
 
     def router_for(self, project_id: str) -> CockpitRouter | None:
         """The mounted cockpit for a registry project id (created lazily,
-        cached — routers are context, not handlers). Unknown / hidden-missing
-        ids → None."""
+        cached — routers are context, not handlers). Membership is
+        re-validated against the CURRENT registry on every call: an id no
+        longer registered (or whose path changed / disappeared) is evicted
+        and answers None, so an unregistered project's write surface goes
+        away immediately, not at restart."""
         with self.lock:
-            r = self.routers.get(project_id)
-            if r is not None:
-                return r
+            current = None
             for raw in self.paths():
-                if hub_api.project_id(raw) == project_id and Path(raw).is_dir():
-                    r = CockpitRouter(raw, mode="cockpit", token=self.token, max_sse=self.max_sse,
-                                      base_path=f"/p/{project_id}")
-                    self.routers[project_id] = r
-                    return r
-        return None
+                if hub_api.project_id(raw) == project_id:
+                    current = raw
+                    break
+            r = self.routers.get(project_id)
+            if current is None or not Path(current).is_dir():
+                if r is not None:
+                    del self.routers[project_id]
+                return None
+            if r is not None and r.project_dir != current:
+                del self.routers[project_id]      # id reused for another path — rebuild
+                r = None
+            if r is None:
+                r = CockpitRouter(current, mode="cockpit", token=self.token, max_sse=self.max_sse,
+                                  base_path=f"/p/{project_id}")
+                self.routers[project_id] = r
+            return r
 
     def payload(self, show_all: bool | None = None) -> dict:
         return hub_api.hub_payload(self.paths(), show_all=self.show_all if show_all is None else show_all,

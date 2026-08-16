@@ -201,6 +201,27 @@ class TestMounts:
             names = {r_["name"]: r_ for g in ("needs_you", "waiting", "quiet") for r_ in p["groups"][g]}
             assert names["beta"]["cycle_state"] == "approved" and names["alpha"]["cycle_state"] == "in-progress"
 
+    def test_unregistered_project_is_unmounted_immediately(self, tmp_path):
+        a, b, reg = _two_projects(tmp_path)
+        pa, pb = _pid(a), _pid(b)
+        with HubServed(reg) as s:
+            c = s.client
+            assert c.get(f"/p/{pa}/api/now")["status"] == 200               # mounted + cached
+            assert c.post(f"/p/{pa}/api/pause", {}, headers=s.auth())["json"]["ok"] is True
+            assert c.post(f"/p/{pa}/api/resume", {}, headers=s.auth())["json"]["ok"] is True
+            assert pa in c.get("/api/hub/info")["json"]["mounted"]
+            # remove A from the registry (the reader sees the file live)
+            reg.write_text(json.dumps([str(b)]) + "\n")
+            assert c.get(f"/p/{pa}/")["status"] == 404
+            assert c.get(f"/p/{pa}/api/now")["status"] == 404
+            r = c.post(f"/p/{pa}/api/pause", {"reason": "sneaky"}, headers=s.auth())
+            assert r["status"] == 404 and h.read_pause(a) is None           # cannot mutate the removed project
+            assert pa not in c.get("/api/hub/info")["json"]["mounted"]
+            assert c.get(f"/p/{pb}/api/now")["status"] == 200               # B unaffected
+            # re-adding it mounts again; a re-used id for a moved path rebuilds the router
+            reg.write_text(json.dumps([str(a), str(b)]) + "\n")
+            assert c.get(f"/p/{pa}/api/now")["json"]["project_dir"] == str(a)
+
     def test_mounted_sse_per_project_and_caps(self, tmp_path):
         a, b, reg = _two_projects(tmp_path)
         pa, pb = _pid(a), _pid(b)
