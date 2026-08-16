@@ -6,8 +6,8 @@
 - [x] Approved (round 2; reviewer turns headless)
 - [x] UX review round (round 3 — IA/feedback revisions to Scope 5; approved)
 - [x] Implementation
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation Review (approved round 3, 2026-08-15)
+- [x] Complete (release 0.11.0 via PR)
 
 ## Roles
 - Lead: Claude
