@@ -511,7 +511,7 @@ block.
 ## Files
 ```
 tagteam/gatekeeper.py                     new
-tagteam/cycle.py                          add_gate_entry, ROLE_GATEKEEPER, GATE_* transitions
+tagteam/cycle.py                          ensure_gate_applied, ROLE_GATEKEEPER, GATE_*, impl_boundary capture/propagation, compute_impl_work, read_rounds_file/read_impl_boundary
 tagteam/db.py                             SCHEMA_VERSION 8, gates table + fns, _ACTION_TO_STATUS
 tagteam/config.py                         gatekeeper block validate/spec
 tagteam/watcher.py                        _maybe_gate in _handle_ready
@@ -524,6 +524,31 @@ README.md, docs/how-tagteam-works.md, docs/roadmap.md, docs/phases/gatekeeper-pr
 tests/test_gatekeeper.py (new) + touched suites above
 pyproject.toml, CITATION.cff             3.2.0 (last commit)
 ```
+
+## Implementation notes (impl round 1)
+
+Deviations from the plan text, all in the direction of the plan's intent:
+
+1. **Schema v8 rebuilds `rounds`** (same columns, same ids, same index) to widen the v1
+   `role IN ('lead','reviewer')` CHECK to include `gatekeeper` — the plan said "one table and
+   zero column changes"; the CHECK made a third role impossible without the rebuild (the
+   first dogfood run tripped `DB_INVALID` on it). Migration test: a v7 DB with rows keeps ids.
+2. **`impl_boundary` lives on the status FILE only** (`cycle.read_impl_boundary`), not the DB
+   `cycles` row — the DB-first `read_status` view does not carry it, and the file is the store
+   of record for the key (no cycle column added, as planned). Likewise the gate's
+   `gate_event/gate_id/gate_attempt` keys survive only in the JSONL, so recovery reads the
+   canonical file (`cycle.read_rounds_file`), never the DB view.
+3. **AMEND supersedes via the pinned round-log length** (`pre_entries` on the decision): an
+   AMEND is rounds-only (no seq bump), so `(phase,type,round,submission_seq)` alone cannot see
+   it; the same event key is then re-run as attempt 2.
+4. **`run_gate` re-reads the fresh state and treats a caller's older seq as `stale`** (never
+   dispatch), and `not-ready` also never dispatches; the watcher latches `deferred / error /
+   not-ready` (retry on identical ticks) and drops `stale`.
+5. `verify_transition` needs no `GATE_BOUNCE` branch after all: gate entries are role
+   `gatekeeper` and never the verified agent's action; the lead's next headless turn is
+   verified against its own `SUBMIT_FOR_REVIEW` as today.
+6. Untracked directories are captured file-by-file (`--untracked-files=all`) so a file added
+   to an already-untracked directory counts as work.
 
 ## Success criteria
 1. With `gatekeeper` absent from `tagteam.yaml`, the full suite and a

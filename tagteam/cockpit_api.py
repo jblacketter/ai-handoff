@@ -226,6 +226,19 @@ def now_payload(project_dir: str | Path) -> dict:
     except Exception:
         pending_notes = 0
 
+    # Phase 38: gatekeeper flag + last decision for the strip chip
+    # ("gate ✓ r3" / "gate ↩ r3"); read from the round entries, no DB.
+    gatekeeper = {"enabled": False, "last": None}
+    try:
+        from tagteam.gatekeeper import resolve_gatekeeper, last_gate_summary
+        gs = resolve_gatekeeper(config) if config else None
+        gatekeeper["enabled"] = bool(gs and gs.enabled)
+        gatekeeper["on"] = list(gs.on) if gs else []
+        if phase and ctype:
+            gatekeeper["last"] = last_gate_summary(str(root), phase, ctype)
+    except Exception:
+        pass
+
     return {
         "ts": _now_iso(),
         "state": state,
@@ -235,6 +248,7 @@ def now_payload(project_dir: str | Path) -> dict:
         "paused": paused,
         "watcher": watcher,
         "briefer_enabled": briefer_enabled,
+        "gatekeeper": gatekeeper,
         "agents": {"lead": lead, "reviewer": reviewer},
         "pending_notes": pending_notes,
         "project_dir": str(root),

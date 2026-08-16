@@ -1575,7 +1575,7 @@ def render_cycle(
         lines.append(f"## Round {round_num}")
         lines.append("")
         for e in rounds[round_num]:
-            role_label = "Lead" if e["role"] == "lead" else "Reviewer"
+            role_label = {"lead": "Lead", "gatekeeper": "Gatekeeper"}.get(e["role"], "Reviewer")
             lines.append(f"### {role_label}")
             lines.append("")
             lines.append(f"**Action:** {e.get('action') or '?'}")

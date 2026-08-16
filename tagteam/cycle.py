@@ -231,6 +231,16 @@ def _resolve_impl_boundary_for_cycle(phase: str, cycle_type: str, project_dir: s
     return b
 
 
+def read_rounds_file(phase: str, cycle_type: str, project_dir: str) -> list[dict]:
+    """The cycle's round entries from the canonical rounds FILE, every key
+    intact (the DB-first `read_rounds` view drops keys the `rounds` table
+    has no column for — the gate's `gate_event`/`gate_id`/`gate_attempt`
+    among them). [] when no file exists."""
+    project_dir = _resolve(project_dir)
+    p = _legacy_rounds_path(phase, cycle_type, project_dir)
+    return _read_rounds_from_file(p) if p is not None else []
+
+
 def read_impl_boundary(phase: str, cycle_type: str, project_dir: str) -> dict | None:
     """The cycle's `impl_boundary` from its canonical status FILE (the
     DB-first `read_status` view does not carry it — schema v8 adds no
@@ -371,8 +381,13 @@ def init_cycle(phase: str, cycle_type: str, lead: str, reviewer: str,
         "reviewer": reviewer,
         "date": now[:10],
         "baseline": baseline,
-        "impl_boundary": _resolve_impl_boundary_for_cycle(phase, cycle_type, project_dir),
     }
+    # Phase 38: an impl cycle inherits the plan's implementation boundary
+    # (written only when one exists — plan cycles and legacy/non-git projects
+    # carry no key, so flag-off status files are byte-identical to 3.1).
+    _ib = _resolve_impl_boundary_for_cycle(phase, cycle_type, project_dir)
+    if _ib is not None:
+        status["impl_boundary"] = _ib
 
     entry = {
         "round": 1,
@@ -508,7 +523,9 @@ def add_round(phase: str, cycle_type: str, role: str, action: str,
         # before implementation can begin — and later copied onto the impl
         # cycle. The gate's scope check measures work since this snapshot.
         if cycle_type == "plan" and action == "APPROVE" and not status.get("impl_boundary"):
-            status["impl_boundary"] = capture_impl_boundary(project_dir, source="plan-approve")
+            _ib = capture_impl_boundary(project_dir, source="plan-approve")
+            if _ib is not None:                       # not a git repo → no key at all
+                status["impl_boundary"] = _ib
 
         sp = _status_path(phase, cycle_type, project_dir)
         sp.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
@@ -938,7 +955,7 @@ def _format_cycle_md(phase: str, cycle_type: str, status: dict,
         lines.append(f"## Round {round_num}")
         lines.append("")
         for e in rounds[round_num]:
-            role_label = "Lead" if e["role"] == "lead" else "Reviewer"
+            role_label = {"lead": "Lead", "gatekeeper": "Gatekeeper"}.get(e["role"], "Reviewer")
             lines.append(f"### {role_label}")
             lines.append("")
             lines.append(f"**Action:** {e.get('action', '?')}")
@@ -1561,14 +1578,19 @@ def ensure_gate_applied(phase: str, cycle_type: str, decision: dict, project_dir
         still_reviewer_ready = (same_cycle and seq == sub_seq
                                 and status.get("state") == "in-progress"
                                 and status.get("ready_for") == "reviewer")
-        if existing is None and not still_reviewer_ready:
+        pre_entries = decision.get("pre_entries")
+        log_moved = (pre_entries is not None and len(rounds) != int(pre_entries))
+        if existing is None and (not still_reviewer_ready or log_moved):
             # A FRESH decision for a submission that has already moved on
-            # (lead AMENDed / re-submitted, arbiter ruled, reviewer acted):
-            # no cycle write at all — the newer submission gets its own gate.
+            # (lead AMENDed — rounds-only, so the seq is unchanged but the
+            # round log grew — or re-submitted, arbiter ruled, reviewer
+            # acted): no cycle write at all — the newer submission gets its
+            # own gate (a re-run on the same event key, or a new key).
             return {"entry_appended": False, "applied": "superseded", "applied_seq": None, "seq": seq}
         if existing is None:
             entry = {"round": int(decision["round"]), "role": ROLE_GATEKEEPER, "action": action,
                      "content": decision.get("content", ""), "ts": datetime.now(timezone.utc).isoformat(),
+                     "updated_by": "Gatekeeper",
                      "gate_event": event, "gate_id": decision.get("gate_id"),
                      "gate_attempt": decision.get("gate_attempt")}
             with open(rp, "a", encoding="utf-8") as f:

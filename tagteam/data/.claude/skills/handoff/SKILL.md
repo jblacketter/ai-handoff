@@ -79,8 +79,11 @@ tagteam cycle add --phase [phase] --type [plan|impl] --role lead --action AMEND 
 
 This appends an amendment to the active round without bumping the round number or returning the turn. The reviewer sees the amendment in the `tagteam cycle rounds` output on their next `/handoff`. AMEND only works when the cycle is mid-review (`ready_for: reviewer`) and the `--round` matches the active round; mismatches error.
 
+**Gatekeeper pre-checks (when `gatekeeper.enabled: true` in `tagteam.yaml`).** A deterministic gate runs between your `SUBMIT_FOR_REVIEW` and the reviewer's turn: the project's test command, the implementation-work scope check (an impl submission must contain real changes since the plan was approved) and a plan-doc check. Before you submit, run `tagteam gate check` — if it fails, fix first; the gate will bounce you otherwise. A bounce hands the turn straight back to you as a `GATE_BOUNCE` entry on your round (the failing output is in it; `tagteam gate status` shows the full report) — address it and re-submit with `--round [N+1]` exactly like a REQUEST_CHANGES.
+
 #### As Reviewer (your turn)
 1. Read the lead's submission: `tagteam cycle rounds --phase [phase] --type [plan|impl]`
+   - If the gatekeeper is enabled, the round tail also carries the gate's entry (`role: gatekeeper`, `GATE: PASS | tests ok (…) | scope N paths | plan-doc ok`): the tests already ran and the scope was already checked before your turn — start from those facts. A `GATE_PASS` whose content begins `GATE: checks failed but bounce cap … reached` means the lead hit the bounce cap; the failures are in the entry and the decision is yours (review anyway, request changes, or escalate).
 2. Review the referenced plan/implementation files
 3. Choose ONE action (all commands update both cycle and state in one call):
    - **APPROVE:** `tagteam cycle add --phase [phase] --type [plan|impl] --role reviewer --action APPROVE --round [N] --updated-by [your-agent-name] --content "Approved."`

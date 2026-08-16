@@ -140,6 +140,8 @@ code, pre, .cli, .tail { font-family: var(--mono); font-size: 12.5px; }
 .feed-item.ruling .dot { background: var(--ok); }
 .feed-item.interjection .dot { background: var(--warn); }
 .feed-item.brief .dot { background: var(--briefer); }
+.feed-item.gate .dot { background: var(--muted); }            /* Phase 38: pass = neutral */
+.feed-item.gate.bounce .dot { background: var(--warn); }     /* bounce = warm */
 .feed-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--bg-3); color: var(--text-dim); text-transform: lowercase; }
 .feed-item.lead .tag.role { color: var(--lead); }
@@ -147,6 +149,8 @@ code, pre, .cli, .tail { font-family: var(--mono); font-size: 12.5px; }
 .feed-item.ruling .tag.role { color: var(--ok); }
 .feed-item.interjection .tag.role { color: var(--warn); }
 .feed-item.brief .tag.role { color: var(--briefer); }
+.feed-item.gate .tag.role { color: var(--muted); }
+.feed-item.gate.bounce .tag.role { color: var(--warn); }
 .tag.action { color: var(--text); font-family: var(--mono); text-transform: none; }
 .ts { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
 .feed-summary { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }

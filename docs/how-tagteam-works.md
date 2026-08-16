@@ -117,6 +117,52 @@ tagteam rule answer --to reviewer --content "…"  # for NEED_HUMAN: answer deli
 
 Briefs land in `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (unique per escalation event and attempt; `…_latest.md` is an alias) and in the project DB. It fires **at most once automatically per escalation event** (a pre-spawn claim guarantees this even with two watchers), never retries on its own, never pauses the loop, and its tokens show up in `tagteam usage`. Everything it does is read-only except writing the brief file.
 
+<a id="gatekeeper"></a>
+## Gatekeeper pre-checks (opt-in, 3.2)
+
+A deterministic **gate** between the lead's `SUBMIT_FOR_REVIEW` and the reviewer's turn. No model is involved: it runs the project's test command and two checks, then either **passes** — a short report is attached to the lead's round so the reviewer's turn starts with the facts (tests already ran, scope already checked) — or **bounces** — the turn goes straight back to the lead with the failing output, and no reviewer turn (model tokens, minutes, one of the ten rounds' worth of attention) is spent on a submission that doesn't build.
+
+```yaml
+# tagteam.yaml
+gatekeeper:
+  enabled: true                       # opt-in; absent = off (3.1 behavior, byte-identical)
+  on: [impl]                          # cycle types gated (plan gating = plan-doc check only)
+  tests:
+    command: "python -m pytest -q"    # string (shell) or list; omitted → tests check skipped
+    timeout_minutes: 15
+  scope: true                         # impl only: real work since the plan was approved
+  max_bounces: 2                      # consecutive bounces before the gate passes-with-findings
+  max_output_chars: 4000              # tail of the test output kept in the round entry
+```
+
+| check | applies to | passes when | on skip |
+|---|---|---|---|
+| `tests` | types in `on` | the command exits 0 within `timeout_minutes` (stderr merged; env gets `TAGTEAM_GATE=1`; runs **last**, after the scope snapshot is frozen, so files a test run creates never satisfy scope) | no command → skipped, reported |
+| `scope` | impl | there is implementation work since the **implementation boundary** — HEAD + content hashes of the dirty paths, captured the moment the plan cycle is approved (`impl_boundary` on the plan's status file, copied to the impl cycle at init). Only content that actually changed counts, whether committed or dirty; tagteam artifacts and the phase's plan artifacts (`docs/roadmap.md`, `docs/phases/<phase>.md`) don't. An impl cycle opened over an unchanged tree fails here. | not a git repo, or no boundary (plan approved before 3.2) → skipped, reported |
+| `plan-doc` | all gated types | `docs/phases/<phase>.md` exists and is non-empty | — |
+
+A `fail` on any check → **BOUNCE**; otherwise **PASS**. `skip` never bounces but is always reported so the reviewer sees what was *not* checked. Round entries are greppable and ride the round like an amendment (`role: gatekeeper`, `updated_by: Gatekeeper`):
+
+```
+GATE: PASS | scope 12 paths | plan-doc ok | tests ok (984 passed, 5 skipped, 3m38s)
+GATE: BOUNCE | scope 12 paths | plan-doc ok | tests FAILED (exit 1, 41s)
+--- tests: last 4000 chars ---
+FAILED tests/test_x.py::test_y - AssertionError ...
+```
+
+A bounce is a `REQUEST_CHANGES` in every respect that matters (`ready_for: lead`, `turn: lead`, `updated_by: Gatekeeper`), so the SKILL, the cockpit and the headless engine need no new branch; a pass writes only the entry (top-level `seq` unchanged) and the reviewer is handed off in the same watcher tick. After `max_bounces` consecutive bounces the next failing submission **passes with findings** (`GATE: checks failed but bounce cap (2) reached — reviewer, see report`) so a lead whose environment differs from the watcher's is never trapped in a loop the human never sees. Gate bounces do not reset the stale-round counter.
+
+**Where it runs.** In the watcher, at the seam where it would hand the reviewer its turn — every mode (notify, iTerm2, tmux, headless). The reviewer is never dispatched past an undecided gate: if the gate cannot decide yet (the turn slot is busy with a lead conversation or the briefer, another watcher's attempt is live) the watcher latches the seq and retries on later ticks. One decision per submission is guaranteed by an at-most-once claim in the project DB (`gates` table, keyed `phase/type/rN/<seq>`), safe across watcher restarts and two watchers; the checks run outside the writer lock, the decision is applied under it — entry-first and idempotent, pinned to the original submission (a lead re-submission, an amendment, a ruling or a reviewer round in the meantime marks the decision `superseded` and nothing is replayed). A crashed attempt is swept (dead or mismatched runner, or timed out with no slot marker) and retried once; a live-but-unverifiable runner is left alone and reported by `tagteam gate status`.
+
+```bash
+tagteam gate check            # lead pre-flight: run the checks, print the report, write nothing (exit 0/1)
+tagteam gate run              # gate the current submission now (manual mode / no watcher; same at-most-once path)
+tagteam gate status [--json]  # last decision + report for the current cycle
+tagteam gate list             # every gate row for the cycle
+```
+
+Without a watcher (manual backend) the gate does not fire on its own — `tagteam gate run` is the substitute, and the SKILL tells the lead to run `tagteam gate check` before submitting. Full test output beyond the entry's tail: `.tagteam/gates/<phase>_<type>_r<N>_gate_<ts>_a<attempt>.log`. The cockpit shows a **gate** chip in the Now strip (`gate ✓ r3` / `gate ↩ r3`) and gate entries in the Feed; a bounce is the lead's problem, not yours — Needs-you is unchanged.
+
 <a id="cockpit"></a>
 ## The Cockpit
 
@@ -197,12 +243,13 @@ tagteam serve --theme saloon --dir ~/projects/myproject     # legacy Saloon
 
 | path | who writes it | what it is |
 |---|---|---|
-| `tagteam.yaml` | `tagteam init` (you edit it) | agents, headless options, `briefer`, `serve.theme` |
+| `tagteam.yaml` | `tagteam init` (you edit it) | agents, headless options, `briefer`, `gatekeeper`, `serve.theme` |
 | `handoff-state.json` | `tagteam cycle …`, `tagteam rule …`, the watcher | whose turn, which phase/type/round, status, history |
 | `handoff-diagnostics.jsonl` | state/cycle writers | diagnostics when a write is skipped or out of sequence |
 | `docs/handoffs/<phase>_<type>_rounds.jsonl` / `_status.json` | `tagteam cycle init` / `add`, rulings | the canonical per-cycle round log and its status (append-only rounds) |
 | `docs/handoffs/<phase>_<type>.md` | auto-export (`TAGTEAM_STEP_B=1`) | a rendered read-only view of the cycle |
-| `.tagteam/tagteam.db` | every writer (shadow) | SQLite mirror of state/rounds plus usage, interjections, briefs, rate limits |
+| `.tagteam/tagteam.db` | every writer (shadow) | SQLite mirror of state/rounds plus usage, interjections, briefs, rate limits, gates |
+| `.tagteam/gates/<phase>_<type>_r<N>_gate_<ts>_a<attempt>.log` | the gatekeeper | one gate attempt's full test output and decision |
 | `.tagteam/turns/<phase>_<type>_r<N>_<role>_<ts>.log` / `.events.jsonl` | headless watcher | one headless turn's human-readable log and raw event stream |
 | `.tagteam/headless-paused.json` | headless watcher, `tagteam pause` | the hold marker (reason, log path); delete or `tagteam resume` to continue |
 | `.tagteam/watcher.json` | `tagteam watch --pidfile` / `serve.theme: cockpit` / the cockpit's Start | identity-checked watcher pidfile for the cockpit's liveness chip and Stop button |
