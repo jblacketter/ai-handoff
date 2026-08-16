@@ -9,7 +9,7 @@ authors:
 repository-code: "https://github.com/jblacketter/tagteam"
 url: "https://github.com/jblacketter/tagteam"
 license: MIT
-version: 0.12.0
+version: 3.0.0
 date-released: 2026-08-16
 keywords:
   - ai-agents
