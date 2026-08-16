@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots)
+- [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots; round 5: post-approval installed-wheel check goes through the harness with `--python`, helper reports imported tagteam version/path)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -418,8 +418,17 @@ license / link-back paragraph (139e099) is kept verbatim in §8.
    every real registered project before/after (equal). None of these
    needs a PR, a tag, or PyPI.
 
-**`scripts/upgrade_smoke.py --project DIR [--sentinel DIR]`** — the
-isolated harness. `HOME` is never overridden (workspace rule; and it is
+**`scripts/upgrade_smoke.py --project DIR [--sentinel DIR] [--python EXE]`**
+— the isolated harness, and the **only** permitted way to run an upgrade
+in any recipe of this phase; **bare `tagteam upgrade` is forbidden in
+both the in-cycle gate and the post-approval checklist.** `--python`
+selects the interpreter for the helper process (default:
+`sys.executable`); the helper prints, before anything else, the imported
+`tagteam.__version__` and `tagteam.__file__`, and the parent echoes them
+and refuses to proceed (exit 2) unless — when `--expect-version` is given
+— the reported version matches and the reported path is under the
+`--python` interpreter's `sys.prefix` (so a post-release check cannot
+silently exercise the source checkout). `HOME` is never overridden (workspace rule; and it is
 unnecessary). In the parent: snapshot the real registry file
 (`registry.read_registry_raw()`, non-mutating) and, for every real
 registered project, the **existence and sha256** of every managed
@@ -459,17 +468,32 @@ existence+hash set is identical before/after and its path is absent from
 the helper's output, the temporary registry lists exactly **one** entry
 afterwards, and the real registry file — if one exists on the machine —
 is byte-identical before/after (checked by the test itself, independent
-of the harness's own check).
+of the harness's own check). A second test proves the interpreter
+contract: run the harness with `--python sys.executable` and assert the
+echoed version equals `tagteam.__version__` and the echoed path is the
+source checkout's `tagteam/__init__.py`; run it with `--python` pointing
+at a tiny fake interpreter script (a shim that prints a different
+version/path in the helper protocol) plus `--expect-version 3.0.0` and
+assert exit 2 with the mismatch named — the harness selects the target
+interpreter and refuses a wrong one.
 
 ## Post-approval checklist (release operations, not review gates)
 
 Ask before push; then: PR from `phase-36-visual-story` → CI green
 (Ubuntu + Windows) → confirm the four mermaid blocks render on GitHub in
 the PR's README view → arbiter merges + tags `v3.0.0` → publish workflow
-green → PyPI shows 3.0.0 → `pip install tagteam==3.0.0` in a scratch
-venv, `tagteam upgrade` on a 0.12.0-set-up project changes nothing.
-Results are recorded in the PR description / release notes and the
-roadmap status line; reviewer approval never depends on them.
+green → PyPI shows 3.0.0 → installed-wheel verification **through the
+harness only**: `pip install tagteam==3.0.0` in a scratch venv, then from
+the source checkout `python scripts/upgrade_smoke.py --python
+<scratch-venv>/bin/python --expect-version 3.0.0 --project <the
+0.12.0-set-up disposable dir> --sentinel <unrelated dir>` — the helper
+imports the published wheel (version/path echoed and checked), the
+temporary registry holds only the disposable project, the fail-closed
+registry-global assertions run before the call, and the sentinel / real
+registry / managed-destination existence+hash checks apply exactly as in
+the in-cycle gate. Bare `tagteam upgrade` is never run. Results are
+recorded in the PR description / release notes and the roadmap status
+line; reviewer approval never depends on them.
 
 ## Resolved questions (round 1 → 2)
 
@@ -480,6 +504,17 @@ roadmap status line; reviewer approval never depends on them.
 - **Q3** One `docs/how-tagteam-works.md` with stable per-section anchors
   (`#loop`, `#cycle`, `#modes`, `#headless`, `#controls`, `#escalations`,
   `#cockpit`, `#hub`, `#saloon`, `#files`).
+
+## Round-5 change (reviewer r4)
+
+Post-approval installed-wheel verification no longer runs bare `tagteam
+upgrade`: it goes through `scripts/upgrade_smoke.py --python <3.0.0
+venv python> --expect-version 3.0.0` (helper echoes imported
+`tagteam.__version__` / `__file__`, parent refuses a mismatch or a path
+outside that interpreter's prefix), with the same temp registry, fail-
+closed assertions and sentinel / real-registry / managed-destination
+checks as the in-cycle gate; "bare `tagteam upgrade` is forbidden" is
+stated for both recipes; interpreter-selection test added.
 
 ## Round-3 changes (reviewer r2)
 
