@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "cockpit-launchpad-lead-conversation-31",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-16",
+  "baseline": {
+    "sha": "3b66778e82e250afe4f537df2fc68097aa3f9293",
+    "dirty_paths": [],
+    "captured_at": "2026-08-16T18:05:14.874925+00:00",
+    "source": "plan-init"
+  }
+}
