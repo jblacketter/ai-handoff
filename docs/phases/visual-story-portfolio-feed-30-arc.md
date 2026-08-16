@@ -3,7 +3,7 @@
 ## Status
 - [x] Planning
 - [x] In Review (round 2: public-safe evidence + screenshot pipeline, 1:1 diagram contract, stale-round wording, in-cycle release gate vs post-approval checklist, numbers methodology + byte-compare guard; round 3: registry-isolated upgrade smoke, `--as-of` + `attempt` in the snapshot contract, stale streak = equal transitions; round 4: sentinel outside every registry, no `HOME` override, fail-closed registry-path assertion, existence+hash snapshots; round 5: post-approval installed-wheel check goes through the harness with `--python`, helper reports imported tagteam version/path; round 6: exact launch `<--python> -I -c` with cwd outside the repo, helper reports executable/prefix/version/file, parent verifies before any registry call, temp-venv shadowing test)
-- [ ] Approved
+- [x] Approved (round 6)
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete (release **3.0.0** via PR — the release that completes Phase 36 ships as 3.0.0, proposal §5)
