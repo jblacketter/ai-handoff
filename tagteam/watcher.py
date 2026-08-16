@@ -458,6 +458,7 @@ class _StateProcessor:
         engine=None,
         briefer=None,
         gatekeeper=None,
+        panel=None,
     ):
         self.mode = mode
         # Phase 31: HeadlessEngine when mode == "headless" (else None).
@@ -466,6 +467,8 @@ class _StateProcessor:
         self.briefer = briefer
         # Phase 38: GateSpec (enabled) or None — gatekeeper pre-checks.
         self.gatekeeper = gatekeeper
+        # Phase 39: PanelSpec (enabled) or None — reviewer panel.
+        self.panel = panel
         self.lead_name = lead_name
         self.reviewer_name = reviewer_name
         self.lead_pane = lead_pane
@@ -494,6 +497,9 @@ class _StateProcessor:
         # the gate in EVERY mode; the reviewer is never dispatched past an
         # undecided gate.
         self._gate_owed_seq: int | None = None
+        # Phase 39: panel-owed latch — same shape as the gate's, checked
+        # after it (gate → panel).
+        self._panel_owed_seq: int | None = None
 
     # -- pause (Phase 32) --------------------------------------------------
 
@@ -558,7 +564,7 @@ class _StateProcessor:
             # hand-off for this very seq is still owed to an undecided
             # gate; try again, and on a decision continue into the normal
             # hand-off (PASS) or return (BOUNCE moved the turn).
-            if (self._gate_owed_seq == current_seq
+            if ((self._gate_owed_seq == current_seq or self._panel_owed_seq == current_seq)
                     and state.get("status") == "ready"
                     and state.get("turn") == "reviewer"):
                 if self._pause_info() is not None:
@@ -668,6 +674,11 @@ class _StateProcessor:
         # to the hand-off in this same tick; BOUNCE → the turn is the
         # lead's now, return) or defers (latch this seq, return).
         if (state or {}).get("turn") == "reviewer" and not self._maybe_gate(state or {}):
+            return
+        # Phase 39: the panel takes the reviewer's turn when it applies (after
+        # a gate PASS). merged → the entry is the turn, return; fallback /
+        # not applicable → the ordinary hand-off below; deferred → latch.
+        if (state or {}).get("turn") == "reviewer" and not self._maybe_panel(state or {}):
             return
         send_success = False
 
@@ -799,6 +810,40 @@ class _StateProcessor:
         except Exception as e:  # the loop must never die because of the briefer
             _log(f"   briefer error: {type(e).__name__}: {e}")
 
+    def _maybe_panel(self, state: dict) -> bool:
+        """Phase 39: run the reviewer panel for a reviewer-ready submission.
+        True → hand the ordinary reviewer off now (disabled / not applicable
+        / fallback / decided fallback); False → do not (merged — the panel's
+        entry moved the turn; deferred / error / not-ready → latched and
+        retried on identical ticks; stale → dropped)."""
+        spec = self.panel
+        if spec is None or not getattr(spec, "enabled", False):
+            return True
+        seq = state.get("seq")
+        try:
+            from tagteam import panel as _panel
+            res = _panel.run_panel(self.project_dir, kind="auto", spec=spec, state=state, log=_log)
+        except Exception as e:  # the loop must never die because of the panel
+            _log(f"   panel error: {type(e).__name__}: {e} — will retry")
+            self._panel_owed_seq = seq
+            return False
+        if res.status in ("deferred", "error", "not-ready"):
+            if self._panel_owed_seq != seq:
+                _log(f"   panel: undecided ({res.reason}) — reviewer hand-off withheld until the panel decides")
+            self._panel_owed_seq = seq
+            return False
+        self._panel_owed_seq = None
+        if res.status == "stale":
+            _log(f"   panel: {res.reason} — this observation is stale; not dispatching")
+            return False
+        if res.status == "merged":
+            _log("   panel: merged — the panel's entry is the reviewer's response (reviewer not dispatched)")
+            return False
+        if res.status == "superseded":
+            # the submission moved under the panel; the fresh state gets its own tick
+            return False
+        return bool(res.dispatch)
+
     def _maybe_gate(self, state: dict) -> bool:
         """Phase 38: run the gatekeeper for a reviewer-ready submission.
         Returns True when the reviewer may be handed off now (gate
@@ -908,6 +953,20 @@ def _build_processor(
     except Exception as e:
         _log(f"WARNING: gatekeeper disabled for this run: {e}")
 
+    # Phase 39: reviewer panel — opt-in; problems warn and disable.
+    panel_spec = None
+    try:
+        from tagteam.panel import resolve_panel
+        ps = resolve_panel(config or {}, project_dir)
+        if ps.enabled:
+            panel_spec = ps
+        elif ps.problems:
+            _log("WARNING: reviewer panel disabled for this run:")
+            for pr in ps.problems:
+                _log(f"  - {pr}")
+    except Exception as e:
+        _log(f"WARNING: reviewer panel disabled for this run: {e}")
+
     engine = None
     if mode == "headless":
         from tagteam.headless import (HeadlessEngine,
@@ -948,6 +1007,7 @@ def _build_processor(
         engine=engine,
         briefer=briefer_spec,
         gatekeeper=gate_spec,
+        panel=panel_spec,
     )
 
 
@@ -959,6 +1019,10 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
     if gk is not None and getattr(gk, "enabled", False):
         _log(f"Gatekeeper: on ({', '.join(gk.on)} cycles"
              f"{'; tests: ' + (gk.tests_command if isinstance(gk.tests_command, str) else ' '.join(map(str, gk.tests_command))) if gk.tests_command else ''})")
+    pn = getattr(processor, "panel", None)
+    if pn is not None and getattr(pn, "enabled", False):
+        _log(f"Panel: on ({', '.join(pn.on)} cycles; lenses: {', '.join(pn.lens_names)}; "
+             f"reviewer via {pn.provider})")
     if processor.mode == "tmux":
         _log(f"Panes: lead={processor.lead_pane},"
              f" reviewer={processor.reviewer_pane}")

@@ -355,7 +355,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** 3.0 proposal §4 candidate; promoted 2026-08-16 as the first post-arc phase (best value-to-risk of the four candidates).
 
 ### Phase 39: Reviewer Panels (3.3)
-- **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-39-reviewer-panels` (PR at the end). Release **3.3.0** after impl approval.
+- **Status:** In progress — plan approved (round 3, 2026-08-16); implementation complete on branch `phase-39-reviewer-panels`, impl review open (PR at the end). Release **3.3.0** after impl approval.
 - **Description:** opt-in panel that takes the reviewer's turn as 2–3 independent lens reviews (correctness / scope / verification by default; each a fresh reviewer process with a lens brief, writing a structured verdict) merged deterministically into exactly one reviewer entry — one `REQUEST_CHANGES` with findings grouped by lens, or `APPROVE` only when every lens approves; any lens failure with no objection → fallback to the ordinary reviewer turn (never a partial approval). Runs after the gate at the watcher's reviewer seam in every mode; at-most-once per submission (`panels` claim row, schema v9, shared `_claim_satellite` with the gate); `tagteam panel run|status|list|lenses|preview`. No cockpit work.
 - **Plan:** `docs/phases/reviewer-panels.md`
 

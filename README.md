@@ -208,6 +208,17 @@ gatekeeper:
 
 With the gate on, every impl submission is checked **before** the reviewer's turn — by a script, not a model: the test command runs, the submission must contain real implementation work since the plan was approved (an impl cycle opened over an unchanged tree fails), and the phase plan must exist. Green → a one-line report is attached to the round and the reviewer starts with the facts; red → the turn bounces straight back to the lead with the failing output, and no reviewer tokens or rounds are spent. Two consecutive bounces and the gate passes-with-findings so nobody gets trapped. `tagteam gate check` is the lead's pre-flight; `tagteam gate status` shows the last report. Runs in every watcher mode; without a watcher, `tagteam gate run`. Details: [gatekeeper pre-checks](docs/how-tagteam-works.md#gatekeeper).
 
+### Reviewer panels: three narrow reviews, one response
+
+```yaml
+# tagteam.yaml
+panel:
+  enabled: true                       # opt-in; absent = off
+  lenses: [correctness, scope, verification]
+```
+
+With the panel on, the reviewer's turn on impl cycles is taken by 2–3 independent **lens** reviews — each a fresh reviewer process with a one-axis brief (does it do what the plan says? is everything there and nothing extra? is it verified?) writing a structured verdict — merged deterministically into **one** reviewer entry: `PANEL: REQUEST_CHANGES — …` with findings grouped by lens, or `PANEL: APPROVE` only when every lens approves. A lens that fails never causes a partial approval: the ordinary reviewer turn runs instead. Runs after the gate in every watcher mode; `tagteam panel status|lenses|preview --lens L|run`. Details: [reviewer panels](docs/how-tagteam-works.md#panels).
+
 ## Talk to the lead, launch, watch and steer
 
 **The Cockpit** — the browser surface for one project, built around the arbiter's actual job: *how do I begin?*, *let me tell the lead something*, *does anything need me?*, then *is it healthy and what is it doing?*
@@ -280,6 +291,7 @@ tagteam hub [--list [--json]] [--all] [--port 8090]                   # all regi
 tagteam registry list [--json] | unregister PATH
 tagteam brief [--list | --generate | --event KEY]
 tagteam gate check | run | status [--json] | list      # gatekeeper pre-checks (opt-in `gatekeeper:` block)
+tagteam panel run | status [--json] | list | lenses | preview --lens L   # reviewer panel (opt-in `panel:` block)
 tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]
 tagteam roadmap phases

@@ -813,7 +813,7 @@ class TestSchemaV8Gates:
         raw.execute("INSERT INTO rounds (id, cycle_id, round, role, action, content, ts) VALUES (9, ?, 1, 'reviewer', 'REQUEST_CHANGES', 'y', 't')", (cid,))
         raw.commit(); raw.close()
         c = db.connect(project_dir=str(tmp_path))
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 8
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION >= 8
         assert [tuple(r) for r in c.execute("SELECT id, role, action FROM rounds ORDER BY id")] == \
             [(7, "lead", "SUBMIT_FOR_REVIEW"), (9, "reviewer", "REQUEST_CHANGES")]
         assert c.execute("SELECT name FROM sqlite_master WHERE name='gates'").fetchone()
@@ -874,4 +874,84 @@ class TestSchemaV8Gates:
         c.execute("DELETE FROM gates"); c.commit()
         assert db.restore_non_file_backed(c, snap)["gates"] == 1
         assert db.get_gate(c, a[0])["status"] == "pass"
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# Schema v9 (Phase 39): panels + shared satellite claim
+# ---------------------------------------------------------------------------
+
+class TestSchemaV9Panels:
+    def test_v8_to_v9_additive(self, tmp_path):
+        import sqlite3
+        p = tmp_path / ".tagteam" / "tagteam.db"; p.parent.mkdir(parents=True)
+        raw = sqlite3.connect(p)
+        for ddl in (db._SCHEMA_V1, db._SCHEMA_V3, db._SCHEMA_V4, db._SCHEMA_V5, db._SCHEMA_V6, db._SCHEMA_V7, db._SCHEMA_V8):
+            raw.executescript(ddl)
+        raw.execute("PRAGMA user_version = 8"); raw.commit(); raw.close()
+        c = db.connect(project_dir=str(tmp_path))
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 9
+        assert c.execute("SELECT name FROM sqlite_master WHERE name='panels'").fetchone()
+        assert "panels" in db.NON_FILE_BACKED_TABLES
+        c.close()
+
+    def test_claim_panel_budget_counts_failed_only(self, tmp_path):
+        c = db.connect(project_dir=str(tmp_path))
+        kw = dict(phase="p", cycle_type="impl", round_=1, submission_seq=4, event_key="p/impl/r1/4", kind="auto",
+                  runner_pid=1, runner_ident="i")
+        a = db.claim_panel(c, ts="t", interjection_ids=[3, 4], **kw)
+        assert a and a[1] == 1 and db.get_panel(c, a[0])["interjection_ids"] == "[3, 4]"
+        assert db.claim_panel(c, ts="t", **kw) is None                       # running refuses
+        db.finish_panel(c, a[0], status="superseded", ts="t", reason="moved")
+        b = db.claim_panel(c, ts="t", **kw); assert b and b[1] == 2         # superseded did not count
+        db.finish_panel(c, b[0], status="superseded", ts="t")
+        cc = db.claim_panel(c, ts="t", **kw); assert cc and cc[1] == 3       # still not exhausted
+        db.finish_panel(c, cc[0], status="error", ts="t", reason="x")
+        d = db.claim_panel(c, ts="t", **kw); assert d and d[1] == 4          # first failure → retry
+        db.finish_panel(c, d[0], status="abandoned", ts="t")
+        assert db.claim_panel(c, ts="t", **kw) is None                       # 2 failed → refused
+        e = db.claim_panel(c, ts="t", max_attempts=3, **kw); assert e        # forced (fallback path)
+        db.finish_panel(c, e[0], status="fallback", ts="t", reason="exhausted")
+        assert db.claim_panel(c, ts="t", max_attempts=99, **kw) is None      # decided → never again
+        assert db.decided_panel_for_event(c, "p/impl/r1/4")["status"] == "fallback"
+        assert [r["status"] for r in db.panels_for_event(c, "p/impl/r1/4")] == \
+            ["superseded", "superseded", "error", "abandoned", "fallback"]
+        assert db.last_panel(c, "p", "impl")["status"] == "fallback"
+        assert [r["status"] for r in db.unfinished_panels(c)] == ["error", "abandoned"]
+        with pytest.raises(ValueError):
+            db.finish_panel(c, e[0], status="running", ts="t")
+        with pytest.raises(ValueError):
+            db.claim_panel(c, ts="t", **{**kw, "kind": "weird"})
+        with pytest.raises(ValueError):
+            db.update_panel(c, e[0], ts="t", nope=1)
+        c.close()
+
+    def test_gate_claim_uses_the_same_rule(self, tmp_path):
+        """Phase 39 aligned the gate: superseded gate rows never consume the budget."""
+        c = db.connect(project_dir=str(tmp_path))
+        kw = dict(phase="p", cycle_type="impl", round_=1, submission_seq=4, event_key="e", kind="auto",
+                  runner_pid=1, runner_ident="i")
+        for _ in range(3):
+            r = db.claim_gate(c, ts="t", **kw); assert r
+            db.finish_gate(c, r[0], status="superseded", ts="t")
+        r = db.claim_gate(c, ts="t", **kw); assert r and r[1] == 4
+        db.finish_gate(c, r[0], status="error", ts="t"); r = db.claim_gate(c, ts="t", **kw); assert r
+        db.finish_gate(c, r[0], status="error", ts="t")
+        assert db.claim_gate(c, ts="t", **kw) is None
+        c.close()
+
+    def test_uq_panels_decided_and_snapshot_restore(self, tmp_path):
+        import sqlite3
+        c = db.connect(project_dir=str(tmp_path))
+        a = db.claim_panel(c, ts="t", phase="p", cycle_type="impl", round_=1, submission_seq=1, event_key="e",
+                           kind="manual", runner_pid=1, runner_ident=None)
+        db.finish_panel(c, a[0], status="merged", ts="t", decision="APPROVE", applied_seq=2, lenses_json="[]")
+        with pytest.raises(sqlite3.IntegrityError):
+            c.execute("INSERT INTO panels (event_key, phase, type, round, submission_seq, kind, status, attempt, started_at) "
+                      "VALUES ('e','p','impl',1,1,'auto','fallback',2,'t')")
+        snap = db.snapshot_non_file_backed(c)
+        assert len(snap["panels"]) == 2
+        c.execute("DELETE FROM panels"); c.commit()
+        assert db.restore_non_file_backed(c, snap)["panels"] == 1
+        assert db.get_panel(c, a[0])["decision"] == "APPROVE"
         c.close()

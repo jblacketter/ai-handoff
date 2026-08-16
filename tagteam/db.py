@@ -24,7 +24,7 @@ from pathlib import Path
 # 3.0-arc rule (docs/tagteam-3.0-proposal.md §2): migrations are ADDITIVE
 # ONLY — new tables / nullable columns, never renames or drops — so an
 # older release can still open a newer DB after a downgrade.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 USAGE_STATUSES = {"ok", "timeout", "nonzero_exit", "no_round", "spawn_failed",
                   "cancelled"}
@@ -34,7 +34,7 @@ BRIEF_KINDS = {"auto", "manual"}
 # Non-file-backed tables: preserved verbatim across `repair` rebuilds.
 # parent-before-child order matters for restore_non_file_backed()
 NON_FILE_BACKED_TABLES = ("usage", "interjections", "briefs", "rate_limits",
-                          "conversations", "conversation_turns", "launches", "gates")
+                          "conversations", "conversation_turns", "launches", "gates", "panels")
 
 VALID_ACTIONS = {
     "SUBMIT_FOR_REVIEW", "REQUEST_CHANGES", "APPROVE",
@@ -352,6 +352,39 @@ def _resolve_db_path(project_dir: str | Path | None) -> Path:
     return Path(_resolve_project_root()) / DEFAULT_DB_RELPATH
 
 
+# Schema v9 (Phase 39): reviewer panels — one row per panel attempt on a
+# submission (same event identity as `gates`); the merged decision is an
+# ordinary reviewer round entry (see cycle.add_round meta=).
+_SCHEMA_V9 = """
+CREATE TABLE IF NOT EXISTS panels (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key        TEXT NOT NULL,
+    phase            TEXT NOT NULL,
+    type             TEXT NOT NULL,
+    round            INTEGER NOT NULL,
+    submission_seq   INTEGER NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('auto','manual')),
+    status           TEXT NOT NULL CHECK (status IN ('running','merged','fallback','superseded','error','abandoned')),
+    attempt          INTEGER NOT NULL,
+    runner_pid       INTEGER,
+    runner_ident     TEXT,
+    started_at       TEXT NOT NULL,
+    updated_at       TEXT,
+    finished_at      TEXT,
+    duration_s       REAL,
+    lenses_json      TEXT,
+    decision         TEXT,
+    interjection_ids TEXT,
+    stem             TEXT,
+    reason           TEXT,
+    applied_seq      INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_panels_running ON panels(event_key) WHERE status='running';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_panels_decided ON panels(event_key) WHERE status IN ('merged','fallback');
+CREATE INDEX IF NOT EXISTS idx_panels_cycle ON panels(phase, type, id);
+"""
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Apply schema migrations forward to SCHEMA_VERSION.
 
@@ -402,6 +435,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_V8)
         conn.execute("PRAGMA user_version = 8")
         current = 8
+    if current < 9:
+        conn.executescript(_SCHEMA_V9)
+        conn.execute("PRAGMA user_version = 9")
+        current = 9
     # Future migrations land here.
     # NOTE: `current > SCHEMA_VERSION` (a newer release wrote this DB) is
     # deliberately tolerated — additive-only migrations mean older code
@@ -1136,38 +1173,51 @@ GATE_KINDS = ("auto", "manual")
 GATE_STATUSES = ("running", "pass", "bounce", "superseded", "error", "abandoned")
 
 
-def claim_gate(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str,
-               round_: int, submission_seq: int, event_key: str, kind: str,
-               runner_pid: int | None, runner_ident: str | None,
-               max_attempts: int = 2) -> tuple[int, int] | None:
-    """Atomically claim a gate attempt for `event_key`: one INSERT … SELECT
-    … WHERE NOT EXISTS (a decided row) AND NOT EXISTS (a running row) AND
-    the attempt count is below `max_attempts`; allocates
-    `attempt = 1 + max(attempt)`. Returns (row_id, attempt) or None when
-    refused. Caller holds the writer lock. Commits."""
-    if kind not in GATE_KINDS:
-        raise ValueError(f"Invalid gate kind: {kind!r}")
+# Satellite claim tables (Phase 38 gates, Phase 39 panels) share ONE
+# at-most-once implementation: table → (decided statuses, failed statuses).
+_SATELLITE_TABLES = {
+    "gates": {"decided": ("pass", "bounce"), "failed": ("error", "abandoned")},
+    "panels": {"decided": ("merged", "fallback"), "failed": ("error", "abandoned")},
+}
+
+
+def _claim_satellite(conn: sqlite3.Connection, table: str, *, ts: str, phase: str, cycle_type: str,
+                     round_: int, submission_seq: int, event_key: str, kind: str,
+                     runner_pid: int | None, runner_ident: str | None,
+                     max_attempts: int, extra: dict | None = None) -> tuple[int, int] | None:
+    """Atomically claim an attempt row for `event_key` in `table`: one
+    INSERT … SELECT … WHERE NOT EXISTS (a decided row) AND NOT EXISTS (a
+    running row) AND the number of FAILED attempts (`error|abandoned` —
+    superseded attempts never consume the budget) is below `max_attempts`;
+    allocates `attempt = 1 + max(attempt)`. Returns (row_id, attempt) or
+    None when refused. Caller holds the writer lock. Commits."""
+    spec = _SATELLITE_TABLES[table]
+    decided = ", ".join(f"'{x}'" for x in spec["decided"])
+    failed = ", ".join(f"'{x}'" for x in spec["failed"])
+    extra = dict(extra or {})
+    cols = ["event_key", "phase", "type", "round", "submission_seq", "kind", "status", "attempt",
+            "runner_pid", "runner_ident", "started_at", "updated_at", *extra.keys()]
+    sel = ["?", "?", "?", "?", "?", "?", "'running'",
+           f"COALESCE((SELECT MAX(attempt) FROM {table} WHERE event_key = ?), 0) + 1",
+           "?", "?", "?", "?", *(["?"] * len(extra))]
+    params = [event_key, phase, cycle_type, int(round_), int(submission_seq), kind,
+              event_key, runner_pid, runner_ident, ts, ts, *extra.values(),
+              event_key, event_key, event_key, int(max_attempts)]
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            """INSERT INTO gates
-               (event_key, phase, type, round, submission_seq, kind, status, attempt,
-                runner_pid, runner_ident, started_at, updated_at)
-               SELECT ?, ?, ?, ?, ?, ?, 'running',
-                      COALESCE((SELECT MAX(attempt) FROM gates WHERE event_key = ?), 0) + 1,
-                      ?, ?, ?, ?
-               WHERE NOT EXISTS (SELECT 1 FROM gates WHERE event_key = ? AND status IN ('pass','bounce'))
-                 AND NOT EXISTS (SELECT 1 FROM gates WHERE event_key = ? AND status = 'running')
-                 AND COALESCE((SELECT MAX(attempt) FROM gates WHERE event_key = ?), 0) < ?""",
-            (event_key, phase, cycle_type, int(round_), int(submission_seq), kind,
-             event_key, runner_pid, runner_ident, ts, ts,
-             event_key, event_key, event_key, int(max_attempts)),
+            f"""INSERT INTO {table} ({", ".join(cols)})
+                SELECT {", ".join(sel)}
+                WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE event_key = ? AND status IN ({decided}))
+                  AND NOT EXISTS (SELECT 1 FROM {table} WHERE event_key = ? AND status = 'running')
+                  AND (SELECT COUNT(*) FROM {table} WHERE event_key = ? AND status IN ({failed})) < ?""",
+            params,
         )
         if cur.rowcount != 1:
             conn.execute("ROLLBACK")
             return None
         row_id = cur.lastrowid
-        attempt = conn.execute("SELECT attempt FROM gates WHERE id=?", (row_id,)).fetchone()[0]
+        attempt = conn.execute(f"SELECT attempt FROM {table} WHERE id=?", (row_id,)).fetchone()[0]
         conn.execute("COMMIT")
         return row_id, attempt
     except sqlite3.IntegrityError:
@@ -1176,6 +1226,19 @@ def claim_gate(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str
         except sqlite3.OperationalError:
             pass
         return None
+
+
+def claim_gate(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str,
+               round_: int, submission_seq: int, event_key: str, kind: str,
+               runner_pid: int | None, runner_ident: str | None,
+               max_attempts: int = 2) -> tuple[int, int] | None:
+    """Claim a gate attempt (see `_claim_satellite`). `max_attempts` bounds
+    FAILED attempts (`error|abandoned`); superseded rows do not count."""
+    if kind not in GATE_KINDS:
+        raise ValueError(f"Invalid gate kind: {kind!r}")
+    return _claim_satellite(conn, "gates", ts=ts, phase=phase, cycle_type=cycle_type, round_=round_,
+                            submission_seq=submission_seq, event_key=event_key, kind=kind,
+                            runner_pid=runner_pid, runner_ident=runner_ident, max_attempts=max_attempts)
 
 
 def finish_gate(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
@@ -1231,6 +1294,84 @@ def running_gates(conn: sqlite3.Connection) -> list[dict]:
 def unfinished_gates(conn: sqlite3.Connection) -> list[dict]:
     """running / abandoned / error rows — candidates for reconciliation."""
     return _rows(conn.execute("SELECT * FROM gates WHERE status IN ('running','abandoned','error') ORDER BY id"))
+
+
+# ---------------------------------------------------------------------------
+# panels (Phase 39)
+# ---------------------------------------------------------------------------
+
+PANEL_KINDS = ("auto", "manual")
+PANEL_STATUSES = ("running", "merged", "fallback", "superseded", "error", "abandoned")
+
+
+def claim_panel(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str,
+                round_: int, submission_seq: int, event_key: str, kind: str,
+                runner_pid: int | None, runner_ident: str | None,
+                interjection_ids: list[int] | None = None,
+                max_attempts: int = 2) -> tuple[int, int] | None:
+    """Claim a panel attempt (see `_claim_satellite`); the reviewer-note
+    snapshot the lenses will see is recorded on the row at claim time."""
+    if kind not in PANEL_KINDS:
+        raise ValueError(f"Invalid panel kind: {kind!r}")
+    return _claim_satellite(conn, "panels", ts=ts, phase=phase, cycle_type=cycle_type, round_=round_,
+                            submission_seq=submission_seq, event_key=event_key, kind=kind,
+                            runner_pid=runner_pid, runner_ident=runner_ident, max_attempts=max_attempts,
+                            extra={"interjection_ids": json.dumps(list(interjection_ids or []))})
+
+
+def finish_panel(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
+                 duration_s: float | None = None, lenses_json: str | None = None,
+                 decision: str | None = None, stem: str | None = None, reason: str | None = None,
+                 applied_seq: int | None = None) -> None:
+    if status not in PANEL_STATUSES or status == "running":
+        raise ValueError(f"Invalid final panel status: {status!r}")
+    conn.execute(
+        """UPDATE panels SET status=?, finished_at=?, updated_at=?, duration_s=COALESCE(?, duration_s),
+               lenses_json=COALESCE(?, lenses_json), decision=COALESCE(?, decision), stem=COALESCE(?, stem),
+               reason=?, applied_seq=COALESCE(?, applied_seq) WHERE id=?""",
+        (status, ts, ts, duration_s, lenses_json, decision, stem, reason, applied_seq, int(id_)))
+    conn.commit()
+
+
+def update_panel(conn: sqlite3.Connection, id_: int, *, ts: str, **fields) -> None:
+    allowed = {"stem", "lenses_json", "decision", "reason", "applied_seq", "runner_pid", "runner_ident",
+               "interjection_ids"}
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"unknown panel fields: {sorted(bad)}")
+    fields["updated_at"] = ts
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE panels SET {sets} WHERE id=?", [*fields.values(), int(id_)])
+    conn.commit()
+
+
+def get_panel(conn: sqlite3.Connection, id_: int) -> dict | None:
+    return _row(conn.execute("SELECT * FROM panels WHERE id=?", (int(id_),)))
+
+
+def panels_for_event(conn: sqlite3.Connection, event_key: str) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM panels WHERE event_key=? ORDER BY attempt, id", (event_key,)))
+
+
+def decided_panel_for_event(conn: sqlite3.Connection, event_key: str) -> dict | None:
+    return _row(conn.execute("SELECT * FROM panels WHERE event_key=? AND status IN ('merged','fallback') "
+                             "ORDER BY id DESC LIMIT 1", (event_key,)))
+
+
+def panels_for_cycle(conn: sqlite3.Connection, phase: str, cycle_type: str) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM panels WHERE phase=? AND type=? ORDER BY id", (phase, cycle_type)))
+
+
+def last_panel(conn: sqlite3.Connection, phase: str, cycle_type: str) -> dict | None:
+    return _row(conn.execute("SELECT * FROM panels WHERE phase=? AND type=? ORDER BY id DESC LIMIT 1", (phase, cycle_type)))
+
+
+def running_panels(conn: sqlite3.Connection) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM panels WHERE status='running' ORDER BY id"))
+
+
+def unfinished_panels(conn: sqlite3.Connection) -> list[dict]:
+    return _rows(conn.execute("SELECT * FROM panels WHERE status IN ('running','abandoned','error') ORDER BY id"))
 
 
 def snapshot_non_file_backed(conn: sqlite3.Connection) -> dict[str, list[tuple]]:

@@ -509,6 +509,20 @@ def get_briefer_spec(config: dict) -> dict:
 # Phase 38: gatekeeper (deterministic pre-checks before the reviewer's turn)
 # ---------------------------------------------------------------------------
 
+def _norm_on_key(block):
+    """PyYAML (YAML 1.1) parses a bare `on:` key as boolean True. Both the
+    gatekeeper and the panel blocks use `on: [plan|impl]`, so accept the
+    boolean-key spelling (and the explicit alias `cycles:`) as `on`."""
+    if not isinstance(block, dict):
+        return block
+    out = {}
+    for k, v in block.items():
+        if k is True or k == "cycles":
+            k = "on"
+        out[k] = v
+    return out
+
+
 GATEKEEPER_KEYS = {"enabled", "on", "tests", "scope", "max_bounces", "max_output_chars"}
 GATEKEEPER_TESTS_KEYS = {"command", "timeout_minutes"}
 GATEKEEPER_DEFAULTS = {
@@ -527,6 +541,7 @@ def validate_gatekeeper_config(config: dict) -> list[str]:
     errors: list[str] = []
     if not isinstance(block, dict):
         return ["'gatekeeper' must be a mapping"]
+    block = _norm_on_key(block)
     enabled = block.get("enabled")
     if enabled is not None and not isinstance(enabled, bool):
         errors.append("'gatekeeper.enabled' must be true or false")
@@ -572,7 +587,7 @@ def get_gatekeeper_spec(config: dict) -> dict:
     "max_bounces", "max_output_chars"}. `enabled` is True only when
     `gatekeeper.enabled: true` is explicit. Callers validate first."""
     block = config.get("gatekeeper") if isinstance(config, dict) else None
-    block = block if isinstance(block, dict) else {}
+    block = _norm_on_key(block) if isinstance(block, dict) else {}
     tests = block.get("tests") if isinstance(block.get("tests"), dict) else {}
     tmo = tests.get("timeout_minutes")
     return {
@@ -583,4 +598,100 @@ def get_gatekeeper_spec(config: dict) -> dict:
         "scope": block.get("scope") if block.get("scope") is not None else GATEKEEPER_DEFAULTS["scope"],
         "max_bounces": int(block.get("max_bounces") if block.get("max_bounces") is not None else GATEKEEPER_DEFAULTS["max_bounces"]),
         "max_output_chars": int(block.get("max_output_chars") if block.get("max_output_chars") is not None else GATEKEEPER_DEFAULTS["max_output_chars"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 39: reviewer panels (opt-in)
+# ---------------------------------------------------------------------------
+
+PANEL_KEYS = {"enabled", "on", "phases", "lenses"}
+PANEL_LENS_KEYS = {"name", "brief"}
+PANEL_DEFAULT_LENSES = ["correctness", "scope", "verification"]
+PANEL_MIN_LENSES, PANEL_MAX_LENSES = 2, 3
+_LENS_NAME_RE = r"^[a-z][a-z0-9_-]{0,31}$"
+
+
+def _lens_entries(block: dict) -> list[dict] | None:
+    """Normalise `panel.lenses` to [{name, brief|None}] or None if invalid."""
+    import re
+    lenses = block.get("lenses")
+    if lenses is None:
+        return [{"name": n, "brief": None} for n in PANEL_DEFAULT_LENSES]
+    if not isinstance(lenses, list):
+        return None
+    out = []
+    for item in lenses:
+        if isinstance(item, str):
+            out.append({"name": item, "brief": None})
+        elif isinstance(item, dict):
+            out.append({"name": item.get("name"), "brief": item.get("brief")})
+        else:
+            return None
+    for e in out:
+        if not isinstance(e["name"], str) or not re.match(_LENS_NAME_RE, e["name"]):
+            return None
+    return out
+
+
+def validate_panel_config(config: dict) -> list[str]:
+    """Return problems with the `panel:` block (empty when absent/valid)."""
+    if not isinstance(config, dict):
+        return []
+    block = config.get("panel")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return ["'panel' must be a mapping"]
+    block = _norm_on_key(block)
+    errors: list[str] = []
+    enabled = block.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append("'panel.enabled' must be true or false")
+    on = block.get("on")
+    if on is not None:
+        if not isinstance(on, list) or not all(isinstance(t, str) for t in on):
+            errors.append("'panel.on' must be a list of cycle types (plan, impl)")
+        elif any(t not in ("plan", "impl") for t in on):
+            errors.append("'panel.on' entries must be plan or impl")
+    phases = block.get("phases")
+    if phases is not None and (not isinstance(phases, list) or not all(isinstance(p, str) and p for p in phases)):
+        errors.append("'panel.phases' must be a list of phase slugs")
+    lenses = block.get("lenses")
+    if lenses is not None:
+        entries = _lens_entries(block)
+        if entries is None:
+            errors.append("'panel.lenses' must be a list of lens names or {name, brief} mappings "
+                          "(names: lowercase letters, digits, - or _)")
+        else:
+            names = [e["name"] for e in entries]
+            if not (PANEL_MIN_LENSES <= len(names) <= PANEL_MAX_LENSES):
+                errors.append(f"'panel.lenses' must list {PANEL_MIN_LENSES}–{PANEL_MAX_LENSES} lenses (got {len(names)})")
+            if len(set(names)) != len(names):
+                errors.append("'panel.lenses' names must be unique")
+            for item in lenses:
+                if isinstance(item, dict):
+                    unknown = set(item) - PANEL_LENS_KEYS
+                    if unknown:
+                        errors.append(f"'panel.lenses' entry has unknown keys: {sorted(unknown)}")
+                    brief = item.get("brief")
+                    if brief is not None and (not isinstance(brief, str) or not brief.strip()):
+                        errors.append("'panel.lenses[].brief' must be a non-empty path")
+    unknown = set(block) - PANEL_KEYS
+    if unknown:
+        errors.append(f"'panel' has unknown keys: {sorted(unknown)}")
+    return errors
+
+
+def get_panel_spec(config: dict) -> dict:
+    """{"enabled", "on", "phases", "lenses": [{name, brief}]}. `enabled` is
+    True only when `panel.enabled: true` is explicit. Callers validate first."""
+    block = config.get("panel") if isinstance(config, dict) else None
+    block = _norm_on_key(block) if isinstance(block, dict) else {}
+    lenses = _lens_entries(block) or [{"name": n, "brief": None} for n in PANEL_DEFAULT_LENSES]
+    return {
+        "enabled": block.get("enabled") is True,
+        "on": list(block.get("on") or ["impl"]),
+        "phases": list(block.get("phases") or []),
+        "lenses": lenses,
     }

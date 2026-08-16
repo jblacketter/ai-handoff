@@ -420,10 +420,40 @@ def init_cycle(phase: str, cycle_type: str, lead: str, reviewer: str,
 RULING_PREFIX = "[ARBITER RULING by "
 
 
+# Phase 39: keys a round entry owns — `add_round(meta=)` may add keys,
+# never these.
+ENTRY_RESERVED_KEYS = frozenset({"round", "role", "action", "content", "ts", "updated_by", "summary"})
+
+
+def _validate_entry_meta(meta: dict | None, updated_by: str | None) -> dict | None:
+    """Phase 39: validate `add_round(meta=)` BEFORE any lock/write.
+    Returns the meta to merge (None when absent/empty)."""
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        raise ValueError("add_round meta must be a dict")
+    if not meta:
+        return None
+    bad_keys = [k for k in meta if not isinstance(k, str)]
+    if bad_keys:
+        raise ValueError(f"add_round meta keys must be strings: {bad_keys!r}")
+    reserved = sorted(k for k in meta if k in ENTRY_RESERVED_KEYS)
+    if reserved:
+        raise ValueError(f"add_round meta cannot set reserved entry keys: {reserved}")
+    try:
+        json.dumps(meta)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"add_round meta must be JSON-serialisable: {e}")
+    if not updated_by or not str(updated_by).strip():
+        raise ValueError("add_round meta requires an explicit updated_by (entry-level attribution)")
+    return dict(meta)
+
+
 def add_round(phase: str, cycle_type: str, role: str, action: str,
               round_num: int, content: str, project_dir: str = ".",
               updated_by: str | None = None, *,
-              _skip_stale_gate: bool = False) -> dict:
+              _skip_stale_gate: bool = False,
+              meta: dict | None = None) -> dict:
     """Append a round entry to the JSONL log, update cycle status,
     and derive handoff-state.json from the new cycle status.
 
@@ -431,6 +461,15 @@ def add_round(phase: str, cycle_type: str, role: str, action: str,
     status (`lead` field for role=lead, `reviewer` field for
     role=reviewer). This keeps the top-level state in sync even when
     a caller forgets to pass `--updated-by`.
+
+    Phase 39 — `meta` (in-process satellites only, not the CLI): extra
+    JSON keys merged into the entry atomically with the transition (e.g.
+    the panel's `panel_event` / `panel_id` / `panel_lenses`). Reserved
+    keys (`ENTRY_RESERVED_KEYS`) are rejected before the lock; a
+    non-empty `meta` REQUIRES an explicit `updated_by`, which is written
+    into the entry (`entry["updated_by"]`) so entry-level and state-level
+    attribution are the same string. `meta=None` writes are byte-identical
+    to before (no `updated_by` key on the entry). Not honoured by AMEND.
     """
     from tagteam import dualwrite
 
@@ -438,6 +477,9 @@ def add_round(phase: str, cycle_type: str, role: str, action: str,
         raise ValueError(f"Invalid action: {action}. Must be one of: {', '.join(sorted(VALID_ACTIONS))}")
     if role not in VALID_ROLES:
         raise ValueError(f"Invalid role: {role}. Must be one of: {', '.join(sorted(VALID_ROLES))}")
+    meta = _validate_entry_meta(meta, updated_by)
+    if meta is not None and action == "AMEND":
+        raise ValueError("add_round meta is not supported for AMEND")
 
     project_dir = _resolve(project_dir)
     now = datetime.now(timezone.utc).isoformat()
@@ -483,6 +525,11 @@ def add_round(phase: str, cycle_type: str, role: str, action: str,
         "content": content,
         "ts": now,
     }
+    if meta is not None:
+        # entry-level attribution first (reserved, from the argument), then
+        # the satellite's keys — validated above, none of them reserved
+        entry["updated_by"] = str(updated_by).strip()
+        entry.update(meta)
 
     # Append to JSONL
     rp = _rounds_path(phase, cycle_type, project_dir)

@@ -163,6 +163,56 @@ tagteam gate list             # every gate row for the cycle
 
 Without a watcher (manual backend) the gate does not fire on its own — `tagteam gate run` is the substitute, and the SKILL tells the lead to run `tagteam gate check` before submitting. Full test output beyond the entry's tail: `.tagteam/gates/<phase>_<type>_r<N>_gate_<ts>_a<attempt>.log`. The cockpit shows a **gate** chip in the Now strip (`gate ✓ r3` / `gate ↩ r3`) and gate entries in the Feed; a bounce is the lead's problem, not yours — Needs-you is unchanged.
 
+<a id="panels"></a>
+## Reviewer panels (opt-in, 3.3)
+
+A single reviewer turn tends to lead with whatever it notices first and under-weight the other axes — correctness in round 1, scope in round 2, "was this verified?" in round 3, each costing a full lead round. The **panel** takes the reviewer's turn as 2–3 independent **lens** reviews run against the *same* submission and merges their verdicts deterministically into **exactly one** reviewer entry.
+
+```yaml
+# tagteam.yaml
+panel:
+  enabled: true                       # opt-in; absent = off (3.2 behaviour, byte-identical)
+  on: [impl]                          # cycle types paneled (plan | impl); `cycles:` is an accepted alias
+  phases: []                          # optional allowlist of phase slugs; empty = every phase
+  lenses: [correctness, scope, verification]   # 2–3 names (built-in briefs) or {name, brief: path}
+  # provider / executable / args / timeout_minutes come from agents.reviewer.headless —
+  # the reviewer must validate for headless turns
+```
+
+Each lens is one fresh reviewer process (`claude -p` / `codex exec`, the reviewer's headless spec, project cwd, same tools as a headless turn) given a **brief** for its axis (`tagteam/data/panels/<lens>.md`; override per project at `.tagteam/panels/lenses/<lens>.md` or point `lenses[].brief` at a file), the plan, the round tail, the pending arbiter notes for the reviewer, the gate's report if it ran, and a fixed **panel contract**: do not write the cycle; write `verdict.json` — `{"verdict": APPROVE|REQUEST_CHANGES|ESCALATE|NEED_HUMAN, "summary", "findings": [{title, detail, where, severity: blocker|major|minor}], "question"}` — with rules (`REQUEST_CHANGES` needs a blocker/major, `APPROVE` may carry only minors, `NEED_HUMAN` needs a `question`, `ESCALATE` a reason). Non-conforming → that lens **failed**. Lenses run **sequentially** (one turn slot; N× wall clock, still one round). `tagteam panel preview --lens L` prints the exact prompt without spawning.
+
+| ok lenses | failed lenses | panel decision |
+|---|---|---|
+| all APPROVE | none | **APPROVE** — one line per lens; minors carried as notes |
+| ≥1 REQUEST_CHANGES | any | **REQUEST_CHANGES** — findings grouped by lens (configured order), blockers first; failed lenses named "not assessed" |
+| ≥1 ESCALATE / NEED_HUMAN | any | that action; the asking lens's question/reason first |
+| all APPROVE | some | **fallback** — no decision; the ordinary reviewer turn is dispatched (never a partial approval) |
+| — | all | **fallback** + WARN |
+
+Precedence `NEED_HUMAN > ESCALATE > REQUEST_CHANGES > APPROVE`; ties in configured lens order. The merged entry is an **ordinary reviewer entry** written through the same call a human's `tagteam cycle add` uses (`updated_by: "<Reviewer> panel"`, plus `panel_event` / `panel_id` / `panel_lenses` / `panel_interjections` keys for recovery), so the SKILL banner, stale-round auto-escalation, the briefer, `verify_transition` and the cockpit feed need nothing new:
+
+```
+PANEL: REQUEST_CHANGES — correctness: APPROVE | scope: REQUEST_CHANGES (1 blocker) | verification: REQUEST_CHANGES (1 major)
+## scope
+1. [blocker] docs/how-tagteam-works.md not updated — the plan lists it (Files)
+## verification
+1. [major] no test for the timeout path — plan criterion 4
+## correctness — approved
+no findings
+```
+
+**Where it runs.** At the watcher's reviewer seam in every mode, **after** the gate (a gate BOUNCE means no reviewer turn at all; a PASS-with-findings still runs the panel and the `verification` lens sees the gate's failure tail). Merged → the reviewer is not dispatched (the entry *is* the turn; in headless mode `run_owed_turn` is skipped for that submission, interactive reviewers' terminals stay idle); fallback → the ordinary hand-off in the same tick. Without a watcher, `tagteam panel run`. At-most-once per submission via a `panels` claim row (schema v9; the same `_claim_satellite` rule as the gate — at most 2 *failed* attempts, superseded never counts, then a decided `fallback` so the loop never stalls); the decision is applied under the writer lock only if the submission is still exactly the one the lenses saw (seq, round, round-log length) and no entry for that `panel_event` exists. A lens that writes to the cycle itself is detected (round log / seq changed) → lens failed, panel superseded, its write stands as the reviewer's entry (logged loudly). Arbiter notes for the reviewer are snapshotted **once per attempt**, rendered identically to every lens, and stamped delivered only when the panel merges — a fallback or superseded panel leaves them for the ordinary reviewer.
+
+```bash
+tagteam panel run              # decide now (manual mode / no watcher; same at-most-once path)
+tagteam panel status [--json]  # last panel: lens outcomes, decision, files under .tagteam/panels/<stem>/
+tagteam panel list             # every panel row for the cycle
+tagteam panel lenses           # resolved lenses + which brief file each uses (built-in / override / config)
+tagteam panel preview --lens L # the exact prompt lens L would get (spawns nothing)
+```
+
+Each lens's tokens are recorded in `tagteam usage` as role `reviewer`, kind `panel:<lens>`.
+
 <a id="cockpit"></a>
 ## The Cockpit
 
@@ -243,13 +293,15 @@ tagteam serve --theme saloon --dir ~/projects/myproject     # legacy Saloon
 
 | path | who writes it | what it is |
 |---|---|---|
-| `tagteam.yaml` | `tagteam init` (you edit it) | agents, headless options, `briefer`, `gatekeeper`, `serve.theme` |
+| `tagteam.yaml` | `tagteam init` (you edit it) | agents, headless options, `briefer`, `gatekeeper`, `panel`, `serve.theme` |
 | `handoff-state.json` | `tagteam cycle …`, `tagteam rule …`, the watcher | whose turn, which phase/type/round, status, history |
 | `handoff-diagnostics.jsonl` | state/cycle writers | diagnostics when a write is skipped or out of sequence |
 | `docs/handoffs/<phase>_<type>_rounds.jsonl` / `_status.json` | `tagteam cycle init` / `add`, rulings | the canonical per-cycle round log and its status (append-only rounds) |
 | `docs/handoffs/<phase>_<type>.md` | auto-export (`TAGTEAM_STEP_B=1`) | a rendered read-only view of the cycle |
-| `.tagteam/tagteam.db` | every writer (shadow) | SQLite mirror of state/rounds plus usage, interjections, briefs, rate limits, gates |
+| `.tagteam/tagteam.db` | every writer (shadow) | SQLite mirror of state/rounds plus usage, interjections, briefs, rate limits, gates, panels |
 | `.tagteam/gates/<phase>_<type>_r<N>_gate_<ts>_a<attempt>.log` | the gatekeeper | one gate attempt's full test output and decision |
+| `.tagteam/panels/<phase>_<type>_r<N>_panel_<ts>_a<attempt>/<lens>.{prompt,log,events.jsonl,verdict.json}` | the reviewer panel | one panel attempt: each lens's exact prompt, log, raw event stream and verdict |
+| `.tagteam/panels/lenses/<lens>.md` | you (optional) | per-project override of a built-in lens brief |
 | `.tagteam/turns/<phase>_<type>_r<N>_<role>_<ts>.log` / `.events.jsonl` | headless watcher | one headless turn's human-readable log and raw event stream |
 | `.tagteam/headless-paused.json` | headless watcher, `tagteam pause` | the hold marker (reason, log path); delete or `tagteam resume` to continue |
 | `.tagteam/watcher.json` | `tagteam watch --pidfile` / `serve.theme: cockpit` / the cockpit's Start | identity-checked watcher pidfile for the cockpit's liveness chip and Stop button |

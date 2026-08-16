@@ -19,6 +19,11 @@ Behaviour is driven by environment variables:
                         {"cycle_add": true}             perform the owed transition
   FAKE_AGENT_FAIL_TIMES / FAKE_AGENT_COUNTER  in `flaky` mode: exit 3 for the
                       first N invocations (counter file), then behave like `ok`
+  panel mode (Phase 39): `panel` acts as one lens — FAKE_PANEL_VERDICTS
+                      (JSON {lens: behaviour}) / FAKE_PANEL_VERDICT: approve |
+                      request-changes | escalate | need-human | need-human-noq |
+                      no-file | bad-json | bad-shape | rogue | hang | nonzero |
+                      approve-with-blocker
   brief modes (Phase 33): `brief` writes the file named in the prompt's
                       === OUTPUT PATH === block with the five headings;
                       `brief_partial` writes three headings; `brief_nofile`
@@ -186,6 +191,76 @@ def main() -> int:
                                                        "cached_input_tokens": 0,
                                                        "cache_write_input_tokens": 0}})
         return 0
+
+    if mode == "panel":
+        # Phase 39 lens turn: FAKE_PANEL_VERDICTS = JSON {lens: behaviour}
+        # (or FAKE_PANEL_VERDICT for every lens): approve | request-changes |
+        # escalate | need-human | need-human-noq | no-file | bad-json |
+        # bad-shape | rogue | hang | nonzero | approve-with-blocker.
+        lens = os.environ.get("TAGTEAM_PANEL_LENS", "?")
+        try:
+            table = json.loads(os.environ.get("FAKE_PANEL_VERDICTS") or "{}")
+        except ValueError:
+            table = {}
+        beh = table.get(lens) or os.environ.get("FAKE_PANEL_VERDICT", "approve")
+        vpath = None
+        marker = "WRITE your verdict as JSON to exactly this path and stop:"
+        if marker in prompt:
+            for line in prompt.split(marker, 1)[1].splitlines()[1:4]:
+                if line.strip():
+                    vpath = line.strip()
+                    break
+        if beh == "hang":
+            time.sleep(600)
+            return 0
+        if beh == "rogue":
+            # a misbehaving lens that writes the cycle itself
+            subprocess.run([sys.executable, "-m", "tagteam", "cycle", "add", "--phase", state.get("phase", "?"),
+                            "--type", state.get("type", "impl"), "--role", "reviewer", "--action", "REQUEST_CHANGES",
+                            "--round", str(state.get("round", 1)), "--updated-by", "rogue-lens",
+                            "--content", "rogue lens wrote this"], check=False, capture_output=True)
+        elif vpath and beh != "no-file":
+            os.makedirs(os.path.dirname(vpath) or ".", exist_ok=True)
+            if beh == "bad-json":
+                body = "{not json"
+            else:
+                sev_finding = [{"title": f"{lens} finding", "detail": f"detail from {lens}", "where": "src.py:1",
+                                "severity": "blocker" if lens == "correctness" else "major"}]
+                minor = [{"title": f"{lens} nit", "detail": "polish", "severity": "minor"}]
+                if beh == "approve":
+                    d = {"verdict": "APPROVE", "summary": f"{lens} looks good", "findings": minor}
+                elif beh == "approve-with-blocker":
+                    d = {"verdict": "APPROVE", "summary": "oops", "findings": sev_finding}
+                elif beh == "request-changes":
+                    d = {"verdict": "REQUEST_CHANGES", "summary": f"{lens} objects", "findings": sev_finding + minor}
+                elif beh == "escalate":
+                    d = {"verdict": "ESCALATE", "summary": f"{lens} cannot decide: needs the arbiter", "findings": []}
+                elif beh == "need-human":
+                    d = {"verdict": "NEED_HUMAN", "summary": f"{lens} question", "findings": [],
+                         "question": f"{lens}: which behaviour did you intend?"}
+                elif beh == "need-human-noq":
+                    d = {"verdict": "NEED_HUMAN", "summary": "no question", "findings": []}
+                elif beh == "bad-shape":
+                    d = {"verdict": "MAYBE"}
+                else:
+                    d = {"verdict": "APPROVE", "summary": "default", "findings": []}
+                body = json.dumps(d)
+            with open(vpath, "w", encoding="utf-8") as f:
+                f.write(body)
+        _emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "DONE"}]}}
+              if flavor == "claude" else
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "DONE"}})
+        _sleep()
+        if flavor == "claude":
+            _emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                   "session_id": f"fake-lens-{lens}", "total_cost_usd": 0.01,
+                   "usage": {"input_tokens": 70, "output_tokens": 30,
+                             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                   "result": "DONE"})
+        else:
+            _emit({"type": "turn.completed", "usage": {"input_tokens": 70, "output_tokens": 30,
+                                                       "cached_input_tokens": 0, "cache_write_input_tokens": 0}})
+        return 3 if beh == "nonzero" else 0
 
     if mode.startswith("brief"):
         out_path = None
