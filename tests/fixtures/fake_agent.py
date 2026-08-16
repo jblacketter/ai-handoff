@@ -126,6 +126,12 @@ def main() -> int:
     if flavor == "claude":
         _emit({"type": "system", "subtype": "init", "session_id": "fake-sess",
                "model": "fake-model", "permissionMode": "acceptEdits", "tools": []})
+        # Phase 34: the real CLI emits a rate-limit frame; the engine records
+        # the latest per kind into `rate_limits`.
+        _emit({"type": "rate_limit_event",
+               "rate_limit_info": {"status": "allowed", "resetsAt": 1786785000,
+                                   "rateLimitType": "five_hour",
+                                   "overageStatus": "allowed", "isUsingOverage": False}})
     else:
         _emit({"type": "thread.started", "thread_id": "fake-thread"})
     _sleep()

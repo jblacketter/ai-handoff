@@ -537,6 +537,72 @@ def _usage_claude(events: list[dict]) -> dict | None:
     }
 
 
+def parse_rate_limits(provider: str, event_lines: list[str]) -> list[dict]:
+    """Phase 34: the LATEST `rate_limit_event` per kind in a Claude stream
+    (`{"type":"rate_limit_event","rate_limit_info":{status, resetsAt,
+    rateLimitType, ...}}`). Returns `[{kind, status, resets_at, payload}]`
+    with `resets_at` as ISO-8601 UTC (or None). Codex emits no equivalent →
+    `[]`. Never raises."""
+    if provider != "claude":
+        return []
+    latest: dict[str, dict] = {}
+    for line in event_lines:
+        line = line.strip()
+        if not line or "rate_limit" not in line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "rate_limit_event":
+            continue
+        info = ev.get("rate_limit_info")
+        if not isinstance(info, dict):
+            continue
+        kind = str(info.get("rateLimitType") or "unknown")
+        resets = info.get("resetsAt")
+        resets_iso = None
+        if isinstance(resets, (int, float)) and resets > 0:
+            try:
+                resets_iso = datetime.fromtimestamp(float(resets), tz=timezone.utc).isoformat()
+            except (OverflowError, OSError, ValueError):
+                resets_iso = None
+        elif isinstance(resets, str) and resets:
+            resets_iso = resets
+        latest[kind] = {"kind": kind, "status": info.get("status"),
+                        "resets_at": resets_iso, "payload": info}
+    return list(latest.values())
+
+
+def record_rate_limits(project_root: str | Path, provider: str,
+                       event_lines: list[str], log=None) -> int:
+    """Upsert the latest rate-limit signal(s) from a turn's event stream
+    into `rate_limits`. Best-effort: never raises; returns rows written."""
+    signals = parse_rate_limits(provider, event_lines)
+    if not signals:
+        return 0
+    try:
+        from tagteam import db
+        conn = db.connect(project_dir=str(project_root))
+    except Exception as e:
+        if log:
+            log(f"   headless: could not open DB for rate-limit signal: {e}")
+        return 0
+    n = 0
+    try:
+        for sig in signals:
+            db.upsert_rate_limit(conn, provider=provider, kind=sig["kind"],
+                                 status=sig["status"], resets_at=sig["resets_at"],
+                                 payload=sig["payload"], ts=_now_iso())
+            n += 1
+    except Exception as e:
+        if log:
+            log(f"   headless: rate-limit row failed: {e}")
+    finally:
+        conn.close()
+    return n
+
+
 def _usage_codex(events: list[dict]) -> dict | None:
     thread_id = None
     last_usage = None
@@ -1361,6 +1427,7 @@ class HeadlessEngine:
             lines = []
         usage = parse_usage(spec.provider, lines)
         row_id = self._record_usage(ident, spec, outcome, out, usage, log_path)
+        record_rate_limits(self.project_root, spec.provider, lines, log=self._log)
 
         # Interjection delivery: exactly the rendered ids, only on ok.
         if outcome == OUTCOME_OK and note_ids:

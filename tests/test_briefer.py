@@ -700,7 +700,8 @@ class TestRule:
 class TestRepairAndSchema:
     def test_schema_v5(self, tmp_path):
         c = db.connect(project_dir=str(tmp_path))
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 5
+        # v5 objects are present (Phase 34 bumped user_version to 6, additively).
+        assert c.execute("PRAGMA user_version").fetchone()[0] >= 5
         assert c.execute("SELECT name FROM sqlite_master WHERE name='uq_briefs_auto'").fetchone()
         assert c.execute("SELECT name FROM sqlite_master WHERE name='uq_briefs_running'").fetchone()
         with pytest.raises(ValueError):
@@ -800,3 +801,29 @@ class TestWatcherTrigger:
                                         project_dir=str(project), max_retries=1,
                                         retry_delay=0, pre_send_delay=0)
         assert proc is not None and proc.briefer is None
+
+    def test_repair_preserves_rate_limits(self, project, fake_path, monkeypatch):
+        """Phase 34: `rate_limits` is non-file-backed and survives a rebuild."""
+        _enable(project)
+        _escalate(project)
+        monkeypatch.setenv("FAKE_AGENT_MODE", "brief")
+        r = _run(project); assert r.status == "ok"        # claude fake emits the five_hour frame
+        conn = db.connect(project_dir=str(project))
+        try:
+            before = db.latest_rate_limits(conn)
+            db.upsert_rate_limit(conn, provider="claude", kind="seven_day", status="allowed",
+                                 resets_at=None, payload={"k": 1}, ts="t")
+            before = db.latest_rate_limits(conn)
+        finally:
+            conn.close()
+        assert [x["kind"] for x in before] == ["five_hour", "seven_day"]
+        res = repair.rebuild_db_from_files_and_verify(project)
+        assert res["success"], res
+        res["conn"].close()
+        conn = db.connect(project_dir=str(project))
+        try:
+            after = db.latest_rate_limits(conn)
+        finally:
+            conn.close()
+        assert [(x["id"], x["kind"], x["status"], x["resets_at"], x["payload"]) for x in after] == \
+            [(x["id"], x["kind"], x["status"], x["resets_at"], x["payload"]) for x in before]

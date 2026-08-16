@@ -5,7 +5,7 @@
 - [x] In Review
 - [x] Approved (round 2; reviewer turns headless)
 - [x] UX review round (round 3 — IA/feedback revisions to Scope 5; approved)
-- [ ] Implementation
+- [x] Implementation
 - [ ] Implementation Review
 - [ ] Complete
 

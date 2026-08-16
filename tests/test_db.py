@@ -732,3 +732,58 @@ class TestExportToFiles:
 
         assert report["state_written"] is False
         assert not (out_dir / "handoff-state.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Schema v6 (Phase 34): rate_limits
+# ---------------------------------------------------------------------------
+
+class TestSchemaV6RateLimits:
+    def test_v6_additive_and_in_non_file_backed(self, tmp_path):
+        c = db.connect(project_dir=str(tmp_path))
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 6 == db.SCHEMA_VERSION
+        assert c.execute("SELECT name FROM sqlite_master WHERE name='rate_limits'").fetchone()
+        assert "rate_limits" in db.NON_FILE_BACKED_TABLES
+        # v5 → v6 migration is additive (a v5 DB opens and gains the table)
+        import sqlite3
+        p5 = tmp_path / "v5" / ".tagteam" / "tagteam.db"; p5.parent.mkdir(parents=True)
+        raw = sqlite3.connect(p5)
+        for ddl in (db._SCHEMA_V1, db._SCHEMA_V3, db._SCHEMA_V4, db._SCHEMA_V5):
+            raw.executescript(ddl)
+        raw.execute("PRAGMA user_version = 5"); raw.commit(); raw.close()
+        c5 = db.connect(project_dir=str(tmp_path / "v5"))
+        assert c5.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert c5.execute("SELECT name FROM sqlite_master WHERE name='rate_limits'").fetchone()
+        c5.close(); c.close()
+
+    def test_upsert_and_latest(self, tmp_path):
+        c = db.connect(project_dir=str(tmp_path))
+        i1 = db.upsert_rate_limit(c, provider="claude", kind="five_hour", status="allowed",
+                                  resets_at="2026-08-15T18:00:00+00:00", payload={"a": 1}, ts="t1")
+        i2 = db.upsert_rate_limit(c, provider="claude", kind="five_hour", status="allowed_warning",
+                                  resets_at="2026-08-15T19:00:00+00:00", payload={"a": 2}, ts="t2")
+        assert i1 == i2                                       # one row per (provider, kind)
+        db.upsert_rate_limit(c, provider="claude", kind="seven_day", status="allowed",
+                             resets_at=None, payload=None, ts="t3")
+        rows = db.latest_rate_limits(c)
+        assert [(r["kind"], r["status"]) for r in rows] == [("five_hour", "allowed_warning"),
+                                                             ("seven_day", "allowed")]
+        assert rows[0]["payload"] == {"a": 2} and rows[0]["ts"] == "t2"
+        assert rows[1]["payload"] is None
+        assert db.latest_rate_limits(c, provider="codex") == []
+        with pytest.raises(ValueError):
+            db.upsert_rate_limit(c, provider="", kind="x", status=None, resets_at=None, payload=None, ts="t")
+        c.close()
+
+    def test_snapshot_restore_includes_rate_limits(self, tmp_path):
+        c = db.connect(project_dir=str(tmp_path))
+        db.upsert_rate_limit(c, provider="claude", kind="five_hour", status="allowed",
+                             resets_at="2026-08-15T18:00:00+00:00", payload={"a": 1}, ts="t1")
+        snap = db.snapshot_non_file_backed(c)
+        assert "rate_limits" in snap and len(snap["rate_limits"]) == 2  # header + 1 row
+        c.execute("DELETE FROM rate_limits"); c.commit()
+        assert db.latest_rate_limits(c) == []
+        counts = db.restore_non_file_backed(c, snap)
+        assert counts["rate_limits"] == 1
+        assert db.latest_rate_limits(c)[0]["status"] == "allowed"
+        c.close()

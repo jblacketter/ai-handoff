@@ -8,15 +8,31 @@ Usage:
     python -m tagteam serve                       # port 8080, current dir
     python -m tagteam serve --port 3000           # custom port
     python -m tagteam serve --dir ~/projects/foo  # explicit project dir
+    python -m tagteam serve --theme cockpit       # Phase 34 arbiter cockpit
+
+Modes (Phase 34): bare `tagteam serve` is **legacy** — the Saloon at `/`,
+bind all interfaces, no POST token, none of the cockpit endpoints routed
+(404) — byte-identical to 0.10.0. `--theme cockpit` (or `serve.theme:
+cockpit` in tagteam.yaml) is **cockpit mode**: the cockpit page at `/`
+(Saloon at `/?theme=saloon`), loopback bind by default (`--host` overrides),
+a per-run token required as `X-Tagteam-Token` on EVERY POST (Origin/Referer
+must match the server when present; no `*` CORS), and the cockpit read /
+action / SSE endpoints routed. The only change shared by both modes is the
+threading HTTP server.
 """
 
 import json
 import os
 import re
+import secrets
+import select
+import socket
 import subprocess
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import time
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from tagteam.config import read_config as _read_config_file, get_agent_names
 from tagteam.cycle import list_cycles, read_status as read_cycle_status, render_cycle
@@ -94,9 +110,58 @@ _CONTENT_TYPES = {
 }
 
 
-def _get_dashboard_html() -> bytes:
-    """Load the dashboard HTML from package data."""
-    return (_WEB_DIR / "index.html").read_bytes()
+MODES = ("legacy", "cockpit")
+THEMES = ("saloon", "cockpit")
+DEFAULT_MAX_SSE = 8
+SSE_INTERVAL_S = 1.0
+SSE_HEARTBEAT_S = 15.0
+_TOKEN_META = b'<meta name="tagteam-token" content="%s">'
+
+
+def _get_dashboard_html(theme: str = "saloon", token: str | None = None) -> bytes:
+    """Load a dashboard page from package data. `theme` selects the Saloon
+    (`index.html`) or the cockpit (`cockpit.html`); when `token` is given
+    (cockpit mode) a `<meta name="tagteam-token">` is injected after the
+    charset meta so the page's JS can send `X-Tagteam-Token`. Legacy mode
+    calls this with defaults and gets `index.html` verbatim."""
+    name = "cockpit.html" if theme == "cockpit" else "index.html"
+    html = (_WEB_DIR / name).read_bytes()
+    if token:
+        marker = b'<meta charset="UTF-8">'
+        meta = _TOKEN_META % token.encode("ascii")
+        if marker in html:
+            html = html.replace(marker, marker + b"\n" + meta, 1)
+        else:
+            html = html.replace(b"<head>", b"<head>\n" + meta, 1)
+    return html
+
+
+def new_token() -> str:
+    """Per-run write token (32 random bytes, hex)."""
+    return secrets.token_hex(32)
+
+
+class TagteamHTTPServer(ThreadingHTTPServer):
+    """Threaded server (both modes) with a stop event the SSE loops watch."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.stop_event = threading.Event()
+
+    def stop(self) -> None:
+        """Signal SSE loops, stop serve_forever, close the socket."""
+        self.stop_event.set()
+        try:
+            self.shutdown()
+        except Exception:
+            pass
+        self.server_close()
+
+    def server_close(self):
+        self.stop_event.set()
+        super().server_close()
 
 
 def _get_static_file(filename: str) -> tuple[bytes, str] | None:
@@ -341,16 +406,40 @@ def _validate_state_post(updates: dict) -> str | None:
     return None
 
 
-def make_handler(project_dir: str):
-    """Create a request handler class bound to a specific project directory."""
+def make_handler(project_dir: str, *, mode: str = "legacy", token: str | None = None,
+                 max_sse: int = DEFAULT_MAX_SSE, sse_interval: float = SSE_INTERVAL_S,
+                 sse_heartbeat: float = SSE_HEARTBEAT_S):
+    """Create a request handler class bound to a specific project directory.
+
+    `mode="legacy"` (default) is 0.10.0-identical. `mode="cockpit"` routes
+    the Phase 34 endpoints, requires `token` on every POST, drops the `*`
+    CORS header (the page embeds the token — a wildcard would let any
+    origin read it), and serves the cockpit page at `/`.
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    cockpit = (mode == "cockpit")
+    if cockpit and not token:
+        token = new_token()
+    sse_lock = threading.Lock()
+    sse_state = {"active": 0}
 
     class HandoffHandler(BaseHTTPRequestHandler):
+
+        # Exposed for tests / the serve banner.
+        MODE = mode
+        TOKEN = token
+        MAX_SSE = max_sse
+
+        def _cors(self):
+            if not cockpit:
+                self.send_header("Access-Control-Allow-Origin", "*")
 
         def _send_json(self, data, status=200):
             body = json.dumps(data, indent=2).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._cors()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -359,7 +448,7 @@ def make_handler(project_dir: str):
             body = text.encode()
             self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._cors()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -367,7 +456,9 @@ def make_handler(project_dir: str):
         def _send_html(self, html_bytes, status=200):
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._cors()
+            if cockpit:
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(html_bytes)))
             self.end_headers()
             self.wfile.write(html_bytes)
@@ -375,20 +466,193 @@ def make_handler(project_dir: str):
         def _send_404(self, msg="Not found"):
             self._send_json({"error": msg}, 404)
 
+        def _read_json_body(self):
+            """(data, error). Mirrors the legacy per-route parsing."""
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length else b""
+                data = json.loads(body) if body else {}
+            except (json.JSONDecodeError, ValueError):
+                return None, "Invalid JSON"
+            if not isinstance(data, dict):
+                return None, "Expected JSON object"
+            return data, None
+
+        def _check_write_auth(self) -> str | None:
+            """Cockpit mode: every POST needs the per-run token and, when an
+            Origin/Referer is present, it must name this server. Returns the
+            rejection reason or None."""
+            if not cockpit:
+                return None
+            supplied = self.headers.get("X-Tagteam-Token") or ""
+            if not supplied or not secrets.compare_digest(supplied, token):
+                return "Missing or invalid X-Tagteam-Token (reload the page to get the current token)"
+            origin = self.headers.get("Origin") or self.headers.get("Referer")
+            if origin:
+                host = (self.headers.get("Host") or "").strip()
+                netloc = urlparse(origin).netloc
+                if not host or netloc != host:
+                    return f"Origin {netloc!r} does not match this server ({host!r})"
+            return None
+
         def do_OPTIONS(self):
             """Handle CORS preflight."""
             self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._cors()
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers",
+                             "Content-Type, X-Tagteam-Token" if cockpit else "Content-Type")
             self.end_headers()
+
+        # ---- Phase 34: cockpit read endpoints + SSE (routed only in cockpit mode)
+
+        def _qs(self, parsed):
+            qs = parse_qs(parsed.query or "")
+            return {k: v[0] for k, v in qs.items() if v}
+
+        def _cycle_from_qs(self, q):
+            phase, ctype = q.get("phase"), q.get("type")
+            if not phase or not ctype:
+                st = read_state(project_dir) or {}
+                phase = phase or st.get("phase")
+                ctype = ctype or st.get("type")
+            return phase, ctype
+
+        def _cockpit_get(self, parsed, path) -> bool:
+            """Handle a cockpit GET route. Returns False if not a cockpit path."""
+            from tagteam import cockpit_api as capi
+            q = self._qs(parsed)
+            try:
+                if path == "/api/now":
+                    self._send_json(capi.now_payload(project_dir))
+                elif path == "/api/interjections":
+                    phase, ctype = self._cycle_from_qs(q)
+                    self._send_json(capi.interjections_payload(project_dir, phase, ctype))
+                elif path == "/api/briefs":
+                    phase, ctype = self._cycle_from_qs(q)
+                    self._send_json(capi.briefs_payload(project_dir, phase, ctype))
+                elif path == "/api/brief/current":
+                    phase, ctype = self._cycle_from_qs(q)
+                    self._send_json(capi.brief_current_payload(project_dir, phase, ctype))
+                elif path.startswith("/api/brief/"):
+                    raw = path[len("/api/brief/"):]
+                    try:
+                        bid = int(raw)
+                    except ValueError:
+                        self._send_404(f"Brief not found: {raw}")
+                        return True
+                    row = capi.brief_payload(project_dir, bid)
+                    if row is None:
+                        self._send_404(f"Brief not found: {bid}")
+                    else:
+                        self._send_json(row)
+                elif path == "/api/usage":
+                    self._send_json(capi.usage_payload(project_dir, q.get("phase"),
+                                                       q.get("type"), q.get("role")))
+                elif path.startswith("/api/scope-diff/"):
+                    cycle_id = path[len("/api/scope-diff/"):]
+                    parts = cycle_id.rsplit("_", 1)
+                    if len(parts) != 2 or parts[1] not in ("plan", "impl"):
+                        self._send_json({"error": f"Bad cycle id: {cycle_id}"}, 400)
+                        return True
+                    self._send_json(capi.scope_diff_payload(project_dir, parts[0], parts[1]))
+                elif path == "/api/tail":
+                    try:
+                        n = int(q.get("lines") or capi.DEFAULT_TAIL_LINES)
+                    except ValueError:
+                        n = capi.DEFAULT_TAIL_LINES
+                    self._send_json(capi.tail_payload(project_dir, n, events=q.get("events") == "1"))
+                elif path == "/api/events":
+                    self._sse()
+                elif path == "/api/cockpit/info":
+                    self._send_json({"mode": mode, "max_sse": max_sse,
+                                     "sse_active": sse_state["active"],
+                                     "project_dir": project_dir})
+                else:
+                    return False
+            except Exception as exc:  # never a traceback to the browser
+                self.log_message("cockpit GET %s failed: %s", path, exc)
+                self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            return True
+
+        def _client_gone(self) -> bool:
+            """True once the peer closed the connection (EOF readable), so an
+            idle SSE loop releases its slot promptly instead of waiting for
+            the next write to fail."""
+            try:
+                r, _, _ = select.select([self.connection], [], [], 0)
+                if r:
+                    return self.connection.recv(1, socket.MSG_PEEK) == b""
+            except (OSError, ValueError):
+                return True
+            return False
+
+        def _sse(self):
+            from tagteam import cockpit_api as capi
+            with sse_lock:
+                if sse_state["active"] >= max_sse:
+                    self._send_json({"error": f"Too many live connections (max {max_sse}); "
+                                              "close another cockpit tab or raise --max-sse"}, 503)
+                    return
+                sse_state["active"] += 1
+            stop = getattr(self.server, "stop_event", None)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+
+                def frame(sig, sid):
+                    data = json.dumps(sig, default=str)
+                    self.wfile.write(f"id: {sid}\nevent: change\ndata: {data}\n\n".encode())
+                    self.wfile.flush()
+
+                sig = capi.events_signature(project_dir)
+                last_id = capi.signature_id(sig)
+                # `Last-Event-ID` is honored by (re)sending the current
+                # snapshot — which is what every new connection gets anyway.
+                frame(sig, last_id)
+                last_beat = time.monotonic()
+                while True:
+                    if stop is not None:
+                        if stop.wait(sse_interval):
+                            break
+                    else:
+                        time.sleep(sse_interval)
+                    if self._client_gone():
+                        break
+                    sig = capi.events_signature(project_dir)
+                    sid = capi.signature_id(sig)
+                    now = time.monotonic()
+                    if sid != last_id:
+                        frame(sig, sid)
+                        last_id = sid
+                        last_beat = now
+                    elif now - last_beat >= sse_heartbeat:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        last_beat = now
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                with sse_lock:
+                    sse_state["active"] -= 1
 
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
 
             if path == "/":
-                self._send_html(_get_dashboard_html())
+                if cockpit:
+                    theme = self._qs(parsed).get("theme", "cockpit")
+                    theme = "saloon" if theme == "saloon" else "cockpit"
+                    self._send_html(_get_dashboard_html(theme, token))
+                else:
+                    self._send_html(_get_dashboard_html())
+
+            elif cockpit and path.startswith("/api/") and self._cockpit_get(parsed, path):
+                pass
 
             elif path == "/api/state":
                 state = read_state(project_dir)
@@ -432,7 +696,16 @@ def make_handler(project_dir: str):
                 parts = cycle_id.rsplit("_", 1)
                 if len(parts) == 2:
                     phase, cycle_type = parts
-                    rounds = read_cycle_rounds(phase, cycle_type, project_dir)
+                    if cockpit:
+                        # Phase 34: additive `entries` / `rulings` /
+                        # `interjections` per round (same as `cycle rounds`).
+                        from tagteam.cycle import tail_rounds
+                        try:
+                            rounds = tail_rounds(phase, cycle_type, None, project_dir) or None
+                        except Exception:
+                            rounds = None
+                    else:
+                        rounds = read_cycle_rounds(phase, cycle_type, project_dir)
                 if rounds is None:
                     # Try legacy filename directly
                     filename = cycle_id if cycle_id.endswith(".md") else cycle_id + "_cycle.md"
@@ -500,9 +773,54 @@ def make_handler(project_dir: str):
             else:
                 self._send_404()
 
+        def _cockpit_post(self, path) -> bool:
+            """Phase 34 action endpoints (cockpit mode only). Each is a thin
+            wrapper over the CLI command function; `{ok, message, cli}` and
+            never a traceback. `{"dry_run": true}` returns the exact CLI
+            line without executing (used by confirmations)."""
+            from tagteam import cockpit_api as capi
+            actions = {
+                "/api/pause": "pause", "/api/resume": "resume",
+                "/api/interject": "interject", "/api/interject/retire": "interject/retire",
+                "/api/cancel-turn": "cancel-turn", "/api/brief/generate": "brief/generate",
+                "/api/rule": "rule",
+            }
+            action = actions.get(path)
+            if action is None:
+                return False
+            data, err = self._read_json_body()
+            if err:
+                self._send_json({"ok": False, "message": err}, 400)
+                return True
+            try:
+                if data.get("dry_run"):
+                    try:
+                        cli = capi.cli_preview(action, data)
+                    except ValueError as e:
+                        self._send_json({"ok": False, "message": str(e)}, 400)
+                        return True
+                    self._send_json({"ok": True, "message": "", "cli": cli, "dry_run": True})
+                    return True
+                res = capi.run_action(action, data, project_dir)
+            except Exception as exc:
+                self.log_message("cockpit POST %s failed: %s", path, exc)
+                self._send_json({"ok": False, "message": f"{type(exc).__name__}: {exc}"}, 500)
+                return True
+            status = 200 if res.get("ok") else (400 if res.get("rc") == 400 else 409)
+            self._send_json(res, status)
+            return True
+
         def do_POST(self):
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
+
+            if cockpit:
+                why = self._check_write_auth()
+                if why:
+                    self._send_json({"error": why, "ok": False}, 403)
+                    return
+                if self._cockpit_post(path):
+                    return
 
             if path == "/api/state":
                 try:
@@ -760,34 +1078,85 @@ def make_handler(project_dir: str):
     return HandoffHandler
 
 
-def serve_command(args: list[str]) -> int:
-    """Handle `python -m tagteam serve [--port N] [--dir PATH]`."""
-    port = 8080
-    project_dir = "."
+def _config_theme(project_dir: str) -> str | None:
+    """`serve.theme` from tagteam.yaml (the config gate), or None."""
+    cfg = _read_config(project_dir) or {}
+    serve = cfg.get("serve") if isinstance(cfg, dict) else None
+    if isinstance(serve, dict):
+        theme = serve.get("theme")
+        if isinstance(theme, str) and theme.strip():
+            return theme.strip().lower()
+    return None
 
+
+def resolve_serve_options(args: list[str], project_dir_default: str = ".") -> dict | str:
+    """Parse `serve` flags + the config gate into {port, project_dir, mode,
+    host, max_sse, help}. Returns an error string on bad input."""
+    opts = {"port": 8080, "project_dir": project_dir_default, "theme": None,
+            "host": None, "max_sse": DEFAULT_MAX_SSE, "help": False}
     i = 0
     while i < len(args):
-        if args[i] == "--port" and i + 1 < len(args):
+        a = args[i]
+        if a == "--port" and i + 1 < len(args):
             try:
-                port = int(args[i + 1])
+                opts["port"] = int(args[i + 1])
             except ValueError:
-                print(f"Invalid port: {args[i + 1]}")
-                return 1
+                return f"Invalid port: {args[i + 1]}"
             i += 2
-        elif args[i] == "--dir" and i + 1 < len(args):
-            project_dir = os.path.expanduser(args[i + 1])
+        elif a == "--dir" and i + 1 < len(args):
+            opts["project_dir"] = os.path.expanduser(args[i + 1]); i += 2
+        elif a == "--theme" and i + 1 < len(args):
+            theme = args[i + 1].strip().lower()
+            if theme not in THEMES:
+                return f"Invalid --theme: {args[i + 1]} (use saloon or cockpit)"
+            opts["theme"] = theme; i += 2
+        elif a == "--host" and i + 1 < len(args):
+            opts["host"] = args[i + 1]; i += 2
+        elif a == "--max-sse" and i + 1 < len(args):
+            try:
+                opts["max_sse"] = max(1, int(args[i + 1]))
+            except ValueError:
+                return f"Invalid --max-sse: {args[i + 1]}"
             i += 2
-        elif args[i] in ("-h", "--help"):
-            print("Usage: python -m tagteam serve [--port PORT] [--dir DIR]")
-            print()
-            print("  --port PORT  Port to listen on (default: 8080)")
-            print("  --dir DIR    Project directory (default: current directory)")
-            return 0
+        elif a in ("-h", "--help"):
+            opts["help"] = True; i += 1
         else:
-            print(f"Unknown argument: {args[i]}")
-            return 1
+            return f"Unknown argument: {a}"
+    opts["project_dir"] = os.path.abspath(opts["project_dir"])
+    theme = opts["theme"] or _config_theme(opts["project_dir"]) or "saloon"
+    if theme not in THEMES:
+        theme = "saloon"
+    opts["mode"] = "cockpit" if theme == "cockpit" else "legacy"
+    if opts["host"] is None:
+        opts["host"] = "127.0.0.1" if opts["mode"] == "cockpit" else ""
+    return opts
 
-    project_dir = os.path.abspath(project_dir)
+
+def serve_command(args: list[str]) -> int:
+    """Handle `python -m tagteam serve [--port N] [--dir PATH] [--theme saloon|cockpit]
+    [--host H] [--max-sse N]`."""
+    opts = resolve_serve_options(args)
+    if isinstance(opts, str):
+        print(opts)
+        return 1
+    if opts["help"]:
+        print("Usage: python -m tagteam serve [--port PORT] [--dir DIR] [--theme saloon|cockpit]"
+              " [--host HOST] [--max-sse N]")
+        print()
+        print("  --port PORT      Port to listen on (default: 8080)")
+        print("  --dir DIR        Project directory (default: current directory)")
+        print("  --theme THEME    saloon (default; legacy dashboard, binds all interfaces, no token)")
+        print("                   or cockpit (Phase 34 arbiter cockpit: loopback bind, per-run")
+        print("                   POST token, live feed + controls; Saloon at /?theme=saloon).")
+        print("                   `serve: {theme: cockpit}` in tagteam.yaml is the same gate.")
+        print("  --host HOST      Bind address (default: all interfaces in saloon mode,")
+        print("                   127.0.0.1 in cockpit mode; e.g. --host 0.0.0.0 to expose)")
+        print("  --max-sse N      Max concurrent live-feed connections in cockpit mode (default 8)")
+        return 0
+
+    project_dir = opts["project_dir"]
+    port = opts["port"]
+    mode = opts["mode"]
 
     # Verify project directory looks valid
     config_path = Path(project_dir) / "tagteam.yaml"
@@ -795,12 +1164,21 @@ def serve_command(args: list[str]) -> int:
         print(f"  No tagteam.yaml yet — the Mayor will help you set up.")
         print()
 
-    handler = make_handler(project_dir)
-    server = HTTPServer(("", port), handler)
+    token = new_token() if mode == "cockpit" else None
+    handler = make_handler(project_dir, mode=mode, token=token, max_sse=opts["max_sse"])
+    server = TagteamHTTPServer((opts["host"], port), handler)
 
-    print(f"Tagteam Dashboard")
+    print(f"Tagteam Dashboard" + (" — Arbiter Cockpit" if mode == "cockpit" else ""))
     print(f"  Project: {project_dir}")
-    print(f"  URL:     http://localhost:{port}")
+    if mode == "cockpit":
+        shown_host = opts["host"] or "0.0.0.0"
+        print(f"  URL:     http://{'localhost' if shown_host in ('127.0.0.1', 'localhost') else shown_host}:{port}"
+              f"   (Saloon theme: /?theme=saloon)")
+        print(f"  Bind:    {shown_host}:{port}"
+              + ("" if shown_host in ("127.0.0.1", "localhost") else
+                 "   WARNING: reachable from other hosts; the page token is the only write guard"))
+    else:
+        print(f"  URL:     http://localhost:{port}")
     print()
     print("Press Ctrl+C to stop.")
     print()
@@ -810,6 +1188,7 @@ def serve_command(args: list[str]) -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        server.stop_event.set()
         server.server_close()
 
     return 0
