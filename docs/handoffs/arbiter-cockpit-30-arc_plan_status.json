@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "arbiter-cockpit-30-arc",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-16",
+  "baseline": {
+    "sha": "5171c0fb2f59105da423a2d5d57dd84c5d5661b6",
+    "dirty_paths": [],
+    "captured_at": "2026-08-16T00:42:14.669820+00:00",
+    "source": "plan-init"
+  }
+}
