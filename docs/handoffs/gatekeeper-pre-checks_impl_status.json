@@ -1,0 +1,19 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "gatekeeper-pre-checks",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-16",
+  "baseline": {
+    "sha": "9afd169deb920e94d2c7122c305d8c871cb57aa3",
+    "dirty_paths": [
+      " M docs/roadmap.md",
+      "?? docs/phases/gatekeeper-pre-checks.md"
+    ],
+    "captured_at": "2026-08-16T21:14:36.456993+00:00",
+    "source": "copied-from-plan"
+  }
+}
