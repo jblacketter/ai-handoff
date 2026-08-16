@@ -350,6 +350,12 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - Roadmap as DAG (`depends_on`, parallel phases in worktrees)
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
+### Licensing & attribution decision
+- **Status:** Decided 2026-08-15 — **stay open, keep MIT.** `CITATION.cff` added and README License section now asks for a link back.
+- **Context:** Repo was already public and MIT-licensed (`LICENSE`, `pyproject.toml`, PyPI classifier), and every release is on PyPI as an sdist, so going private would have hidden only *future* work, not retracted anything. Public provenance (commit history, release dates, handoff logs) plus MIT's attribution requirement is the real protection against uncredited copying, and public proof is the whole point of the portfolio plan.
+- **Options considered and rejected:** Apache-2.0 (adds patent grant + "state your changes" clause — revisit only if stronger attribution language becomes necessary); AGPL/GPL (deters commercial forks but also the internal adoption that builds reputation); private or private-shared (kills portfolio value without retracting published versions).
+- **Open follow-up:** bump `version` / `date-released` in `CITATION.cff` as part of each release (consider folding into the release checklist).
+
 ### Terminal.app backend (macOS, optional)
 - **Status:** Not started
 - **Motivation:** Terminal.app ships with every Mac, so a `terminal` backend would remove the iTerm2 install step for new macOS users. Default stays `iterm2` (richer scripting); Terminal.app is opt-in via `--backend terminal`.
