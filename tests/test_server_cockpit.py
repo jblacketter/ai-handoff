@@ -178,6 +178,7 @@ class TestLegacyMode:
             assert r["raw"] == (srv._WEB_DIR / "index.html").read_bytes()
             assert b"tagteam-token" not in r["raw"]
             assert r["headers"]["access-control-allow-origin"] == "*"
+            assert s.client.get("/app.js")["headers"]["access-control-allow-origin"] == "*"
             # ?theme=saloon is ignored in legacy mode (same bytes)
             assert s.client.get("/?theme=cockpit")["raw"] == r["raw"]
 
@@ -246,10 +247,13 @@ class TestCockpitPages:
             for anchor in ('id="now"', 'id="needs-you"', 'id="watch"', 'data-tab="feed"',
                            'data-tab="diff"', 'data-tab="usage"', 'data-tab="notes"', 'id="conn"'):
                 assert anchor in html, anchor
-            # referenced assets resolve
+            # referenced assets resolve — and carry no wildcard CORS in cockpit mode
             for asset in ("/cockpit.css", "/cockpit.js"):
                 a = s.client.get(asset)
                 assert a["status"] == 200 and len(a["raw"]) > 1000, asset
+                assert "access-control-allow-origin" not in a["headers"], asset
+            for path in ("/api/state", "/api/now", "/api/rounds/x_plan", "/api/nope"):
+                assert "access-control-allow-origin" not in s.client.get(path)["headers"], path
             assert s.client.get("/cockpit.js")["headers"]["content-type"].startswith("application/javascript")
             # Saloon theme with the token embedded; its assets resolve
             r = s.client.get("/?theme=saloon")

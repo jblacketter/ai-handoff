@@ -202,3 +202,41 @@ def test_done_status_with_roadmap_advance_skips_completion_message():
         notify.reset_mock()
         p.tick(_state(seq=2, status="done", result="approved"))
     notify.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 34: watch() records a project-bound pidfile for its lifetime
+# ---------------------------------------------------------------------------
+
+def test_watch_writes_and_removes_pidfile(tmp_path, monkeypatch):
+    import os
+    from tagteam import watcher as watcher_mod
+    (tmp_path / "tagteam.yaml").write_text("agents:\n  lead:\n    name: A\n  reviewer:\n    name: B\n")
+    seen = {}
+
+    def fake_poll_loop(processor, project_dir, interval):
+        rec = watcher_mod.read_pidfile(tmp_path)
+        seen["during"] = rec
+
+    monkeypatch.setattr(watcher_mod, "_build_processor", lambda **kw: MagicMock())
+    monkeypatch.setattr(watcher_mod, "_log_startup_banner", lambda *a, **k: None)
+    monkeypatch.setattr(watcher_mod, "_run_poll_loop", fake_poll_loop)
+    assert watcher_mod.watch(mode="iterm2", project_dir=str(tmp_path), force_poll=True) is True
+    assert seen["during"]["pid"] == os.getpid() and seen["during"]["mode"] == "iterm2"
+    assert seen["during"]["project_dir"] == str(tmp_path.resolve())
+    assert watcher_mod.read_pidfile(tmp_path) is None          # removed on exit
+
+
+def test_watch_pidfile_removed_on_exception(tmp_path, monkeypatch):
+    from tagteam import watcher as watcher_mod
+    monkeypatch.setattr(watcher_mod, "_build_processor", lambda **kw: MagicMock())
+    monkeypatch.setattr(watcher_mod, "_log_startup_banner", lambda *a, **k: None)
+
+    def boom(processor, project_dir, interval):
+        assert watcher_mod.read_pidfile(tmp_path) is not None
+        raise RuntimeError("loop died")
+
+    monkeypatch.setattr(watcher_mod, "_run_poll_loop", boom)
+    with pytest.raises(RuntimeError):
+        watcher_mod.watch(mode="notify", project_dir=str(tmp_path), force_poll=True)
+    assert watcher_mod.read_pidfile(tmp_path) is None

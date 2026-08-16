@@ -8,16 +8,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from tagteam import cockpit_api as capi
-from tagteam import controls, db, headless as h
+from tagteam import controls, db, headless as h, procs
 from tagteam import cycle as cycle_mod
 from tagteam import state as state_mod
+from tagteam import watcher as watcher_mod
 
 from tests.test_headless import project, fake_path, _init_cycle  # noqa: F401
+from tests.test_controls import needs_proc_inspection  # noqa: F401
 
 
 def _git(root: Path, *args: str) -> str:
@@ -82,6 +86,7 @@ class TestNow:
         assert n["inflight"]["pid_alive"] is False
         # the inflight watcher pid (this process, no ident recorded) counts as a live watcher
         assert n["watcher"]["running"] is True and n["watcher"]["pid"] == os.getpid()
+        assert n["watcher"]["source"] == "inflight"
 
     def test_pending_notes_count_scoped(self, project):
         _init_cycle(project)
@@ -279,6 +284,58 @@ class TestScopeDiff:
         assert len(p["files"]) == 1 and p["omitted_files"] == 2 and p["truncated"] is True
         assert p["paths"] == ["bin.dat", "src/a.py", "tagteam.yaml"]  # the full list is still reported
 
+    def test_untracked_directories_expand_to_files_and_artifacts_filtered(self, project):
+        """Reviewer r1 #2: a new package shows up in `git status --porcelain` as
+        a collapsed `newpkg/`; the cockpit must show its files, and never
+        Tagteam's own `.tagteam/` / `docs/handoffs/` bookkeeping."""
+        # No .gitignore on purpose: `.tagteam/` and `docs/` collapse as untracked dirs.
+        _git(project, "init", "-q")
+        _git(project, "config", "user.email", "t@example.com")
+        _git(project, "config", "user.name", "T")
+        (project / "keep.txt").write_text("k\n")
+        _git(project, "add", "keep.txt", "tagteam.yaml")
+        _git(project, "commit", "-qm", "init")
+        _init_cycle(project)                            # writes docs/handoffs/*, .tagteam/*
+        (project / "newpkg").mkdir()
+        (project / "newpkg" / "a.py").write_text("print('a')\n")
+        (project / "newpkg" / "b.py").write_text("print('b')\nprint('bb')\n")
+        (project / "newpkg" / "img.bin").write_bytes(b"\x00\x01\xff\x00")
+        (project / "docs" / "phases").mkdir(parents=True)
+        (project / "docs" / "phases" / "feat-x.md").write_text("# plan\n")
+        cli = cycle_mod.compute_scope_diff("feat-x", "plan", str(project))["paths"]
+        assert cli == [".tagteam/", "docs/", "newpkg/"]  # CLI output unchanged (collapsed dirs)
+        p = capi.scope_diff_payload(project, "feat-x", "plan")
+        assert p["paths"] == cli
+        assert p["file_paths"] == ["docs/phases/feat-x.md", "newpkg/a.py", "newpkg/b.py", "newpkg/img.bin"]
+        by = {f["path"]: f for f in p["files"]}
+        assert not any(k.startswith(".tagteam/") or k.startswith("docs/handoffs/") for k in by)
+        assert by["newpkg/a.py"]["status"] == "untracked" and by["newpkg/a.py"]["additions"] == 1
+        assert "+print('a')" in by["newpkg/a.py"]["patch"]
+        assert by["newpkg/b.py"]["additions"] == 2 and by["newpkg/b.py"]["deletions"] == 0
+        assert by["newpkg/img.bin"]["binary"] is True and by["newpkg/img.bin"]["patch"] is None
+        assert by["docs/phases/feat-x.md"]["status"] == "untracked" and "+# plan" in by["docs/phases/feat-x.md"]["patch"]
+
+    def test_statuses_added_modified_deleted(self, project):
+        self._cycle_with_changes(project)               # src/a.py committed since baseline (+ edited)
+        gone = project / h.SKILL_RELPATH                  # existed at baseline
+        n_lines = len(gone.read_text().splitlines())
+        gone.unlink()                                     # deleted in the working tree (unstaged)
+        (project / "docs" / "handoffs" / ".gitkeep").unlink()   # deleted tagteam artifact → filtered
+        p = capi.scope_diff_payload(project, "feat-x", "plan")
+        by = {f["path"]: f for f in p["files"]}
+        assert by["src/a.py"]["status"] == "added"          # absent from the baseline tree
+        assert by["tagteam.yaml"]["status"] == "modified"
+        assert by["bin.dat"]["status"] == "untracked" and by["bin.dat"]["binary"] is True
+        key = str(h.SKILL_RELPATH).replace(os.sep, "/")
+        assert by[key]["status"] == "deleted" and by[key]["deletions"] == n_lines
+        assert "-# Skill: /handoff" in by[key]["patch"]
+        # a staged deletion is still "deleted"
+        _git(project, "add", "-A"); _git(project, "commit", "-qm", "rm skill")
+        by = {f["path"]: f for f in capi.scope_diff_payload(project, "feat-x", "plan")["files"]}
+        assert by[key]["status"] == "deleted" and by[key]["deletions"] == n_lines
+        assert by["bin.dat"]["status"] == "added" and by["bin.dat"]["binary"] is True   # add -A committed it
+        assert "docs/handoffs/.gitkeep" not in by
+
     def test_error_shape(self, project):
         p = capi.scope_diff_payload(project, "nope", "plan")
         assert p["error"] == "No cycle found: nope_plan" and p["files"] == []
@@ -290,6 +347,84 @@ class TestScopeDiff:
         assert capsys.readouterr().out == "bin.dat\nsrc/a.py\ntagteam.yaml\n"
         rc = cycle_mod._cli_scope_diff(["--phase", "nope", "--type", "plan"])
         assert rc == 1 and capsys.readouterr().out == "No cycle found: nope_plan\n"
+
+
+# ---------------------------------------------------------------------------
+# watcher liveness (reviewer r1 #1)
+# ---------------------------------------------------------------------------
+
+def _sleeper(cwd: Path, *extra_argv: str) -> subprocess.Popen:
+    """A process whose argv says `tagteam watch` (no project path) and whose
+    cwd is `cwd` — Tagteam's own watcher launch shape."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", *extra_argv],
+                            cwd=str(cwd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class TestWatcherLiveness:
+    def test_pidfile_lifecycle(self, project):
+        assert watcher_mod.read_pidfile(project) is None
+        p = watcher_mod.write_pidfile(project, "iterm2")
+        assert p is not None and p.name == "watcher.json"
+        rec = watcher_mod.read_pidfile(project)
+        assert rec["pid"] == os.getpid() and rec["mode"] == "iterm2" and rec["project_dir"] == str(project.resolve())
+        assert watcher_mod.remove_pidfile(project, pid=12345) is False     # not ours → kept
+        assert watcher_mod.read_pidfile(project) is not None
+        assert watcher_mod.remove_pidfile(project) is True
+        assert watcher_mod.read_pidfile(project) is None
+
+    def test_pidfile_running_and_stale(self, project, monkeypatch):
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no pgrep")))
+        # own pid, real identity → running via pidfile even with no process scan
+        watcher_mod.write_pidfile(project, "headless")
+        st = capi.watcher_status(project)
+        assert st["running"] is True and st["pid"] == os.getpid() and st["mode"] == "headless"
+        assert st["source"] == "pidfile" and st["stale_pidfile"] is False
+        # dead pid → stale, not running
+        watcher_mod.pidfile_path(project).write_text(json.dumps({"pid": 999999, "ident": "x", "mode": "tmux"}))
+        st = capi.watcher_status(project)
+        assert st["running"] is False and st["stale_pidfile"] is True and st["pid"] is None
+        # identity mismatch (PID reuse) → stale, not running
+        watcher_mod.pidfile_path(project).write_text(json.dumps({"pid": os.getpid(), "ident": "not-me:0", "mode": "tmux"}))
+        monkeypatch.setattr(procs, "identity", lambda pid: "me:1")
+        st = capi.watcher_status(project)
+        assert st["running"] is False and st["stale_pidfile"] is True
+        # now_payload surfaces the same record
+        n = capi.now_payload(project)
+        assert n["watcher"]["running"] is False and n["watcher"]["stale_pidfile"] is True
+
+    @needs_proc_inspection
+    def test_process_scan_binds_by_cwd_not_argv(self, project, tmp_path):
+        """A `… tagteam watch --mode iterm2` process started from the project
+        cwd (no project path on argv) is detected; the same shape started
+        elsewhere is not."""
+        other = tmp_path / "elsewhere"; other.mkdir()
+        far = _sleeper(other, "tagteam", "watch", "--mode", "iterm2")
+        try:
+            st = capi.watcher_status(project)
+            assert st["running"] is False, st
+            near = _sleeper(project, "tagteam", "watch", "--mode", "iterm2")
+            try:
+                deadline = time.monotonic() + 5
+                st = capi.watcher_status(project)
+                while not st["running"] and time.monotonic() < deadline:
+                    time.sleep(0.2); st = capi.watcher_status(project)
+                assert st["running"] is True and st["pid"] == near.pid, st
+                assert st["source"] == "process-scan" and st["mode"] == "iterm2"
+                assert capi.now_payload(project)["watcher"]["pid"] == near.pid
+            finally:
+                near.kill(); near.wait()
+        finally:
+            far.kill(); far.wait()
+        # gone → not running
+        st = capi.watcher_status(project)
+        assert st["running"] is False
+
+    def test_legacy_watcher_status_endpoint_unchanged(self, project):
+        """The 0.10.0 `/api/watcher/status` helper keeps its argv-only rule
+        (flag-off identity); the cockpit uses `watcher_status`."""
+        from tagteam.server import _get_watcher_status
+        watcher_mod.write_pidfile(project, "iterm2")
+        assert set(_get_watcher_status(str(project))) == {"running", "pid"}
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +461,20 @@ class TestTailAndSignature:
         i4 = capi.signature_id(capi.events_signature(project)); assert i4 != i3
         # unchanged → same id (inflight age excluded from the id)
         assert capi.signature_id(capi.events_signature(project)) == i4
+        # a watcher pidfile appearing / its process dying is a change (strip liveness)
+        watcher_mod.write_pidfile(project, "headless")
+        s5 = capi.events_signature(project); i5 = capi.signature_id(s5)
+        assert i5 != i4 and s5["watcher"] == {"pid": os.getpid(), "alive": True}
+        watcher_mod.pidfile_path(project).write_text(json.dumps({"pid": 999999, "mode": "headless"}))
+        s6 = capi.events_signature(project); i6 = capi.signature_id(s6)
+        assert i6 != i5 and s6["watcher"]["alive"] is False
+        # an in-flight pointer whose pid dies is a change too
+        h.turns_dir(project).mkdir(parents=True, exist_ok=True)
+        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": os.getpid(), "started_at": h._now_iso()}))
+        i7 = capi.signature_id(capi.events_signature(project)); assert i7 != i6
+        h.inflight_path(project).write_text(json.dumps({"stem": "s", "pid": 999999, "started_at": h._now_iso()}))
+        s8 = capi.events_signature(project); i8 = capi.signature_id(s8)
+        assert i8 != i7 and s8["inflight"]["alive"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -176,8 +176,15 @@
     }
 
     var w = $('chip-watcher');
-    w.className = 'chip ' + (n.watcher && n.watcher.running ? 'ok' : (n.owed && !n.inflight ? 'warn' : ''));
-    w.textContent = n.watcher && n.watcher.running ? 'watcher pid ' + n.watcher.pid : 'no watcher';
+    var wr = n.watcher || {};
+    w.className = 'chip ' + (wr.running ? 'ok' : (n.owed && !n.inflight ? 'warn' : ''));
+    if (wr.running) {
+      w.textContent = 'watcher ' + (wr.mode ? wr.mode + ' ' : '') + 'pid ' + wr.pid;
+      w.title = 'watcher liveness — bound to this project via ' + (wr.source || '?');
+    } else {
+      w.textContent = wr.stale_pidfile ? 'watcher gone (stale record)' : 'no watcher';
+      w.title = wr.stale_pidfile ? 'the recorded watcher process is not running; start a new one' : 'no watcher found for this project';
+    }
 
     var notes = $('chip-notes');
     if (n.pending_notes) { notes.classList.remove('hidden'); notes.textContent = n.pending_notes + ' queued note' + (n.pending_notes > 1 ? 's' : ''); }
@@ -669,6 +676,9 @@
   connectSSE();
   // Ages in the strip tick locally between refreshes.
   setInterval(function () { if (NOW) renderNowAges(); }, 1000);
+  // Safety net in live mode: a slow full refresh (process liveness that
+  // leaves no file trace, clock drift) — cheap, local.
+  setInterval(function () { if (connMode === 'live') refreshAll('tick'); }, 30000);
   function renderNowAges() {
     // Cheap local re-render of the age chips (no fetch).
     if (NOW.owed && NOW.owed.age_s != null) NOW.owed.age_s += 1;

@@ -904,6 +904,73 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
     print(flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Watcher pidfile (Phase 34): a project-bound liveness record. Tagteam's own
+# launch shape (`python -m tagteam watch --mode X` from the project cwd) puts
+# no project path on argv, so argv-matching cannot bind a watcher to a
+# project; the pidfile (pid + creation identity + mode) can. Written at
+# start, removed on clean exit; a stale file (dead pid / identity mismatch)
+# is reported, never trusted.
+# ---------------------------------------------------------------------------
+
+WATCHER_PIDFILE = "watcher.json"
+
+
+def pidfile_path(project_root: str | Path) -> Path:
+    return Path(project_root) / ".tagteam" / WATCHER_PIDFILE
+
+
+def write_pidfile(project_root: str | Path, mode: str) -> Path | None:
+    """Record this process as the project's watcher. Best-effort."""
+    import json
+    import os
+    from tagteam import procs
+    p = pidfile_path(project_root)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"pid": os.getpid(), "ident": procs.identity(os.getpid()), "mode": mode,
+                   "started_at": datetime.now(timezone.utc).isoformat(),
+                   "argv": list(sys.argv), "project_dir": str(Path(project_root).resolve())}
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return p
+    except OSError:
+        return None
+
+
+def read_pidfile(project_root: str | Path) -> dict | None:
+    import json
+    p = pidfile_path(project_root)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def remove_pidfile(project_root: str | Path, pid: int | None = None) -> bool:
+    """Remove the pidfile if it names `pid` (default: this process)."""
+    import os
+    pid = os.getpid() if pid is None else pid
+    cur = read_pidfile(project_root)
+    if cur is None or cur.get("pid") != pid:
+        return False
+    try:
+        pidfile_path(project_root).unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _pidfile_root(project_dir: str) -> str:
+    if project_dir == ".":
+        try:
+            from tagteam.state import _resolve_project_root
+            return _resolve_project_root()
+        except Exception:
+            return "."
+    return project_dir
+
+
 def watch(
     interval: int = 10,
     mode: str = "notify",
@@ -954,23 +1021,28 @@ def watch(
         force_poll = True
         _log("[trigger] headless mode uses poll trigger")
 
-    if not force_poll:
-        from tagteam import watcher_events
-        if watcher_events.is_available():
-            _log("[trigger] event-driven (watchdog) with 30s heartbeat")
-            if _run_event_loop(processor, project_dir):
-                return True
-            # Event loop failed at startup — fall through to poll mode.
-            _log(f"[trigger] falling back to poll mode"
-                 f" (interval={interval}s)")
+    pidfile_root = _pidfile_root(project_dir)
+    write_pidfile(pidfile_root, mode)
+    try:
+        if not force_poll:
+            from tagteam import watcher_events
+            if watcher_events.is_available():
+                _log("[trigger] event-driven (watchdog) with 30s heartbeat")
+                if _run_event_loop(processor, project_dir):
+                    return True
+                # Event loop failed at startup — fall through to poll mode.
+                _log(f"[trigger] falling back to poll mode"
+                     f" (interval={interval}s)")
+            else:
+                _log("[trigger] poll mode (install `tagteam[event]`"
+                     " to enable event-driven mode)")
         else:
-            _log("[trigger] poll mode (install `tagteam[event]`"
-                 " to enable event-driven mode)")
-    else:
-        _log(f"[trigger] poll mode (forced via --poll, interval={interval}s)")
+            _log(f"[trigger] poll mode (forced via --poll, interval={interval}s)")
 
-    _run_poll_loop(processor, project_dir, interval)
-    return True
+        _run_poll_loop(processor, project_dir, interval)
+        return True
+    finally:
+        remove_pidfile(pidfile_root)
 
 
 def _run_poll_loop(processor: "_StateProcessor",
