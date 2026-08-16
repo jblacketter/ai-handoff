@@ -19,5 +19,5 @@ briefer:
 gatekeeper:
   enabled: true
   tests:
-    command: "python -m pytest -q -p no:cacheprovider"
+    command: ".venv/bin/python -m pytest -q -p no:cacheprovider"
     timeout_minutes: 15
