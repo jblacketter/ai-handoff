@@ -116,7 +116,7 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
   hostile reply round-trip + JS-source no-innerHTML guard, watch/session/
   launch endpoints + legacy `/api/launch` untouched, port lease both
   orders/stale/unverifiable/foreign token, `serve` refusal + Tagteam
-  holder named + immediate restart, hub rows, CLI). Suite: see below.
+  holder named + immediate restart, hub rows, CLI). Suite: 969 passed / 5 skipped.
 
 ## Deviations / notes for the reviewer
 
@@ -180,6 +180,6 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
 4. **Port**: two `serve` on one port refuse (lease names the holder;
    unrelated listener → generic message; immediate restart after shutdown
    passes) — tests + the live observation above.
-5. `pytest`: see the number in the submission (full suite on macOS);
+5. `pytest`: **969 passed, 5 skipped** (macOS, 2 m 50 s);
    `--theme saloon` byte-identical to the pre-3.1 bare page (test); v6 DBs
    open under v7 (test); hub read-only AST test unchanged and green.
