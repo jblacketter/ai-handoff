@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review
+- [x] In Review (round 2: enriched-entry metadata contract on `add_round`, terminal claim policy + fallback, crash-safe interjection snapshot/delivery, tie ordering, NEED_HUMAN question)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -78,9 +78,12 @@ reviewer's turn owed (turn=reviewer, status=ready, cycle ready_for=reviewer)
   │    grew) → row `superseded`, no cycle write; a reviewer entry with this
   │    `panel_event` already exists → done (never a second entry); else
   │    `cycle.add_round(role=reviewer, action, round, content,
-  │    updated_by="<Reviewer> panel")` — the ordinary reviewer write, one
-  │    call, transition + derive + mirror + export inside the same lock;
-  │    then finish the panels row in the same hold
+  │    updated_by="<Reviewer> panel", meta={panel_event, panel_id,
+  │    panel_lenses, panel_interjections})` — the ordinary reviewer write
+  │    with the recovery keys attached atomically (see "Enriched entry"),
+  │    one call, transition + derive + mirror + export inside the same
+  │    lock; then finish the panels row + stamp interjection delivery in
+  │    the same hold
   └─ release slot; merged → return WITHOUT dispatching the reviewer;
        fallback → fall through to the existing hand-off in the same tick
 ```
@@ -122,7 +125,9 @@ Write your verdict to `<verdict_path>` as JSON:
 "severity": "blocker"|"major"|"minor"}], "question"?: "<for NEED_HUMAN>"}`.
 `REQUEST_CHANGES` needs ≥1 finding of severity blocker/major; `APPROVE`
 needs no blocker/major findings (minors may still be listed and are carried
-as notes). Then stop.
+as notes); `NEED_HUMAN` requires a non-empty `question`; `ESCALATE`
+requires a non-empty `summary` (the reason). Verdicts violating these are
+non-conforming → the lens is `failed`. Then stop.
 
 **Lens outcome** = `ok` (verdict file exists, parses, conforms) | `failed`
 (spawn error, timeout — reviewer's headless `timeout_minutes` —, nonzero
@@ -136,7 +141,12 @@ attempt (a lens that times out once will not get faster); a failed
 ### Merge (deterministic)
 
 Precedence over the **ok** lenses: `NEED_HUMAN` > `ESCALATE` >
-`REQUEST_CHANGES` > `APPROVE`.
+`REQUEST_CHANGES` > `APPROVE`. **Ties** (several lenses at the winning
+precedence) are ordered by the **configured lens order** — a stable rule:
+the first configured lens at that precedence leads the content (its
+question/reason first for NEED_HUMAN/ESCALATE; its group first for
+REQUEST_CHANGES), the others follow in configured order; the summary line
+always lists every lens in configured order.
 
 | ok lenses say | failed lenses | panel decision |
 |---|---|---|
@@ -170,6 +180,101 @@ correctness: <summary> · scope: <summary> · verification: <summary>
 The entry carries `panel_event`, `panel_id`, `panel_lenses` (list of
 `{lens, outcome, verdict}`) — extra keys, tolerated everywhere (Phase 38
 precedent) and read from the canonical JSONL (`read_rounds_file`).
+
+### Enriched entry: `add_round(..., meta=)`
+
+`cycle.add_round` today builds a fixed entry `{round, role, action, content,
+ts, updated_by?}`. This phase adds one **guarded optional argument**,
+`meta: dict | None = None`, that is merged into the entry **before** the
+JSONL append inside the existing writer-lock critical section, so the
+recovery keys are written atomically with the transition (no second write,
+no window between "entry" and "keys"). Rules:
+
+- `meta` keys must be strings; the **reserved keys** `round`, `role`,
+  `action`, `content`, `ts`, `updated_by`, `summary` (everything the entry
+  already owns) are rejected with `ValueError` *before* the lock is taken —
+  `meta` can add, never override. Values must be JSON-serialisable.
+- The AMEND path, the stale-round gate, the plan-approval `impl_boundary`
+  capture, `_derive_top_level_state`, `_shadow_db_after_cycle_write` and
+  auto-export are unchanged: they read the entry's canonical fields only.
+  The DB mirror stores the canonical columns (extra keys are not columns —
+  same as the gate's `gate_event`), so **the canonical JSONL is the store of
+  record for meta**, read through `read_rounds_file` (Phase 38); the DB-first
+  `read_rounds` view and the markdown export are unaffected in content.
+- The CLI (`tagteam cycle add`) does **not** expose `meta` — it is an
+  in-process contract for satellites (`add_ruling` passes none).
+- Tests (`test_cycle.py`): meta survives JSONL round-trip and
+  `read_rounds_file`; DB mirror still records the round once with the
+  canonical fields; export/readback (`render_cycle_from_files` ==
+  `db.render_cycle`) unaffected; each reserved key raises and writes
+  nothing (no entry, no status change, no seq bump); non-string / non-JSON
+  meta rejected; AMEND + ruling paths ignore meta as documented.
+
+Panel meta = `panel_event` (event key), `panel_id` (row id),
+`panel_lenses` (`[{lens, outcome, verdict}]`), `panel_interjections`
+(the delivered-ID snapshot, below).
+
+### Terminal claim policy (no stall, ever)
+
+Per event key, **at most 2 attempts** may consume the failure budget
+(`error` / `abandoned` rows) — the same `max_attempts` rule as the gate,
+one automatic retry. `superseded` rows are **not** failures: they end an
+attempt because the submission moved (AMEND, ruling, reviewer write,
+lead re-submission), and the *next* observation is either a new event
+key (seq changed) or, for a rounds-only AMEND, the same key — in which case
+the claim allocates a fresh attempt **without** counting the superseded
+one (`claim_panel` counts only `error|abandoned` rows against
+`max_attempts`; the gate's `claim_gate` is aligned to the same rule in
+this phase — its current "attempt < max_attempts" counts every prior row,
+which over-counts supersessions; fixed via `_claim_satellite` and covered
+by the shared tests). Exhausted (2 failed attempts, no decision):
+
+- the claim is refused → the panel persists a **decided `fallback` row**
+  (`reason: "panel could not complete after 2 attempts"`, via a forced
+  claim exactly like the gate's attempts-exhausted PASS-with-findings) and
+  returns `fallback` → the ordinary reviewer is dispatched **in the same
+  tick**; a restarted watcher / second watcher finds the decided `fallback`
+  row on the peek and dispatches the ordinary reviewer as well (interactive
+  at-least-once, headless slot-protected — unchanged delivery semantics).
+- `_panel_owed_seq` re-entry: after a `superseded` attempt on the same seq
+  (AMEND) the latch is **not** set — the tick returns without dispatch and
+  the next tick's `_maybe_panel` claims a fresh attempt for the same key
+  (peek finds no decided row; the round log has grown so it is a new
+  observation). After `deferred` (slot busy / live other) the latch is set
+  as for the gate. After `error` the latch is set and the next identical
+  tick claims attempt 2; after the second `error` the exhausted branch
+  above runs on that same tick.
+- Tests: error → retry → fallback (row statuses `[error, error, fallback]`,
+  reviewer dispatched once, no lens run on the third pass); abandoned →
+  retry → fallback; restart from the terminal fallback (fresh processor:
+  peek → fallback → ordinary reviewer dispatched, no new row); repeated
+  supersession (three AMEND races) → rows `[superseded ×3, merged]`,
+  budget never exhausted; the gate's own tests still pass under the
+  aligned counting rule.
+
+### Interjection snapshot and crash-safe delivery
+
+The reviewer-targeted (and untargeted) pending interjections are read
+**once per panel attempt**, before the first lens, and the same snapshot is
+rendered in every lens prompt (all lenses see identical context — the
+plan's recommendation, adopted). The snapshot's IDs travel with the attempt:
+`panels.interjection_ids` (JSON) at claim time and, on a merged decision,
+`panel_interjections` in the entry meta. Delivery is stamped
+(`db.mark_interjections_delivered`, `delivered_role=reviewer`,
+`delivered_stem=<panel stem>`) **only** for a merged decision, for exactly
+that snapshot, in the same lock hold as the entry write; on `fallback` /
+`superseded` / `error` / `abandoned` **nothing** is stamped, so the ordinary
+or retried reviewer still receives them (a retried panel attempt takes a
+fresh snapshot, which may include newer notes — those are rendered to the
+new lenses and are the ones stamped if that attempt merges).
+Crash between `add_round` and the row finish: entry-first reconciliation
+(sweep / `panel status`) finds the entry, finishes the row `merged`, and
+stamps delivery for **exactly `panel_interjections` from the entry** (never
+the current pending set — a note that arrived after the snapshot stays
+pending). Tests: merged stamps only the snapshot; fallback and superseded
+stamp none; crash-after-`add_round` reconciliation stamps the entry's set
+and leaves a later note pending; the fake agent asserts every lens prompt
+contains the same note IDs.
 
 ### Stale rounds, escalation, gate interplay
 
@@ -246,6 +351,7 @@ CREATE TABLE IF NOT EXISTS panels (
   attempt INTEGER NOT NULL, runner_pid INTEGER, runner_ident TEXT,
   started_at TEXT NOT NULL, updated_at TEXT, finished_at TEXT, duration_s REAL,
   lenses_json TEXT,               -- [{lens, outcome, verdict, summary, usage_row_id, stem}]
+  interjection_ids TEXT,          -- JSON list: the reviewer-note snapshot rendered to every lens (stamped only on merged)
   decision TEXT,                  -- APPROVE | REQUEST_CHANGES | ESCALATE | NEED_HUMAN | null
   stem TEXT, reason TEXT, applied_seq INTEGER
 );
@@ -291,9 +397,14 @@ helpers over a second table (the claim SQL is factored into one internal
   (slot → locked sweep+claim → lenses → merge → locked pinned entry-first
   `add_round` + row finish → release), `sweep_abandoned_panels`,
   `panel_command` (run|status|list|lenses|preview).
-- **B. `db.py`** — schema v9 `panels`, `_claim_satellite` refactor (gates
-  unchanged in behaviour — existing tests must pass byte-for-byte), panel
-  helpers, `NON_FILE_BACKED_TABLES`.
+- **B. `db.py`** — schema v9 `panels` (+ `interjection_ids` column),
+  `_claim_satellite` refactor used by `claim_gate` and `claim_panel`
+  (failure budget counts `error|abandoned` rows only — the gate's
+  over-counting of superseded rows is fixed here; existing gate tests must
+  still pass), panel helpers, `NON_FILE_BACKED_TABLES`.
+- **B2. `cycle.py`** — `add_round(..., meta=)` guarded optional metadata
+  (reserved-key rejection before the lock, JSON-only values, merged into the
+  entry inside the critical section); no other change to the write path.
 - **C. `config.py`** — `PANEL_KEYS`, `validate_panel_config`,
   `get_panel_spec`.
 - **D. `watcher.py`** — `_maybe_panel` after `_maybe_gate` in
@@ -310,7 +421,13 @@ helpers over a second table (the claim SQL is factored into one internal
   README "Reviewer panels" subsection + CLI ref; `docs/how-tagteam-works.md`
   `#panels` section + files table; roadmap; `pyproject.toml` +
   `CITATION.cff` → 3.3.0.
-- **I. Tests** — `tests/test_panel.py`: config matrix; prompt composition
+- **I. Tests** — `tests/test_cycle.py`: `add_round` meta contract (see
+  "Enriched entry"); `tests/test_panel.py`: config matrix; terminal claim
+  policy (error→retry→fallback, abandoned→retry→fallback, restart from
+  fallback, repeated supersession never exhausts); interjection snapshot +
+  delivery (merged/fallback/superseded/crash reconciliation, identical
+  prompt IDs across lenses); tie ordering; NEED_HUMAN without question →
+  failed lens; prompt composition
   (brief + contract + context + interjection scoping); verdict parsing
   (valid / missing / malformed / wrong verdict / APPROVE with a blocker →
   failed); merge matrix (every row of the table + precedence + grouping +
@@ -368,7 +485,8 @@ helpers over a second table (the claim SQL is factored into one internal
 ```
 tagteam/panel.py                          new
 tagteam/data/panels/{correctness,scope,verification}.md   new (package data)
-tagteam/db.py                             SCHEMA_VERSION 9, panels table, _claim_satellite, helpers
+tagteam/db.py                             SCHEMA_VERSION 9, panels table (+interjection_ids), _claim_satellite, helpers
+tagteam/cycle.py                          add_round(meta=) guarded metadata
 tagteam/config.py                         panel block validate/spec
 tagteam/watcher.py                        _maybe_panel + _panel_owed_seq
 tagteam/headless.py                       SLOT_KIND_PANEL, reviewer RoleSpec builder exposed
@@ -406,11 +524,35 @@ pyproject.toml (package-data glob + 3.3.0), CITATION.cff
    `list`, `lenses`, `preview` work; `preview` spawns nothing.
 7. Both SKILL copies updated and identical; README + HTW document the
    block; release 3.3.0 via PR from `phase-39-reviewer-panels`.
+8. `add_round(meta=)`: recovery keys survive JSONL/readback, DB and export
+   unaffected, reserved keys rejected with no write.
+9. Terminal claim policy: two failed attempts → decided `fallback` row +
+   ordinary reviewer dispatched in the same tick (and on restart);
+   superseded attempts never consume the budget.
+10. Interjections: one snapshot per attempt rendered identically to every
+    lens; stamped delivered only on merged and only for that snapshot,
+    including after a crash-after-`add_round` reconciliation; fallback /
+    superseded leave them pending.
 
-## Open questions for the reviewer
-1. Default `on: [impl]` (plan cycles keep the single reviewer) — agree?
-2. Sequential lenses (N× wall clock, one slot) vs. deferring the whole
-   phase until parallel slots exist — I propose sequential now.
-3. `updated_by` for the merged entry: `"<Reviewer> panel"` (e.g. `Codex
-   panel`) so `tagteam usage` / the feed attribute it — or keep the plain
-   reviewer name?
+## Resolved questions (round 1 → 2)
+- Default `on: [impl]` — agreed by the reviewer.
+- Sequential lenses under the one turn slot for this phase — agreed.
+- Merged entry `updated_by = "<Reviewer> panel"` — agreed.
+
+## Round-2 changes (reviewer r1)
+1. **Enriched entry is implementable**: `cycle.add_round(..., meta=)` — a
+   guarded optional metadata argument (reserved keys rejected before the
+   lock, merged into the entry inside the critical section, canonical JSONL
+   is the store of record, DB/export unaffected); `cycle.py` added to
+   Scope/Files with direct tests.
+2. **Terminal claim policy**: max 2 failed attempts (`error|abandoned`
+   only — superseded never counts; the gate's counting is aligned through
+   `_claim_satellite`), then a decided `fallback` row and the ordinary
+   reviewer dispatched in the same tick / on restart; `_panel_owed_seq`
+   behaviour after superseded / deferred / error spelled out; tests listed.
+3. **Interjection snapshot + crash-safe delivery**: one snapshot per
+   attempt (identical for all lenses), IDs persisted on the row and in the
+   entry meta, stamped only on merged for exactly that set (also by
+   entry-first reconciliation after a crash), never on fallback/superseded.
+4. Tie ordering = configured lens order; `NEED_HUMAN` requires a non-empty
+   `question` (and `ESCALATE` a reason) at verdict validation.
