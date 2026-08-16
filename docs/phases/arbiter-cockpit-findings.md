@@ -66,19 +66,34 @@ UX-design round). Branch `phase-34-arbiter-cockpit`, release 0.11.0.
 - **Watcher liveness (round 2, reviewer r1 #1).** Tagteam's own launch shape
   (`python -m tagteam watch --mode X` from the project cwd) puts no project
   path on argv, so the 0.10.0 argv match never bound a watcher to a project.
-  Now: `watch()` writes `.tagteam/watcher.json` (pid + creation identity +
-  mode + argv + project_dir) for its lifetime (removed in `finally`; tests);
-  `cockpit_api.watcher_status()` binds by (1) the pidfile — dead pid or
-  identity mismatch → `stale_pidfile: true`, never trusted; (2) a process
-  scan of `tagteam … watch` processes whose argv names the project **or
-  whose cwd is the project** (`procs.cwd`: /proc on Linux, `lsof -d cwd` on
-  macOS) — this is what finds pre-pidfile watchers such as this repo's live
-  `--mode iterm2` (pid 74337, verified: `{running: True, pid: 74337, mode:
+  Now: `watch()` can keep `.tagteam/watcher.json` (pid + creation identity +
+  mode + argv + project_dir) for its lifetime (removed in `finally`; tests)
+  — **opt-in only** (round 3, reviewer r2): the file is written when the
+  project has opted into the cockpit with `serve: {theme: cockpit}` in
+  tagteam.yaml (the existing config gate) or the watcher was started with
+  `tagteam watch --pidfile`; a bare `tagteam watch` writes **nothing new**
+  (regression test snapshots the tree before/during/after and asserts no
+  `.tagteam/` is even created). `cockpit_api.watcher_status()` binds by (1)
+  the pidfile when present — dead pid or identity mismatch →
+  `stale_pidfile: true`, never trusted; (2) a process scan of `tagteam …
+  watch` processes whose argv names the project **or whose cwd is the
+  project** (`procs.cwd`: /proc on Linux, `lsof -d cwd` on macOS) — this is
+  what finds watchers without a pidfile, e.g. this repo's live `--mode
+  iterm2` (pid 74337, verified: `{running: True, pid: 74337, mode:
   'iterm2', source: 'process-scan'}`); (3) the in-flight pointer's watcher
-  identity. `/api/now.watcher` = `{running, pid, mode, source, stale_pidfile}`;
-  the strip shows `watcher <mode> pid N` / `watcher gone (stale record)`.
-  The legacy `/api/watcher/status` helper is deliberately unchanged
-  (flag-off identity); the cockpit does not use it.
+  identity. So the two ways of turning the cockpit on get liveness like this:
+  **CLI-only `tagteam serve --theme cockpit`** (no config key) → the watcher
+  keeps no pidfile; liveness comes from the cwd-bound scan (all launch
+  shapes Tagteam itself creates — session backends run the watcher from the
+  project cwd — plus any argv that names the project) and, during headless
+  turns, the in-flight identity; `--pidfile` upgrades it to the identity-
+  checked record. **Config-enabled cockpit** (`serve.theme: cockpit`) → the
+  watcher keeps the pidfile automatically (same gate that switches the
+  server), scan/inflight remain the fallback. `/api/now.watcher` =
+  `{running, pid, mode, source, stale_pidfile}`; the strip shows `watcher
+  <mode> pid N` / `watcher gone (stale record)`. The legacy
+  `/api/watcher/status` helper is deliberately unchanged (flag-off
+  identity); the cockpit does not use it.
 - **Scope diff per file (round 2, reviewer r1 #2).** `git status --porcelain`
   collapses a new tree to `newpkg/`; the CLI output stays exactly that
   (byte-identical), but the cockpit payload expands collapsed untracked
