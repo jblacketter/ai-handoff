@@ -550,6 +550,24 @@ Deviations from the plan text, all in the direction of the plan's intent:
 6. Untracked directories are captured file-by-file (`--untracked-files=all`) so a file added
    to an already-untracked directory counts as work.
 
+### Impl round 2 (reviewer r1)
+1. **Partial-apply shape recognised**: entry present + cycle status `ready_for: lead` + top-level
+   still reviewer at `submission_seq` (crash between the status write and the derive) → the
+   derive is finished exactly once, mirrored, exported, `applied_seq` recorded — never
+   `superseded` (test `c2`).
+2. **Recovered / existing decisions repair the other stores**: every `ensure_gate_applied` call
+   that finds the entry re-mirrors the canonical rounds (dedupes by round/role/action/ts) and
+   re-exports; PASS still never derives state (test `b2`: crash right after the JSONL append →
+   DB rounds + render parity restored, seq unchanged, no duplicate).
+3. **Bounce cap counts APPLIED bounces only**: `consecutive_bounces(rounds, decided)` /
+   `applied_bounce_streak` resolve each entry's `gate_event` to its terminal row — `bounce`
+   counts, `pass` resets, `superseded`/`error`/`abandoned` are ignored; the cockpit's last-gate
+   summary likewise reports the last decided entry (test: two superseded audit entries → streak
+   0 → the next failing submission bounces; two applied bounces → cap).
+4. **`tagteam gate status|list` sweep first** (owner-safe, best-effort) so a dead runner shows
+   `abandoned` and a running row with its decision entry is completed; reconciliation completes
+   only the row the entry names (`gate_id`), never an earlier abandoned attempt (test).
+
 ## Success criteria
 1. With `gatekeeper` absent from `tagteam.yaml`, the full suite and a
    scripted headless plan+impl cycle behave identically to 3.1.1 (no
