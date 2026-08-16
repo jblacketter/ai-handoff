@@ -154,14 +154,18 @@ def test_svg_meets_portfolio_conventions(name):
     assert (root.get("aria-label") or "").strip(), f"{name}: aria-label required"
 
 
-def _svg_node_labels(name: str) -> list[str]:
+def _svg_labels(name: str, cls: str) -> list[str]:
     root = ET.fromstring((MEDIA / name).read_text(encoding="utf-8"))
     out = []
     for el in root.iter():
-        if el.tag.endswith("text") and (el.get("class") or "").split().count("node"):
+        if el.tag.endswith("text") and (el.get("class") or "").split().count(cls):
             txt = "".join(el.itertext())
             out.append(re.sub(r"\s+", " ", txt).strip())
     return out
+
+
+def _svg_node_labels(name: str) -> list[str]:
+    return _svg_labels(name, "node")
 
 
 def _norm(s: str) -> str:
@@ -176,8 +180,47 @@ def test_svg_node_labels_appear_in_the_matching_mermaid_block(index, name):
     assert labels, f"{name}: mark node labels with class=\"node\""
     for label in labels:
         assert _norm(label) in mermaid, f"{name}: node label {label!r} not found in README mermaid block {index}"
+    for label in _svg_labels(name, "edge"):
+        assert _norm(label) in mermaid, f"{name}: edge label {label!r} not found in README mermaid block {index}"
     manifest = MANIFEST.read_text(encoding="utf-8")
     assert name in manifest, f"{name} missing from docs/media/README.md"
+
+
+_EDGE_RE = re.compile(r'^\s*([A-Za-z_]\w*)(?:\[[^\]]*\]|\([^)]*\)|\[\([^)]*\)\])?\s*(?:--\s*"([^"]*)"\s*-->|-\.\s*"([^"]*)"\s*\.->|-->|-\.->)\s*([A-Za-z_]\w*)', re.M)
+
+
+def _edges(block: str) -> dict[tuple[str, str], str]:
+    out = {}
+    for m in _EDGE_RE.finditer(block):
+        out[(m.group(1), m.group(4))] = _norm(m.group(2) or m.group(3) or "")
+    return out
+
+
+def test_loop_diagram_routes_the_arbiters_ruling_correctly():
+    """The hero diagram's semantics, not just its labels: both reviews can
+    escalate; the arbiter's ruling takes the reviewer's seat — request
+    changes goes back to the lead step, approving the plan goes to
+    implementation, approving the implementation advances the roadmap.
+    A generic 'ruling' edge (which would suggest approval also returns to
+    the lead) is not allowed."""
+    block = _mermaid_blocks(README.read_text(encoding="utf-8"))[0]
+    edges = _edges(block)
+    assert edges[("PR", "A")] == "escalate" and edges[("IR", "A")] == "escalate"
+    assert "request changes" in edges[("A", "P")] and "approve" not in edges[("A", "P")]
+    assert "approve" in edges[("A", "I")] and "request changes" in edges[("A", "I")]
+    assert "approve" in edges[("A", "R")] and "request changes" not in edges[("A", "R")]
+    assert edges[("A", "R")].endswith("(impl)") and "(plan)" in edges[("A", "P")]
+    for (src, dst), label in edges.items():
+        if src == "A":
+            assert label != "ruling", f"generic ruling edge A->{dst}"
+    # the SVG mirrors the same three ruling outcomes and both escalations
+    edge_labels = [_norm(l) for l in _svg_labels("tagteam-loop.svg", "edge")]
+    assert edge_labels.count("escalate") == 2
+    assert any("request changes (plan)" in l for l in edge_labels)
+    assert any("approve (plan)" in l and "request changes (impl)" in l for l in edge_labels)
+    assert any(l == "approve (impl)" for l in edge_labels)
+    for doc in (README, SHOWCASE, MANIFEST):
+        assert "reviewer's seat" in doc.read_text(encoding="utf-8"), f"{doc.name}: alt text / prose must state the ruling semantics"
 
 
 # --------------------------------------------------------- screenshots ----
@@ -238,6 +281,12 @@ def test_glossary_guard():
                 for pat in _BANNED_PHRASES[:2]:
                     assert not re.search(pat, t, re.I), f"{name}: label {t!r}"
     assert "10 consecutive stale rounds" in README.read_text(encoding="utf-8")
+    # the shipped cockpit must not describe its churn marker as a round-number rule
+    for f in ("cockpit.html", "cockpit.js"):
+        text = (REPO / "tagteam" / "data" / "web" / f).read_text(encoding="utf-8")
+        for pat in (r"round-10 line", r"r10 auto-escalate", r"\bround[- ]10\b", r"\b10 rounds\b"):
+            assert not re.search(pat, text, re.I), f"{f}: {pat!r}"
+    assert "10 consecutive stale rounds" in (REPO / "tagteam" / "data" / "web" / "cockpit.html").read_text(encoding="utf-8")
 
 
 def test_readme_opens_with_the_loop_and_names_the_roles_first():

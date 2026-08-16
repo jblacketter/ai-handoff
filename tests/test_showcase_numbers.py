@@ -84,6 +84,15 @@ def fixture_root(tmp_path: Path) -> Path:
         _entry(1, "lead", "SUBMIT_FOR_REVIEW", "x", T.format(d=1)),
         _entry(1, "reviewer", "APPROVE", "ok", T.format(d=1)),
     ])
+    # canonical copy entirely after the as-of date + an older legacy duplicate:
+    # docs/handoffs owns the key, so the cycle is EXCLUDED (the legacy copy must not resurface)
+    _cycle(tmp_path, ".tagteam/legacy", "dup", "plan", [
+        _entry(1, "lead", "SUBMIT_FOR_REVIEW", "old", "2026-05-01T10:00:00+00:00"),
+        _entry(1, "reviewer", "APPROVE", "ok", "2026-05-01T11:00:00+00:00"),
+    ])
+    _cycle(tmp_path, "docs/handoffs", "dup", "plan", [
+        _entry(1, "lead", "SUBMIT_FOR_REVIEW", "new", "2026-05-09T10:00:00+00:00"),
+    ], state="in-progress")
     # entirely after the as-of date -> excluded
     _cycle(tmp_path, "docs/handoffs", "future", "plan", [
         _entry(1, "lead", "SUBMIT_FOR_REVIEW", "x", "2026-05-09T00:00:00+00:00"),
@@ -108,6 +117,8 @@ def test_report_methodology(fixture_root):
     assert rows[("delta", "impl")]["outcome"] == "approved by ruling" and rows[("delta", "impl")]["actions"]["RULING"] == 1
     assert rows[("alpha", "impl")]["approve_round"] == 1          # docs/handoffs won over legacy round 5
     assert rows[("straddle", "plan")]["outcome"] == "in progress"  # APPROVE at cutoff dropped
+    assert ("dup", "plan") not in rows                              # canonical owns the key; legacy never resurfaces
+    assert ("future", "plan") not in rows
     text = sn.render_report("2026-05-08", cycles, None)
     assert "| cycles | 3 | 4 | 7 |" in text
     assert "| approved | 1 | 2 | 3 |" in text

@@ -84,7 +84,7 @@
       <div class="panel-head"><span>Tokens, cost, and the rate-limit signal</span><span class="spacer"></span><button class="btn btn-small" id="btn-usage-refresh">Refresh</button></div>
       <div class="rate-line" id="rate-line">—</div>
       <div class="chart-wrap">
-        <div class="chart-title">Round-over-round churn (tokens per turn, this cycle) — the round-10 line is auto-escalation</div>
+        <div class="chart-title">Round-over-round churn (tokens per turn, this cycle) — dashed line: the stale-round limit (auto-escalation after 10 consecutive stale rounds; a progressing cycle can go past it)</div>
         <svg id="churn" class="churn" viewBox="0 0 640 220" preserveAspectRatio="none" role="img" aria-label="churn curve"></svg>
         <div class="legend"><span class="lg lead">lead</span><span class="lg reviewer">reviewer</span><span class="lg briefer">briefer</span></div>
       </div>
