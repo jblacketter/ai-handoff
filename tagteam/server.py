@@ -994,7 +994,14 @@ class CockpitRouter:
                     _lc.run_turn(handle)
                 except Exception as e:  # run_turn already ended the row as failed
                     h.log_message("lead turn %s/%s failed: %s", cid, handle.n, e)
-            threading.Thread(target=_worker, name=f"lead-turn-{cid}", daemon=True).start()
+            try:
+                _lc.start_worker(_worker, f"lead-turn-{cid}")
+            except BaseException as e:
+                # no worker owns the started turn: abort it (owner-safe) and say so
+                _lc.abort_turn(handle, f"could not start the worker thread: {type(e).__name__}: {e}")
+                h._send_json({"ok": False, "message": f"could not start the lead turn's worker thread "
+                              f"({type(e).__name__}: {e}); the turn was aborted — try again"}, 503)
+                return True
             h._send_json({"ok": True, "conversation_id": cid, "turn_n": handle.n, "message": "turn started"}, 202)
             return True
         except _lc.LeadChatError as e:

@@ -116,7 +116,7 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
   hostile reply round-trip + JS-source no-innerHTML guard, watch/session/
   launch endpoints + legacy `/api/launch` untouched, port lease both
   orders/stale/unverifiable/foreign token, `serve` refusal + Tagteam
-  holder named + immediate restart, hub rows, CLI; round 2 adds lifecycle-injection, lease-atomicity and body-cap tests). Suite: 977 passed / 5 skipped.
+  holder named + immediate restart, hub rows, CLI; round 2 adds lifecycle-injection, lease-atomicity and body-cap tests). Suite: 981 passed / 5 skipped.
 
 ## Deviations / notes for the reviewer
 
@@ -191,6 +191,32 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
    and no turn created; `/api/state` under cockpit → 413; `Content-Length:
    abc` / `-5` → 400 without reading; small bodies unaffected.
 
+## Round 3 (reviewer impl r2)
+
+1. **Dispatch failure aborts the accepted turn.** New owner-safe
+   `lead_chat.abort_turn(handle, reason)` (releases only the handle's slot
+   token, ends its row `failed: aborted before running: …`, notes the
+   transcript) and one worker-start seam `lead_chat.start_worker` used by
+   both `/api/lead/<cid>/send` and the composite; if starting the worker
+   raises, Send answers 503 with the reason and the composite fails its
+   claim truthfully (`lead: could not start the worker thread …; the
+   accepted turn was aborted`). Tests: composite and HTTP Send with the
+   worker start raising → error response, slot free, turn `failed
+   (aborted…)`, launch `failed`; a subsequent retry / send works, and a
+   never-ran turn is re-sent (nothing was delivered).
+2. **Launch status follows the persisted turn status**
+   (`_finalize_from_turn`): only `ok` → `succeeded`; `failed` /
+   `cancelled` → launch `failed` with the turn reference + error in
+   `partial` and the message "send again from the Lead panel (this launch
+   will not re-send)"; `running` → 202 pending. Applied to the background
+   worker, the synchronous `send=` path and the existing-turn retry path
+   (a failed/cancelled existing turn is neither re-sent nor relabelled;
+   an existing turn that never ran — `aborted before running` / `setup
+   failed` — may be sent again). Tests: sync + background nonzero and
+   cancelled turns → launch failed with matching partial and no re-send
+   on retry; a persisted running turn → pending; an ok existing turn →
+   succeeded without a second message.
+
 ## In-cycle gates
 
 1. **Walk-through as a user (seed, Chrome/Playwright, 1280×800):** idle
@@ -228,6 +254,6 @@ arbiter's own walk-through). Branch `phase-37-cockpit-launchpad`, release
 4. **Port**: two `serve` on one port refuse (lease names the holder;
    unrelated listener → generic message; immediate restart after shutdown
    passes) — tests + the live observation above.
-5. `pytest`: **977 passed, 5 skipped** (macOS, 2 m 54 s; round 2);
+5. `pytest`: **981 passed, 5 skipped** (macOS, 2 m 55 s; round 3);
    `--theme saloon` byte-identical to the pre-3.1 bare page (test); v6 DBs
    open under v7 (test); hub read-only AST test unchanged and green.

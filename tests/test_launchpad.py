@@ -558,3 +558,113 @@ class TestBodyCap:
                 assert resp.status == 400, (bad, resp.status, body[:80])
             # a normal small body still works
             assert c.post(f"/api/lead/{cid}/send", {"text": "hi", "dry_run": True}, headers=s.auth())["status"] == 200
+
+
+class TestAsyncBoundaries:
+    """Impl round 3: dispatch failure aborts the accepted turn; launch status
+    follows the persisted turn status."""
+
+    def test_thread_start_failure_aborts_turn_composite_and_send(self, tmp_path, fake_path, monkeypatch):
+        p = _proj(tmp_path)
+        cfg = read_config(p / "tagteam.yaml")
+        monkeypatch.setattr(L, "start_watcher", lambda root, mode="headless", wait_s=5.0: {"ok": True, "pid": os.getpid(), "mode": mode, "message": "fake"})
+        it = L.launch_intent(p)
+        def boom(*a, **k):
+            raise RuntimeError("cannot start thread")
+        monkeypatch.setattr(lc, "start_worker", boom)
+        st, res = L.launch(p, intent=it, config=cfg, by="t", background=True)
+        assert st == 409 and res["status"] == "failed" and "worker thread" in res["error"]
+        assert h.read_inflight(p) is None                                          # slot free
+        conv = lc.get_conversation(p, res.get("conversation_id") or lc.list_conversations(p)[0]["id"])
+        assert conv["turns"][-1]["status"] == "failed" and "aborted before running" in conv["turns"][-1]["error"]
+        conn = db.connect(project_dir=str(p)); row = db.get_launch(conn, L.launch_key(it)); conn.close()
+        assert row["status"] == "failed" and "worker thread" in row["error"]
+        # a subsequent retry works (worker start restored): reuses the conversation, no duplicate message
+        monkeypatch.setattr(lc, "start_worker", lambda target, name: (_ for _ in ()).throw(AssertionError("sync path")))
+        sends = []
+        st, res = L.launch(p, intent=it, config=cfg, by="t", retry=True, send=lambda: (sends.append(1), {"n": 2, "status": "ok"})[1])
+        assert st == 200 and res["status"] == "succeeded" and sends == [1]
+        # ordinary Send over HTTP with Thread.start failing
+        with _cockpit(p) as s:
+            cid = s.client.post("/api/lead/new", {}, headers=s.auth())["json"]["conversation"]["id"]
+            monkeypatch.setattr(lc, "start_worker", boom)
+            r = s.client.post(f"/api/lead/{cid}/send", {"text": "hi"}, headers=s.auth())
+            assert r["status"] == 503 and "aborted" in r["json"]["message"]
+            import threading as _t
+            monkeypatch.setattr(lc, "start_worker", lambda target, name: _t.Thread(target=target, name=name, daemon=True).start())
+            assert h.read_inflight(p) is None
+            conv = s.client.get(f"/api/lead/{cid}")["json"]
+            assert conv["turns"][-1]["status"] == "failed" and "aborted" in conv["turns"][-1]["error"]
+            r = s.client.post(f"/api/lead/{cid}/send", {"text": "again"}, headers=s.auth())   # works again
+            assert r["status"] == 202
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and s.client.get(f"/api/lead/{cid}")["json"]["turns"][-1]["status"] == "running":
+                time.sleep(0.1)
+            assert s.client.get(f"/api/lead/{cid}")["json"]["turns"][-1]["status"] == "ok"
+
+    @pytest.mark.parametrize("mode,expect", [("nonzero", "failed"), ("cancelled", "cancelled")])
+    def test_launch_status_follows_turn_status_sync_and_background(self, tmp_path, fake_path, monkeypatch, mode, expect):
+        p = _proj(tmp_path)
+        cfg = read_config(p / "tagteam.yaml")
+        monkeypatch.setattr(L, "start_watcher", lambda root, mode="headless", wait_s=5.0: {"ok": True, "pid": os.getpid(), "mode": mode, "message": "fake"})
+        it = L.launch_intent(p)
+        if mode == "nonzero":
+            monkeypatch.setenv("FAKE_AGENT_MODE", "nonzero")
+            runner = None
+        else:
+            # a runner that "gets cancelled": writes the cancel marker for the stem then exits nonzero
+            def runner(argv, prompt, cwd, **kw):
+                m = h.read_inflight(cwd)
+                h.write_cancel(cwd, {"stem": m["stem"], "pid": 1, "by": "test"})
+                kw["events_path"].write_text("")
+                return h.RunOutput(exit_code=137, timed_out=False, duration_ms=1)
+        # synchronous path: the injected sender runs a real (fake-agent) turn in the launch's conversation
+        def sync_send(cid):
+            return lc.send(p, cid, it["command"], config=cfg, run=runner)
+        st, res = L.launch(p, intent=it, config=cfg, by="t", send=sync_send)
+        assert st == 409 and res["status"] == "failed" and f"lead turn {expect}" in res["error"]
+        assert res["partial"]["turn"]["status"] == expect
+        conn = db.connect(project_dir=str(p)); row = db.get_launch(conn, L.launch_key(it)); conn.close()
+        assert row["status"] == "failed"
+        # retry with the existing failed turn: not re-sent, not relabelled a success
+        st, res = L.launch(p, intent=it, config=cfg, by="t", retry=True, send=lambda: (_ for _ in ()).throw(AssertionError("must not re-send")))
+        assert st == 409 and res["status"] == "failed" and "will not re-send" in res["error"]
+        assert res["partial"]["turn"]["status"] == expect
+        # background path on a fresh project
+        p2 = _proj(tmp_path / "bg"); it2 = L.launch_intent(p2)
+        if runner is not None:
+            monkeypatch.setattr(h, "run_process", runner)    # the background path uses the engine runner
+        st, res = L.launch(p2, intent=it2, config=cfg, by="t", background=True)
+        assert st == 202 and res["status"] == "pending"
+        cid2 = res["conversation_id"]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            conn = db.connect(project_dir=str(p2)); row = db.get_launch(conn, L.launch_key(it2)); conn.close()
+            if row["status"] != "pending":
+                break
+            time.sleep(0.1)
+        assert row["status"] == "failed" and f"lead turn {expect}" in row["error"]
+        turn = lc.get_conversation(p2, cid2)["turns"][-1]
+        assert turn["status"] == expect
+        assert json.loads(row["partial_json"])["turn"]["status"] == expect
+        assert h.read_inflight(p2) is None
+
+    def test_launch_status_ok_and_running_paths(self, tmp_path, fake_path, monkeypatch):
+        p = _proj(tmp_path)
+        cfg = read_config(p / "tagteam.yaml")
+        monkeypatch.setattr(L, "start_watcher", lambda root, mode="headless", wait_s=5.0: {"ok": True, "pid": os.getpid(), "mode": mode, "message": "fake"})
+        it = L.launch_intent(p)
+        # a persisted running turn (server alive) → repeat is pending, not succeeded
+        cid = lc.new_conversation(p, provider="claude")["id"]
+        conn = db.connect(project_dir=str(p))
+        db.add_conversation_turn(conn, conversation_id=cid, ts="t", user_text=it["command"], owner_pid=os.getpid(), owner_ident=procs.identity(os.getpid()))
+        db.claim_launch(conn, key=L.launch_key(it), ts="t", intent_json=json.dumps(it), owner_pid=os.getpid(), owner_ident=procs.identity(os.getpid()))
+        db.update_launch(conn, L.launch_key(it), ts="t", conversation_id=cid, turn_n=1)
+        conn.close()
+        st, res = L.launch(p, intent=it, config=cfg, by="t")
+        assert st == 202 and res["status"] == "pending"
+        # once that turn is ok, the launch finalizes succeeded on the next call, without re-sending
+        conn = db.connect(project_dir=str(p)); db.finish_conversation_turn(conn, cid, 1, status="ok", ts="t", reply="r")
+        db.update_launch(conn, L.launch_key(it), ts="t", status="failed"); conn.close()   # simulate the worker's claim having failed elsewhere
+        st, res = L.launch(p, intent=it, config=cfg, by="t", retry=True, send=lambda: (_ for _ in ()).throw(AssertionError("no re-send")))
+        assert st == 200 and res["status"] == "succeeded" and res["existing"] == {"conversation_id": cid, "turn_n": 1}
