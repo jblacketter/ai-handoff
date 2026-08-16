@@ -329,7 +329,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** `docs/tagteam-3.0-proposal.md` §4 Phase 34
 
 ### Phase 35: Cross-Project Hub (3.0 arc)
-- **Status:** 🔨 Implementation in review — plan approved 2026-08-16 (round 2; UX flow designed with the ux-design-guide skill). Release 0.12.0 via PR from `phase-35-cross-project-hub`.
+- **Status:** ✅ Complete — impl approved 2026-08-16 (round 2; plan 2 rounds, UX flow designed with the ux-design-guide skill). Release 0.12.0 via PR from `phase-35-cross-project-hub`; tag after merge + green CI.
 - **Description:** `tagteam hub` — one read-only surface over every registered project: Needs you → Waiting (stale / abandoned? with the CLI hint) → Quiet, burn across projects and the shared subscription window (newest row per provider/kind), each project's cockpit mounted at `/p/<id>/` through a shared `CockpitRouter` seam (server-injected base-aware HTML), hub SSE over file signals + one shared process scan per tick, `tagteam hub --list [--json]`, `tagteam registry list|unregister`. Never migrates a project DB (`mode=ro`), never rewrites the registry (`read_registry_raw`).
 - **Plan:** `docs/phases/cross-project-hub-30-arc.md` (approved round 2). **Findings:** `docs/phases/cross-project-hub-findings.md`.
 - **Description:** `tagteam hub` — one surface over every registered project: waiting turns, pending escalations, stale cycles, aggregate token burn against the shared subscription pool.
