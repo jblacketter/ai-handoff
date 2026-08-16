@@ -1494,6 +1494,7 @@ def serve_command(args: list[str]) -> int:
     print("Press Ctrl+C to stop.")
     print()
 
+    _install_sigterm_as_interrupt()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1504,6 +1505,22 @@ def serve_command(args: list[str]) -> int:
         lease.release()
 
     return 0
+
+
+def _install_sigterm_as_interrupt() -> None:
+    """A `kill <pid>` (SIGTERM) shuts the server down like Ctrl-C so the
+    port lease is released; a stale lease is recovered anyway, this just
+    keeps `~/.tagteam/ports/` tidy. Main thread only; never raises."""
+    import signal as _signal
+
+    def _raise(*_a):
+        raise KeyboardInterrupt
+
+    try:
+        if threading.current_thread() is threading.main_thread():
+            _signal.signal(_signal.SIGTERM, _raise)
+    except (ValueError, OSError, AttributeError):
+        pass
 
 
 def _banner_state(project_dir: str) -> str:
