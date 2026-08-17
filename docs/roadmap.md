@@ -374,6 +374,13 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/review-loop-efficiency.md`
 - **Source:** measured 2026-08-16 — four suite runs per impl round, 5-minute watchdog nudges to both agents.
 
+### Phase 42: Terminal.app backend (3.6)
+- **Depends on:** Phase 41
+- **Status:** 🟡 Planning — plan cycle opened 2026-08-17 (branch `phase-42-terminal-backend`)
+- **Description:** a fourth session backend, `terminal`, drives macOS Terminal.app through AppleScript like `iterm2` drives iTerm2: `session start --backend terminal --launch` opens three windows (Lead/Watcher/Reviewer), launches and primes the agents, writes `.handoff-session.json` (`backend: terminal`, tab identity = tty); `tagteam watch --mode terminal` (auto-detected from the file) sends commands with the same idle/retry/watchdog discipline; `session kill|adopt|list-terminal`, `state` health and the dashboard log tail work for it. Opt-in; the only default change is that a Mac with neither iTerm2 nor tmux falls through to `terminal` instead of `manual`. iTerm2/tmux paths byte-identical. No cockpit work.
+- **Plan:** `docs/phases/terminal-app-backend.md`
+- **Source:** backlog item "Terminal.app backend (macOS, optional)"; promoted 2026-08-17.
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
@@ -401,14 +408,8 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Status:** Not started — brainstorm in `docs/saloon-rethink.md` (2026-08-16)
 - **Description:** Recast the fun theme around the loop's real roles (Host, Lead, Reviewer, Turn-keeper, Round clock, You-as-Arbiter) instead of feature mascots; three-beat first-run flow (init agents → start watcher → hand the user the kickoff message); every element bound to real state. Make the engine theme-driven so up to five settings can be trialed (saloon revised, alien spaceship, pirate ship, mission control, restaurant kitchen). Cockpit remains the serious surface; theme is a skin.
 
-### Terminal.app backend (macOS, optional)
-- **Status:** Not started
-- **Motivation:** Terminal.app ships with every Mac, so a `terminal` backend would remove the iTerm2 install step for new macOS users. Default stays `iterm2` (richer scripting); Terminal.app is opt-in via `--backend terminal`.
-- **Sketch:**
-  - New `tagteam/terminal.py` mirroring `iterm.py` against Terminal.app's AppleScript (`do script`, `tell tab N of window M`)
-  - Add `"terminal"` to `SUPPORTED_BACKENDS` and `_validate_backend()` in `session.py`
-  - Extend `_parse_backend` / `ensure_session` dispatch
-- **Known tradeoff:** Terminal.app has no stable session IDs — stale-session recovery must fall back to window+tab index tracking, which is more fragile than iTerm2's session-ID model. Expect the module to be less robust under user tab rearrangement.
+### ~~Terminal.app backend (macOS, optional)~~ → promoted to Phase 42 (2026-08-17)
+- See `docs/phases/terminal-app-backend.md`.
 
 ## Decision Log
 See `docs/decision_log.md`
