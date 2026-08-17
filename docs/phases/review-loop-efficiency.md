@@ -1,8 +1,8 @@
 # Phase 41: Review-loop efficiency (3.5)
 
 ## Status
-- [ ] Planning
-- [ ] In Review
+- [x] Planning
+- [ ] In Review (round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -28,10 +28,12 @@ spurious agent prompts, in every mode:
    at a configurable interval (`watcher.resend_minutes`, default 15, `0` =
    never), at most twice per submission; busy markers of current Claude Code
    and Codex UIs are recognised.
-3. **Verification-budget contract** (already committed on the branch,
-   `349d42f`) — lead runs the full suite once and reports `N passed @ commit`;
-   the reviewer reads `--tail 1`, takes the report as fact and spot-checks
-   only touched test files.
+3. **Verification-budget contract** (first cut committed on the branch,
+   `349d42f`; the one-run rule in §C supersedes its wording and the SKILL
+   text is updated to match at impl time) — exactly one full-suite run per
+   submission, the one on the record (the on-submit gate's when `on_submit`
+   is on, else the lead's, cited as `N passed @ commit`); the reviewer reads
+   `--tail 1`, takes it as fact and spot-checks only touched test files.
 4. **`scripts/release.py X.Y.Z`** — bumps `pyproject.toml`, `CITATION.cff`
    (`version` + `date-released`) and `uv.lock` in one step; prints the
    commit/tag recipe; no git side effects.
@@ -127,9 +129,61 @@ checks, MCP server, any cockpit work.
 - Logs: `watchdog: <agent> busy — not re-sending (n/2 used)` at most once per
   interval.
 
-### C. Verification-budget contract — committed (`349d42f`)
+**State machine (per `state.seq`).** The processor keeps one
+`_watchdog` record: `{seq, sent_at, resends, last_tail, notified}`.
 
-Reviewed as part of this plan; adjust wording if the reviewer objects.
+| Event | Transition |
+|---|---|
+| dispatch of a `ready` turn for a seq ≠ record.seq (new submission, incl. a BOUNCE that hands the turn back) | record ← `{seq, sent_at=now, resends=0, last_tail=None, notified=False}`. The first send keeps today's grace path (`wait_for_idle*` ≤ 10 s, then send even if inconclusive). |
+| tick, same seq, `status != ready` | record untouched (a `working` agent is not nudged); it is discarded when the seq changes. |
+| tick, same seq, `ready`, interval not elapsed | no capture, no send. |
+| tick, same seq, `ready`, interval elapsed, capture fails / empty | no send; `last_tail` unchanged (nothing learned). Log once per interval. |
+| capture ok, tail ≠ `last_tail` (incl. `last_tail is None` — first successful capture) | `last_tail ← tail`; **no send** this tick (the agent produced output, or we have no baseline yet). |
+| capture ok, tail == `last_tail`, BUSY pattern present or no IDLE pattern | no send; log `busy`. |
+| capture ok, tail == `last_tail`, positively idle, `resends < 2` | send; `resends += 1`; `sent_at ← now`. |
+| capture ok, tail == `last_tail`, positively idle, `resends == 2`, `notified == False` | no send; `notify_macos` + log once; `notified ← True`. |
+| anything with `notified == True` | no send, no further notification, until the seq changes. |
+| `resend_minutes == 0` | the record is still kept (for logs) but no tick ever sends or notifies. |
+
+Consequences: eligibility for a re-send needs *two* successful captures with
+identical tails at least one interval apart; a stale tail from a previous
+seq can never suppress or trigger a send because the baseline is dropped on
+seq change; capture failure never sends. Tests (`tests/test_watcher.py`)
+drive `_StateProcessor.tick()` with a fake clock and a fake capture for
+both `iterm2` and `tmux`: seq rollover resets counters/baseline/notified,
+capture failure never sends, changed tail resets the baseline and
+suppresses the tick, cap → exactly one notification per seq, `0` disables.
+
+### C. Verification-budget contract — committed (`349d42f`), refined here
+
+**The one-run rule (impl cycles).** Exactly one full-suite run per
+submission, and it is the one whose result is on the record:
+
+| Situation | The one full run | Lead does | Reviewer does |
+|---|---|---|---|
+| `on_submit: true` (gated type) | the on-submit gate's `check_tests` | `gate check --skip-tests` pre-flight (optional), then `cycle add`; the submission text cites the gate result and commit (`gate: PASS @ <sha>` — the gate entry carries the numbers) | starts from the `GATE:` entry; never re-runs |
+| `on_submit: true` but `--no-gate` | the lead's own run **before** `cycle add` | runs the suite once, reports `full suite: N passed, M skipped @ <sha>` in the submission; the watcher / `gate run` may still gate it later — that run is the *gate's* record, and the lead must not run the suite again for the same tree | as today: report or gate entry is fact |
+| gate not enabled / not `on` for this type | the lead's own run | same as the previous row | same |
+| gate BOUNCE (any mode) | the bounced attempt's run is spent; the **re-submission** gets one new run (on-submit again, or the lead's own if `--no-gate`) | fixes, re-submits `--round N+1` | — |
+
+The lead does not run the suite *and* let the on-submit gate run it on the
+same tree; `gate check` without `--skip-tests` on an `on_submit` project
+prints a one-line reminder (`note: on_submit is on — the submit will run
+the suite; use --skip-tests for the pre-flight`) but still runs (opt-in
+double run is the lead's call, e.g. before a large fix).
+
+**Gate entry contents (unchanged format, made a requirement):** the
+`GATE: PASS | tests ok (<duration>) | scope N paths | plan-doc ok` line,
+followed by the test summary line the runner printed (pytest's
+`N passed, M skipped in T s`), the checked commit (`HEAD <sha>`, added by
+this phase) and, for BOUNCE, the failing output excerpt (≤ `max_output_chars`).
+`tagteam gate status` shows the full report; the reviewer needs nothing
+else to treat the tests as run.
+
+SKILL (both copies) — lead's *Verification budget* paragraph gets the table's
+rules in prose (`on_submit` → the gate is the run, cite it; `--no-gate` /
+no gate → run once and cite `N passed @ sha`); the reviewer bullet already
+says "take the report or gate entry as fact".
 
 ### D. `scripts/release.py`
 
@@ -140,9 +194,25 @@ Reviewed as part of this plan; adjust wording if the reviewer objects.
   (warns if `uv` is missing); prints the changed files and the recipe
   (`git commit -am "release: X.Y.Z" && git tag vX.Y.Z && git push && git push --tags`).
   No git side effects. `--dry-run` prints without writing.
+- Write order and rollback: the script reads all three files, computes the
+  new contents, then — because `uv lock` needs the real `pyproject.toml` —
+  writes in this order: write `pyproject.toml` → run `uv lock` → on success write
+  `CITATION.cff`; on `uv lock` failure (non-zero, missing binary without
+  `--no-lock`, timeout) **restore `pyproject.toml` from the in-memory
+  original byte-for-byte**, leave `uv.lock`/`CITATION.cff` untouched, print
+  the uv output and exit 2 — the tree is unchanged, nothing looks half-released.
+  `--dry-run` writes nothing and runs nothing (prints the three planned edits).
 - Test `tests/test_release_script.py` runs it via `runpy` against a temp
-  root with copies of the three files (`--no-lock`), including refusal on a
-  non-increasing version.
+  root with copies of the three files: `--no-lock` happy path (pyproject +
+  CITATION updated, `date-released` set), refusal on a non-increasing
+  version (`3.4.0`, `3.4.0-x`, `3.3.9`) with no writes, `--dry-run` leaves
+  all three files byte-identical, and a **lock-enabled** case with a
+  deterministic fake `uv` on `PATH` (a shell script that rewrites the
+  project's `version = "…"` entry in `uv.lock`, keeps every other line):
+  the project package entry changes old → new, unrelated dependency entries
+  are byte-identical, and a fake `uv` that exits 1 leaves `pyproject.toml`
+  restored and `CITATION.cff`/`uv.lock` untouched with exit 2. No git
+  commands are executed by the script (test asserts no `.git` is required).
 - `docs/how-tagteam-works.md` release notes / memory recipe point at it.
 
 ## Files
@@ -181,4 +251,9 @@ Reviewed as part of this plan; adjust wording if the reviewer objects.
   configured interval, at most twice, then notifies once.
 - `scripts/release.py 3.5.0` produces the three-file bump used for this
   phase's release; refuses `3.4.0` / `3.4.0-x`.
+- The gate entry (PASS or BOUNCE) carries the runner's test summary line and
+  the checked commit sha; a lead submission on an `on_submit` project cites
+  the gate result and commit, not a second run.
+- `scripts/release.py` with a failing `uv lock` leaves the tree
+  byte-identical (pyproject restored) and exits 2.
 - Full suite passes; docs and both SKILL copies identical.
