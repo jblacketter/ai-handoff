@@ -4,7 +4,7 @@
 - [x] Planning
 - [x] In Review (round 2: --no-gate = synchronous call only, watcher/gate run authoritative, lead never runs the suite on a gated type; gate check w/o --skip-tests labelled the one explicit exception; release script snapshot/restore of all three files on any failure + tests for write-then-fail uv and CITATION write failure; round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
 - [x] Approved (round 3)
-- [ ] Implementation
+- [x] Implementation
 - [ ] Implementation Review
 - [ ] Complete
 
@@ -280,3 +280,24 @@ says "take the report or gate entry as fact".
   writes no gate row and leaves the submission gate-eligible (one later
   gate run, never two).
 - Full suite passes; docs and both SKILL copies identical.
+
+## Implementation notes
+
+- **A.** `config.py` (`on_submit` key + `WATCHER_KEYS`/`validate_watcher_config`/`get_watcher_spec`),
+  `gatekeeper.py` (`GateSpec.on_submit`, `run_checks(skip_tests=)` + `head` sha, `decide` adds
+  `checked: HEAD <sha>`, `on_submit_gate()`, `gate check --skip-tests` + the on_submit note),
+  `cycle.py` (`--no-gate` on add/init; lead SUBMIT_FOR_REVIEW / init call `on_submit_gate` — never
+  raises into the round). The gate row keeps `kind='manual'` (table CHECK unchanged).
+- **B.** `watcher.py`: `CAPTURE_LINES = 8`, BUSY markers checked over the whole capture / IDLE over the
+  last 4, new markers; `_StateProcessor(resend_minutes=)`, `_watchdog` record per seq, `_watchdog_due`
+  (interval → cap/notify-once → probe throttle 30 s → capture → rebaseline → positive idle → send),
+  reset on seq change; `_build_processor` reads `watcher.resend_minutes` (warns + default on problems);
+  banner line. notify mode has no pane: interval + cap apply, no capture. Headless unchanged.
+- **C.** SKILL both copies: lead paragraph = the one-run rule (on_submit → gate's run, `--skip-tests`
+  pre-flight, cite the gate; else run once and cite); gatekeeper paragraph = on-submit behaviour;
+  reviewer bullet = wait for an owed gate rather than substituting a run. Checklist unchanged from 349d42f.
+- **D.** `scripts/release.py` (`plan()` / `apply()` / `main()`, `_write_atomic`, snapshot + restore of
+  the three files on any failure, exit 2; `--dry-run` inert; no git). Used for this bump (3.5.0).
+- Docs: how-tagteam-works (gate yaml + entry example + `--skip-tests` + on-submit paragraph +
+  `#one-run` + watched-mode watchdog + files table), README, CLI help, `tagteam init` template comments.
+- This repo: `gatekeeper.on_submit: true`.

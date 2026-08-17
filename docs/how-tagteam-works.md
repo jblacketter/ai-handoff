@@ -29,7 +29,7 @@ A **round** is one lead `SUBMIT_FOR_REVIEW` plus the reviewer's response. `AMEND
 Every mode runs the same loop over the same files; only the automation differs.
 
 - **Manual** — no watcher. You paste each agent's `/handoff` output into the other agent yourself. Zero setup beyond `tagteam setup`.
-- **Watched** — `tagteam watch --mode notify|iterm2|tmux` polls `handoff-state.json` and, on a turn flip, either notifies you (`notify`) or types the next command into the right terminal (`iterm2` / `tmux`), detecting a busy terminal first so it never interrupts in-flight work. `--confirm` pauses for your approval before each automatic send. `tagteam quickstart` / `tagteam session start` create the terminals (three tabs or panes: Lead, Watcher, Reviewer) and auto-launch the agents; `default_backend()` picks iTerm2 on macOS, tmux where available, and `manual` (print the commands) elsewhere.
+- **Watched** — `tagteam watch --mode notify|iterm2|tmux` polls `handoff-state.json` and, on a turn flip, either notifies you (`notify`) or types the next command into the right terminal (`iterm2` / `tmux`), detecting a busy terminal first so it never interrupts in-flight work. `--confirm` pauses for your approval before each automatic send. If a turn stays `ready` (the agent never picked the command up), the **watchdog** re-sends it — since 3.5 only every `watcher.resend_minutes` (default 15; `0` = never), only when the agent's pane is *positively* idle (no busy marker anywhere in the last 8 lines, a prompt in the last 4) **and** unchanged since the previous probe, at most twice per submission; then it notifies you once and stops. Capture failure never re-sends; a new submission (`seq`) starts a fresh record. Before 3.5 the re-send was a fixed 5 minutes with a best-effort idle check, which nudged a busy agent (and its reviewer) every 5 minutes for the length of any long turn. `tagteam quickstart` / `tagteam session start` create the terminals (three tabs or panes: Lead, Watcher, Reviewer) and auto-launch the agents; `default_backend()` picks iTerm2 on macOS, tmux where available, and `manual` (print the commands) elsewhere.
 - **Headless** — the watcher spawns each turn as a fresh CLI process. Below.
 
 <a id="headless"></a>
@@ -133,6 +133,7 @@ gatekeeper:
   scope: true                         # impl only: real work since the plan was approved
   max_bounces: 2                      # consecutive bounces before the gate passes-with-findings
   max_output_chars: 4000              # tail of the test output kept in the round entry
+  on_submit: true                     # 3.5: gate synchronously from `cycle add/init` (no watcher needed)
 ```
 
 | check | applies to | passes when | on skip |
@@ -145,7 +146,9 @@ A `fail` on any check → **BOUNCE**; otherwise **PASS**. `skip` never bounces b
 
 ```
 GATE: PASS | scope 12 paths | plan-doc ok | tests ok (984 passed, 5 skipped, 3m38s)
+checked: HEAD 1a2b3c4
 GATE: BOUNCE | scope 12 paths | plan-doc ok | tests FAILED (exit 1, 41s)
+checked: HEAD 1a2b3c4
 --- tests: last 4000 chars ---
 FAILED tests/test_x.py::test_y - AssertionError ...
 ```
@@ -156,12 +159,17 @@ A bounce is a `REQUEST_CHANGES` in every respect that matters (`ready_for: lead`
 
 ```bash
 tagteam gate check            # lead pre-flight: run the checks, print the report, write nothing (exit 0/1)
+tagteam gate check --skip-tests   # scope + plan-doc only — the pre-flight when on_submit is on
 tagteam gate run              # gate the current submission now (manual mode / no watcher; same at-most-once path)
 tagteam gate status [--json]  # last decision + report for the current cycle
 tagteam gate list             # every gate row for the cycle
 ```
 
-Without a watcher (manual backend) the gate does not fire on its own — `tagteam gate run` is the substitute, and the SKILL tells the lead to run `tagteam gate check` before submitting. Full test output beyond the entry's tail: `.tagteam/gates/<phase>_<type>_r<N>_gate_<ts>_a<attempt>.log`. The cockpit shows a **gate** chip in the Now strip (`gate ✓ r3` / `gate ↩ r3`) and gate entries in the Feed; a bounce is the lead's problem, not yours — Needs-you is unchanged.
+Without a watcher (manual backend) the gate does not fire on its own — `tagteam gate run` is the substitute — **unless `on_submit: true`** (3.5): then the lead's own `tagteam cycle add … --action SUBMIT_FOR_REVIEW` (and `cycle init`) on a gated cycle type runs the gate synchronously before returning, through the same at-most-once claim path (a watcher gating the same submission observes the decision instead of re-running; if the watcher claimed first the submit says `gate: deferred` and the watcher decides). The command prints the report and the next step (`gate: pass … tell <Reviewer> to run /handoff` / `gate: bounce … the turn is already back with you`); the exit code is 0 either way — the round was written, the verdict is data. `--no-gate` skips only the synchronous run (the submission stays gate-eligible for the watcher / `gate run`).
+
+<a id="one-run"></a>**The one-run rule.** A review round should cost **one** full-suite run, and it is the one on the record: with `on_submit` on, the gate's run — the lead's pre-flight is `gate check --skip-tests` and the lead does not run the suite separately (`gate check` without `--skip-tests` still works and says `note: on_submit is on — the submit will run the suite again`; that opt-in double run is the only sanctioned exception); with the gate off or not `on` for the type, the lead runs the suite once and cites `full suite: N passed, M skipped @ <sha>` in the submission. The reviewer takes the gate entry (which names the checked commit) or the cited result as fact and spot-checks at most the test files the diff touches — the handoff SKILL says so on both sides. A BOUNCE spends that submission's run; the re-submission gets one new one.
+
+Full test output beyond the entry's tail: `.tagteam/gates/<phase>_<type>_r<N>_gate_<ts>_a<attempt>.log`. The cockpit shows a **gate** chip in the Now strip (`gate ✓ r3` / `gate ↩ r3`) and gate entries in the Feed; a bounce is the lead's problem, not yours — Needs-you is unchanged.
 
 <a id="panels"></a>
 ## Reviewer panels (opt-in, 3.3)
@@ -328,7 +336,7 @@ tagteam serve --theme saloon --dir ~/projects/myproject     # legacy Saloon
 
 | path | who writes it | what it is |
 |---|---|---|
-| `tagteam.yaml` | `tagteam init` (you edit it) | agents, headless options, `briefer`, `gatekeeper`, `panel`, `serve.theme` |
+| `tagteam.yaml` | `tagteam init` (you edit it) | agents, headless options, `briefer`, `gatekeeper` (incl. `on_submit`), `panel`, `watcher.resend_minutes`, `serve.theme` |
 | `handoff-state.json` | `tagteam cycle …`, `tagteam rule …`, the watcher | whose turn, which phase/type/round, status, history |
 | `handoff-diagnostics.jsonl` | state/cycle writers | diagnostics when a write is skipped or out of sequence |
 | `docs/handoffs/<phase>_<type>_rounds.jsonl` / `_status.json` | `tagteam cycle init` / `add`, rulings | the canonical per-cycle round log and its status (append-only rounds) |

@@ -28,6 +28,18 @@ agents:
     name: {lead_name}
   reviewer:
     name: {reviewer_name}
+
+# Optional blocks (see docs/how-tagteam-works.md):
+#
+# gatekeeper:              # deterministic pre-checks before each reviewer turn
+#   enabled: true
+#   on_submit: true        # run the gate from `tagteam cycle add` itself — no watcher needed;
+#                          # the round's one full-suite run is then on the record
+#   tests:
+#     command: "python -m pytest -q"
+#
+# watcher:
+#   resend_minutes: 15     # watchdog re-send of a still-'ready' turn (idle agent only; 0 = never)
 """
 
 HANDOFF_EXPLAINER = """
@@ -379,8 +391,8 @@ Arbiter controls (any mode):
   tagteam usage
 Escalations (opt-in briefer: `briefer: {enabled: true}` in tagteam.yaml):
   tagteam brief                                 tagteam rule approve --content "..."
-Gatekeeper (opt-in: `gatekeeper: {enabled: true, tests: {command: "..."}}`):
-  tagteam gate check                            tagteam gate status
+Gatekeeper (opt-in: `gatekeeper: {enabled: true, tests: {command: "..."}}`; `on_submit: true` gates from `cycle add`):
+  tagteam gate check [--skip-tests]             tagteam gate status
 Reviewer panel (opt-in: `panel: {enabled: true}`; 2–3 lens reviews merged into one reviewer entry):
   tagteam panel lenses                          tagteam panel status
 """

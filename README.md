@@ -206,7 +206,7 @@ gatekeeper:
     command: "python -m pytest -q"
 ```
 
-With the gate on, every impl submission is checked **before** the reviewer's turn — by a script, not a model: the test command runs, the submission must contain real implementation work since the plan was approved (an impl cycle opened over an unchanged tree fails), and the phase plan must exist. Green → a one-line report is attached to the round and the reviewer starts with the facts; red → the turn bounces straight back to the lead with the failing output, and no reviewer tokens or rounds are spent. Two consecutive bounces and the gate passes-with-findings so nobody gets trapped. `tagteam gate check` is the lead's pre-flight; `tagteam gate status` shows the last report. Runs in every watcher mode; without a watcher, `tagteam gate run`. Details: [gatekeeper pre-checks](docs/how-tagteam-works.md#gatekeeper).
+With the gate on, every impl submission is checked **before** the reviewer's turn — by a script, not a model: the test command runs, the submission must contain real implementation work since the plan was approved (an impl cycle opened over an unchanged tree fails), and the phase plan must exist. Green → a one-line report is attached to the round and the reviewer starts with the facts; red → the turn bounces straight back to the lead with the failing output, and no reviewer tokens or rounds are spent. Two consecutive bounces and the gate passes-with-findings so nobody gets trapped. `tagteam gate check` is the lead's pre-flight; `tagteam gate status` shows the last report. Runs in every watcher mode; without a watcher, `tagteam gate run` — or set `on_submit: true` (3.5) and the lead's own `cycle add … SUBMIT_FOR_REVIEW` runs the gate synchronously, so the round's **one** full-suite run is on the record whether or not a watcher is up (`gate check --skip-tests` becomes the pre-flight; the reviewer starts from the gate entry instead of re-running the suite). Details: [gatekeeper pre-checks](docs/how-tagteam-works.md#gatekeeper), [the one-run rule](docs/how-tagteam-works.md#one-run).
 
 ### Reviewer panels: three narrow reviews, one response
 
@@ -300,7 +300,7 @@ tagteam lead "message" [--new] [--conversation ID] / --list           # talk to 
 tagteam hub [--list [--json]] [--all] [--port 8090]                   # all registered projects; cockpits at /p/<id>/
 tagteam registry list [--json] | unregister PATH
 tagteam brief [--list | --generate | --event KEY]
-tagteam gate check | run | status [--json] | list      # gatekeeper pre-checks (opt-in `gatekeeper:` block)
+tagteam gate check [--skip-tests] | run | status [--json] | list   # gatekeeper pre-checks (opt-in `gatekeeper:` block; `on_submit: true` gates from `cycle add`)
 tagteam panel run | status [--json] | list | lenses | preview --lens L   # reviewer panel (opt-in `panel:` block)
 tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]
