@@ -367,6 +367,13 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/roadmap-dag.md`
 - **Source:** 3.0 proposal §4 candidate "Roadmap as DAG (`depends_on`, parallel phases in worktrees)"; promoted 2026-08-16.
 
+### Phase 41: Review-loop efficiency (3.5)
+- **Depends on:** Phase 38
+- **Status:** 🔄 Planning
+- **Description:** one full-suite run and zero spurious prompts per review round: `gatekeeper.on_submit` runs the gate synchronously from the lead's `cycle add SUBMIT_FOR_REVIEW` (works without a watcher; `gate check --skip-tests` is the cheap pre-flight); the watcher's watchdog re-sends only on positive idle, at `watcher.resend_minutes` (default 15), at most twice; verification-budget contract in the SKILL (lead reports the suite once, reviewer does not re-run it); `scripts/release.py X.Y.Z` bumps pyproject/CITATION/uv.lock.
+- **Plan:** `docs/phases/review-loop-efficiency.md`
+- **Source:** measured 2026-08-16 — four suite runs per impl round, 5-minute watchdog nudges to both agents.
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
