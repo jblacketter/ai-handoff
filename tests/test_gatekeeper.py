@@ -1387,3 +1387,159 @@ class TestCockpitAndDocs:
             assert {r["role"] for r in db.get_rounds(conn, "feat-x", "impl")} == {"lead", "reviewer"}
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 41: on-submit gate (`gatekeeper.on_submit`), --no-gate, --skip-tests
+# ---------------------------------------------------------------------------
+
+def _prep_impl_ready(project: Path, *, on_submit: bool = True, command: str | None = OK_CMD) -> None:
+    """git project, gate enabled (+ on_submit), plan approved, one code change;
+    the impl cycle is NOT open yet — the test opens it through the CLI."""
+    _git_project(project)
+    _enable(project, extra=("  on_submit: true\n" if on_submit else ""), command=command)
+    _approve_plan(project)
+    (project / "src.py").write_text("x = 2\n", encoding="utf-8")
+
+
+class TestOnSubmit:
+    def test_config_key(self):
+        assert validate_gatekeeper_config({"gatekeeper": {"enabled": True, "on_submit": True}}) == []
+        assert get_gatekeeper_spec({"gatekeeper": {"enabled": True, "on_submit": True}})["on_submit"] is True
+        assert get_gatekeeper_spec({"gatekeeper": {"enabled": True}})["on_submit"] is False
+        assert any("on_submit" in e for e in validate_gatekeeper_config({"gatekeeper": {"on_submit": "yes"}}))
+        assert g.resolve_gatekeeper({"gatekeeper": {"enabled": True, "on_submit": True}}).on_submit is True
+
+    def test_init_runs_gate_once_pass_no_watcher(self, project, capsys):
+        _prep_impl_ready(project, command=_counter_cmd(project))
+        rc = cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                      "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1"])
+        out = capsys.readouterr()
+        assert rc == 0
+        assert "Cycle created" in out.out and "gate: pass" in out.out and "tell Codex to run /handoff" in out.out
+        assert "GATE: PASS" in out.out and "one full-suite run" in out.err
+        assert _count(project) == 1
+        rows, ents = _rows(project), _entries(project)
+        assert len(rows) == 1 and rows[0]["kind"] == "manual" and rows[0]["status"] == "pass"
+        assert len(ents) == 1 and ents[0]["action"] == cycle_mod.GATE_PASS
+        assert "checked: HEAD " in ents[0]["content"]
+        assert _state(project)["turn"] == "reviewer" and _state(project)["status"] == "ready"
+        # a second gate for the same submission does not re-run the checks
+        res = _run(project)
+        assert res.status == "pass" and _count(project) == 1 and len(_rows(project)) == 1
+        assert g.gate_command(["run"], project_root=project) == 0 and _count(project) == 1
+
+    def test_add_submit_bounces_and_says_so(self, project, capsys):
+        _prep_impl_ready(project)
+        _open_impl(project)                                   # round 1 (gate not run — direct API)
+        cycle_mod.add_round("feat-x", "impl", "reviewer", "REQUEST_CHANGES", 1, "no", str(project), updated_by="Codex")
+        _enable(project, extra="  on_submit: true\n", command=FAIL_CMD)
+        (project / "src.py").write_text("x = 3\n", encoding="utf-8")
+        rc = cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "impl", "--role", "lead",
+                                      "--action", "SUBMIT_FOR_REVIEW", "--round", "2", "--updated-by", "Claude",
+                                      "--content", "impl v2"])
+        out = capsys.readouterr().out
+        assert rc == 0                                        # the round was added; the verdict is data
+        assert "Round added" in out and "gate: bounce" in out and "already back with you" in out
+        assert "GATE: BOUNCE" in out and "boom" in out
+        st = _state(project)
+        assert st["turn"] == "lead" and st["status"] == "ready"
+        ents = _entries(project)
+        assert len(ents) == 1 and ents[0]["action"] == cycle_mod.GATE_BOUNCE and ents[0]["round"] == 2
+
+    def test_no_gate_leaves_submission_gate_eligible(self, project, capsys):
+        _prep_impl_ready(project, command=_counter_cmd(project))
+        rc = cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                      "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1",
+                                      "--no-gate"])
+        out = capsys.readouterr()
+        assert rc == 0 and "gate:" not in out.out and _count(project) == 0
+        assert _rows(project) == [] and _entries(project) == []
+        assert _state(project)["turn"] == "reviewer"
+        # a later watcher / `gate run` gates it exactly once
+        res = _run(project)
+        assert res.status == "pass" and _count(project) == 1
+        assert _run(project).status == "pass" and _count(project) == 1
+
+    def test_reviewer_actions_and_amend_never_gate(self, project, capsys):
+        _prep_impl_ready(project, command=_counter_cmd(project))
+        cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                 "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1"])
+        assert _count(project) == 1
+        cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "impl", "--role", "lead",
+                                 "--action", "AMEND", "--round", "1", "--updated-by", "Claude", "--content", "ps"])
+        cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "impl", "--role", "reviewer",
+                                 "--action", "APPROVE", "--round", "1", "--updated-by", "Codex", "--content", "ok"])
+        capsys.readouterr()
+        assert _count(project) == 1 and len(_rows(project)) == 1
+
+    def test_default_off_and_not_applicable_are_byte_identical(self, project, capsys):
+        # on_submit unset → cycle add/init print exactly what they printed before
+        _prep_impl_ready(project, on_submit=False, command=_counter_cmd(project))
+        rc = cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                      "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1"])
+        out = capsys.readouterr()
+        assert rc == 0 and out.out == "Cycle created: feat-x_impl (round 1, ready_for: reviewer) + state updated\n"
+        assert out.err.startswith("[tagteam] project root:") and out.err.count("\n") == 1
+        assert _count(project) == 0 and _rows(project) == []
+        # on_submit on, but a plan cycle (not in `on`) → nothing
+        _enable(project, extra="  on_submit: true\n", command=_counter_cmd(project))
+        rc = cycle_mod.cycle_command(["init", "--phase", "feat-y", "--type", "plan", "--lead", "Claude",
+                                      "--reviewer", "Codex", "--updated-by", "Claude", "--content", "plan"])
+        out = capsys.readouterr()
+        assert rc == 0 and "gate" not in out.out and out.err.count("\n") == 1 and _count(project) == 0
+        # --no-gate is a silent no-op there too
+        rc = cycle_mod.cycle_command(["add", "--phase", "feat-y", "--type", "plan", "--role", "lead",
+                                      "--action", "AMEND", "--round", "1", "--updated-by", "Claude",
+                                      "--content", "ps", "--no-gate"])
+        assert rc == 0 and _count(project) == 0
+
+    def test_gate_error_does_not_fail_the_round(self, project, capsys):
+        _prep_impl_ready(project)
+        with patch("tagteam.gatekeeper.run_gate", side_effect=RuntimeError("kaboom")):
+            rc = cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                          "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1"])
+        out = capsys.readouterr()
+        assert rc == 0 and "Cycle created" in out.out and "kaboom" in out.err and "gate run" in out.err
+        assert _state(project)["turn"] == "reviewer" and _rows(project) == []
+
+    def test_deferred_when_slot_held(self, project, capsys):
+        _prep_impl_ready(project, command=_counter_cmd(project))
+        claim = h.claim_turn_slot(project, kind=h.SLOT_KIND_CONVERSATION, role="lead",
+                                  fields={"stem": "conv", "watcher_pid": os.getpid(),
+                                          "watcher_ident": procs.identity(os.getpid())})
+        try:
+            rc = cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                          "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1"])
+        finally:
+            h.release_turn_slot(claim)
+        out = capsys.readouterr().out
+        assert rc == 0 and "gate: deferred" in out and "still owed" in out and _count(project) == 0
+        assert _state(project)["turn"] == "reviewer" and _rows(project) == []
+        assert _run(project).status == "pass" and _count(project) == 1       # a later gate decides once
+
+    def test_gate_check_skip_tests_and_on_submit_note(self, project, capsys):
+        _prep_impl_ready(project, command=_counter_cmd(project))
+        _open_impl(project)
+        assert g.gate_command(["check", "--skip-tests"], project_root=project) == 0
+        out = capsys.readouterr().out
+        assert "tests skipped (--skip-tests)" in out and "note: on_submit" not in out and _count(project) == 0
+        assert g.gate_command(["check"], project_root=project) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("note: on_submit is on") and _count(project) == 1
+        # --skip-tests with a failing scope still fails on scope
+        _git(project, "add", "-A"); _git(project, "commit", "-qm", "work")
+        assert g.gate_command(["check", "--skip-tests"], project_root=project) == 0   # committed change still counts
+        capsys.readouterr()
+        assert g.gate_command(["run", "--skip-tests"], project_root=project) == 1     # only `check` takes the flag
+        assert "Unknown argument" in capsys.readouterr().out
+        assert _count(project) == 1
+
+    def test_head_sha_in_entry_and_run_checks_result(self, gated):
+        res = g.run_checks(_spec(gated), "feat-x", "impl", str(gated))
+        assert res["head"] and len(res["head"]) >= 7
+        d = g.decide(res, _spec(gated), 0)
+        assert d["content"].splitlines()[0].startswith("GATE: PASS") and f"checked: HEAD {res['head']}" in d["content"]
+        # results without a head (older rows / no git) still decide
+        res.pop("head")
+        assert "checked" not in g.decide(res, _spec(gated), 0)["content"]

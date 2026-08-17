@@ -1150,6 +1150,7 @@ def _cli_init(args: list[str]) -> int:
     Skill callers (agents) typically pass everything explicitly;
     humans driving the CLI can pass just `--phase` and `--content`.
     """
+    args, no_gate = _strip_flag(args, "--no-gate")
     allowed = {"--phase", "--type", "--lead", "--reviewer",
                "--content", "--updated-by"}
     parsed = _parse_args(args, allowed)
@@ -1204,11 +1205,37 @@ def _cli_init(args: list[str]) -> int:
                updated_by=updated_by)
     print(f"Cycle created: {phase}_{cycle_type} (round 1, ready_for: reviewer)"
           " + state updated")
+    if not no_gate:
+        _on_submit_gate(phase, cycle_type, reviewer)
     return 0
+
+
+def _strip_flag(args: list[str], flag: str) -> tuple[list[str], bool]:
+    """Remove a valueless flag from args; return (rest, present)."""
+    if flag not in args:
+        return args, False
+    return [a for a in args if a != flag], True
+
+
+def _on_submit_gate(phase: str, cycle_type: str, reviewer: str | None = None) -> None:
+    """Phase 41: run the on-submit gate for a lead submission just written
+    (no-op unless `gatekeeper.on_submit` is on and the gate applies)."""
+    from tagteam.gatekeeper import on_submit_gate
+    from tagteam.state import _resolve_project_root
+    root = _resolve_project_root()
+    if reviewer is None:
+        try:
+            from tagteam.config import read_config, get_agent_names
+            cfg = read_config(Path(root) / "tagteam.yaml")
+            reviewer = get_agent_names(cfg)[1] if cfg else None
+        except Exception:
+            reviewer = None
+    on_submit_gate(root, phase, cycle_type, reviewer=reviewer)
 
 
 def _cli_add(args: list[str]) -> int:
     allowed = {"--phase", "--type", "--role", "--action", "--round", "--content", "--updated-by"}
+    args, no_gate = _strip_flag(args, "--no-gate")
     parsed = _parse_args(args, allowed)
 
     phase = parsed.get("--phase")
@@ -1246,6 +1273,8 @@ def _cli_add(args: list[str]) -> int:
     print(f"Round added: {phase}_{cycle_type} round={status['round']} "
           f"state={status['state']} ready_for={status.get('ready_for')}"
           " + state updated")
+    if role == "lead" and action == "SUBMIT_FOR_REVIEW" and not no_gate:
+        _on_submit_gate(phase, cycle_type)
     return 0
 
 

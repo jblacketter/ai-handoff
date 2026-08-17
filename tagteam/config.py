@@ -523,7 +523,7 @@ def _norm_on_key(block):
     return out
 
 
-GATEKEEPER_KEYS = {"enabled", "on", "tests", "scope", "max_bounces", "max_output_chars"}
+GATEKEEPER_KEYS = {"enabled", "on", "tests", "scope", "max_bounces", "max_output_chars", "on_submit"}
 GATEKEEPER_TESTS_KEYS = {"command", "timeout_minutes"}
 GATEKEEPER_DEFAULTS = {
     "on": ["impl"], "scope": True, "max_bounces": 2, "max_output_chars": 4000,
@@ -572,6 +572,9 @@ def validate_gatekeeper_config(config: dict) -> list[str]:
     scope = block.get("scope")
     if scope is not None and not isinstance(scope, bool):
         errors.append("'gatekeeper.scope' must be true or false")
+    on_submit = block.get("on_submit")
+    if on_submit is not None and not isinstance(on_submit, bool):
+        errors.append("'gatekeeper.on_submit' must be true or false")
     for key in ("max_bounces", "max_output_chars"):
         v = block.get(key)
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
@@ -584,8 +587,9 @@ def validate_gatekeeper_config(config: dict) -> list[str]:
 
 def get_gatekeeper_spec(config: dict) -> dict:
     """{"enabled", "on", "tests_command", "tests_timeout_s", "scope",
-    "max_bounces", "max_output_chars"}. `enabled` is True only when
-    `gatekeeper.enabled: true` is explicit. Callers validate first."""
+    "max_bounces", "max_output_chars", "on_submit"}. `enabled` is True only
+    when `gatekeeper.enabled: true` is explicit; `on_submit` (Phase 41) is
+    True only when explicit. Callers validate first."""
     block = config.get("gatekeeper") if isinstance(config, dict) else None
     block = _norm_on_key(block) if isinstance(block, dict) else {}
     tests = block.get("tests") if isinstance(block.get("tests"), dict) else {}
@@ -598,7 +602,46 @@ def get_gatekeeper_spec(config: dict) -> dict:
         "scope": block.get("scope") if block.get("scope") is not None else GATEKEEPER_DEFAULTS["scope"],
         "max_bounces": int(block.get("max_bounces") if block.get("max_bounces") is not None else GATEKEEPER_DEFAULTS["max_bounces"]),
         "max_output_chars": int(block.get("max_output_chars") if block.get("max_output_chars") is not None else GATEKEEPER_DEFAULTS["max_output_chars"]),
+        "on_submit": block.get("on_submit") is True,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 41: watcher block (opt-in tuning of the watchdog re-send)
+# ---------------------------------------------------------------------------
+
+WATCHER_KEYS = {"resend_minutes"}
+WATCHER_DEFAULT_RESEND_MINUTES = 15
+
+
+def validate_watcher_config(config: dict) -> list[str]:
+    """Return problems with the top-level `watcher:` block (empty when
+    absent/valid). `resend_minutes`: integer >= 0 (0 = never re-send)."""
+    if not isinstance(config, dict):
+        return []
+    block = config.get("watcher")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return ["'watcher' must be a mapping"]
+    errors: list[str] = []
+    v = block.get("resend_minutes")
+    if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+        errors.append("'watcher.resend_minutes' must be a non-negative integer (0 = never re-send)")
+    unknown = set(block) - WATCHER_KEYS
+    if unknown:
+        errors.append(f"'watcher' has unknown keys: {sorted(unknown)}")
+    return errors
+
+
+def get_watcher_spec(config: dict) -> dict:
+    """{"resend_minutes"} with defaults applied. Callers validate first."""
+    block = config.get("watcher") if isinstance(config, dict) else None
+    block = block if isinstance(block, dict) else {}
+    v = block.get("resend_minutes")
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        v = WATCHER_DEFAULT_RESEND_MINUTES
+    return {"resend_minutes": int(v)}
 
 
 # ---------------------------------------------------------------------------
