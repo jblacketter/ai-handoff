@@ -70,6 +70,7 @@ class GateSpec:
     max_bounces: int
     max_output_chars: int
     problems: list = field(default_factory=list)
+    on_submit: bool = False        # Phase 41: gate synchronously from `cycle add/init`
 
     def applies_to(self, cycle_type: str) -> bool:
         return self.enabled and cycle_type in (self.on or [])
@@ -88,7 +89,7 @@ def resolve_gatekeeper(config: dict | None) -> GateSpec:
     enabled = bool(spec["enabled"]) and not problems
     return GateSpec(enabled, list(spec["on"]), spec["tests_command"], float(spec["tests_timeout_s"]),
                     bool(spec["scope"]), int(spec["max_bounces"]), int(spec["max_output_chars"]),
-                    problems)
+                    problems, on_submit=bool(spec.get("on_submit")))
 
 
 def load_spec(project_root: str | Path) -> GateSpec:
@@ -244,13 +245,26 @@ def check_tests(spec: GateSpec, project_root: str, *, log_path: Path | None = No
                        f"--- tests: last {spec.max_output_chars} chars ---\n{tail}", dur, data)
 
 
+def _head_sha(project_root: str) -> str | None:
+    """Short sha of the checked-out commit (None outside git)."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=project_root,
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
 def run_checks(spec: GateSpec, phase: str, cycle_type: str, project_root: str, *,
-               log_path: Path | None = None, log=None) -> dict:
+               log_path: Path | None = None, log=None, skip_tests: bool = False) -> dict:
     """Run every applicable check. ORDER MATTERS: the implementation-work
     snapshot is computed and frozen first (before any subprocess can touch
-    the tree), then plan-doc, then the test command."""
+    the tree), then plan-doc, then the test command. `skip_tests` (Phase 41,
+    `gate check --skip-tests`) records the tests check as `skip` instead of
+    running the command; the result also carries the checked `head` sha."""
     project_root = str(Path(project_root).resolve())
     t0 = time.monotonic()
+    head = _head_sha(project_root)
     checks: list[CheckResult] = []
     scope = check_scope(spec, phase, cycle_type, project_root)
     checks.append(scope)
@@ -260,14 +274,19 @@ def run_checks(spec: GateSpec, phase: str, cycle_type: str, project_root: str, *
     checks.append(plan)
     if log:
         log(f"   gate: {plan.summary}")
-    if log and spec.tests_command:
-        log(f"   gate: running tests ({spec.tests_command if isinstance(spec.tests_command, str) else ' '.join(map(str, spec.tests_command))}) …")
-    tests = check_tests(spec, project_root, log_path=log_path)
+    if skip_tests:
+        tests = CheckResult("tests", "skip", "tests skipped (--skip-tests)",
+                            "not run: pre-flight with --skip-tests")
+    else:
+        if log and spec.tests_command:
+            log(f"   gate: running tests ({spec.tests_command if isinstance(spec.tests_command, str) else ' '.join(map(str, spec.tests_command))}) …")
+        tests = check_tests(spec, project_root, log_path=log_path)
     checks.append(tests)
     if log:
         log(f"   gate: {tests.summary}")
     return {"checks": [c.as_dict() for c in checks], "phase": phase, "type": cycle_type,
-            "duration_s": round(time.monotonic() - t0, 3), "finished_at": _now_iso()}
+            "duration_s": round(time.monotonic() - t0, 3), "finished_at": _now_iso(),
+            "head": head}
 
 
 # ---------------------------------------------------------------------------
@@ -349,19 +368,20 @@ def decide(results: dict, spec: GateSpec, prior_bounces: int) -> dict:
     body_extra = ""
     if skipped:
         body_extra = "not checked — " + "; ".join(skipped)
+    # Phase 41: the entry names the checked commit so the reviewer can tie
+    # the result to the tree without re-running anything.
+    checked = [f"checked: HEAD {results['head']}"] if results.get("head") else []
     if not failed:
-        content = _report_line("PASS", checks)
-        if body_extra:
-            content += "\n" + body_extra
+        content = "\n".join([_report_line("PASS", checks)] + checked + ([body_extra] if body_extra else []))
         return {"action": _cycle.GATE_PASS, "content": content, "verdict": "PASS", "cap_hit": False,
                 "failed": []}
     if prior_bounces >= spec.max_bounces:
         head = (f"GATE: checks failed but bounce cap ({spec.max_bounces}) reached — reviewer, see report\n"
                 + _report_line("PASS-WITH-FINDINGS", checks))
-        content = "\n".join([head] + bodies + ([body_extra] if body_extra else []))
+        content = "\n".join([head] + checked + bodies + ([body_extra] if body_extra else []))
         return {"action": _cycle.GATE_PASS, "content": content, "verdict": "PASS-WITH-FINDINGS",
                 "cap_hit": True, "failed": failed}
-    content = "\n".join([_report_line("BOUNCE", checks)] + bodies + ([body_extra] if body_extra else []))
+    content = "\n".join([_report_line("BOUNCE", checks)] + checked + bodies + ([body_extra] if body_extra else []))
     return {"action": _cycle.GATE_BOUNCE, "content": content, "verdict": "BOUNCE", "cap_hit": False,
             "failed": failed}
 
@@ -858,9 +878,59 @@ def last_gate_summary(project_root: str, phase: str, cycle_type: str) -> dict | 
 # ---------------------------------------------------------------------------
 # CLI: tagteam gate check | run | status | list
 
-_GATE_USAGE = """Usage: tagteam gate <check|run|status|list> [--phase P --type T] [--json]
+# ---------------------------------------------------------------------------
+# Phase 41: on-submit gate (called by `tagteam cycle add/init`)
+
+def on_submit_gate(project_root: str | Path, phase: str, cycle_type: str, *,
+                   reviewer: str | None = None, out=None, err=None) -> GateResult | None:
+    """Gate the submission that `cycle add/init` just wrote, synchronously,
+    when `gatekeeper.on_submit` is on and the gate applies to this cycle
+    type. Same at-most-once claim path as the watcher / `gate run` (kind
+    `manual`): a gate already claimed elsewhere for this submission is
+    observed, not re-run. Prints the verdict and the next step; never
+    raises (a broken gate must not turn a written round into an error).
+    Returns None when nothing was attempted (off / not applicable)."""
+    out = out or sys.stdout
+    err = err or sys.stderr
+    root = str(Path(project_root).resolve())
+    try:
+        spec = load_spec(root)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"gate (on submit): config unreadable ({e}) — not run", file=err)
+        return None
+    if not spec.on_submit or not spec.applies_to(cycle_type):
+        return None
+    for pr in spec.problems:
+        print(f"gate (on submit): config: {pr}", file=err)
+    who = reviewer or "the reviewer"
+    print("gate (on submit): running the checks now — this is the round's one full-suite run", file=err)
+    progress = lambda m: print(m.strip(), file=err)  # noqa: E731
+    try:
+        res = run_gate(root, kind="manual", spec=spec, phase=phase, cycle_type=cycle_type, log=progress)
+    except Exception as e:  # the round is written; report and let the watcher / `gate run` decide
+        print(f"gate (on submit): error {type(e).__name__}: {e} — the watcher, or `tagteam gate run`, decides", file=err)
+        return None
+    if res.decision:
+        print(res.decision["content"], file=out)
+    tag = f" ({res.event_key})" if res.event_key else ""
+    if res.status == "pass":
+        print(f"gate: pass{tag}", file=out)
+        print(f"next: {who}'s turn — tell {who} to run /handoff", file=out)
+    elif res.status == "bounce":
+        print(f"gate: bounce{tag}", file=out)
+        print("next: the lead's turn — the turn is already back with you; fix and re-submit with --round N+1", file=out)
+    elif res.status == "not-applicable":
+        pass
+    else:
+        print(f"gate: {res.status} — {res.reason}{tag}", file=out)
+        print("next: the gate is still owed — the watcher, or `tagteam gate run`, decides", file=out)
+    return res
+
+
+_GATE_USAGE = """Usage: tagteam gate <check|run|status|list> [--phase P --type T] [--json] [--skip-tests]
   check   run the checks against the working tree, print the report, write nothing
-          (lead pre-flight before SUBMIT_FOR_REVIEW; exit 0 = would pass, 1 = would bounce)
+          (lead pre-flight before SUBMIT_FOR_REVIEW; exit 0 = would pass, 1 = would bounce;
+          --skip-tests = scope + plan-doc only — the pre-flight when `gatekeeper.on_submit` is on)
   run     gate the current reviewer-ready submission and record PASS/BOUNCE
           (manual-mode substitute for the watcher; same at-most-once claim path)
   status  last gate result for the current cycle (--json for the raw rows)
@@ -887,6 +957,7 @@ def gate_command(args: list[str], project_root: str | Path | None = None, out=No
         return 1
     phase = ctype = None
     as_json = False
+    skip_tests = False
     i = 1
     while i < len(args):
         a = args[i]
@@ -896,6 +967,8 @@ def gate_command(args: list[str], project_root: str | Path | None = None, out=No
             ctype = args[i + 1]; i += 2
         elif a == "--json":
             as_json = True; i += 1
+        elif a == "--skip-tests" and sub == "check":
+            skip_tests = True; i += 1
         else:
             print(f"Unknown argument: {a}", file=out); return 1
     if project_root is None:
@@ -917,7 +990,11 @@ def gate_command(args: list[str], project_root: str | Path | None = None, out=No
             print("gatekeeper is not enabled (tagteam.yaml `gatekeeper: {enabled: true}`) — running the checks anyway:",
                   file=out)
         progress = (lambda m: print(m.strip(), file=sys.stderr)) if as_json else (lambda m: print(m.strip(), file=out))
-        results = run_checks(spec, phase, ctype, root, log=progress)
+        if spec.on_submit and not skip_tests and spec.applies_to(ctype):
+            # Phase 41: the explicit exception to the one-run rule — say so first.
+            print("note: on_submit is on — the submit will run the suite again; use --skip-tests for the pre-flight",
+                  file=sys.stderr if as_json else out)
+        results = run_checks(spec, phase, ctype, root, log=progress, skip_tests=skip_tests)
         decision = decide(results, spec, applied_bounce_streak(root, phase, ctype))
         if as_json:
             print(json.dumps({"results": results, "decision": decision}, indent=2), file=out)
