@@ -85,8 +85,9 @@ class TestParseRoadmap:
 
         assert len(phases) == 4
         assert phases[0] == RoadmapPhase(
-            slug="auth-system", name="Auth System", status="Complete"
+            slug="auth-system", name="Auth System", status="Complete", number=1
         )
+        assert phases[0].depends_on == []
         assert phases[1].slug == "api-gateway"
         assert phases[1].status == "In Progress"
         assert phases[3].slug == "ci-integration"
