@@ -5,7 +5,7 @@
 - [x] In Review (round 2: one dependency-satisfaction rule (roadmap disposition ∪ active run's `completed`) + cross-worktree publication contract; `queue [start]` pulls in nonterminal ancestors; dynamic advance over a stale queue; graph identity validation; worktree merge target recorded at creation; round 3: advance scans the whole selected queue (blocked entries are never lost behind `current_index`); worktree creation publication boundary (clean parent, base must contain the completion HEAD, readiness evaluated on the roadmap at `base`); empty heading = identity error)
 - [x] Approved (round 3)
 - [x] Implementation
-- [ ] Implementation Review
+- [x] Implementation Review (approved round 2)
 - [ ] Complete (release **3.4.0** via PR)
 
 ## Roles
