@@ -2,8 +2,8 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review (round 2: --no-gate = synchronous call only, watcher/gate run authoritative, lead never runs the suite on a gated type; gate check w/o --skip-tests labelled the one explicit exception; release script snapshot/restore of all three files on any failure + tests for write-then-fail uv and CITATION write failure; round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
-- [ ] Approved
+- [x] In Review (round 2: --no-gate = synchronous call only, watcher/gate run authoritative, lead never runs the suite on a gated type; gate check w/o --skip-tests labelled the one explicit exception; release script snapshot/restore of all three files on any failure + tests for write-then-fail uv and CITATION write failure; round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
+- [x] Approved (round 3)
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
