@@ -1,0 +1,24 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "roadmap-dag",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-17",
+  "baseline": {
+    "sha": "de49bbcdc9d87fbbfbfb29cf578a842e1e3b6e12",
+    "dirty_paths": [],
+    "captured_at": "2026-08-17T00:31:02.004956+00:00",
+    "source": "copied-from-plan"
+  },
+  "impl_boundary": {
+    "sha": "d0c098d2444f8e291b28d4943c0fcfccfe2e6188",
+    "dirty": {
+      "docs/handoffs/roadmap-dag_plan_rounds.jsonl": "5a5ecd4b8298f6e9864e00d14a632eafba2bf858a7a8be132c8b9ec2c699647f"
+    },
+    "captured_at": "2026-08-17T00:40:18.761084+00:00",
+    "source": "copied-from-plan"
+  }
+}
