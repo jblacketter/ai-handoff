@@ -333,6 +333,41 @@ class TestChecks:
         r = g.check_tests(self._spec(tests_command=cmd), str(project))
         assert r.status == "ok" and "12 passed, 1 skipped" in r.summary
 
+    def test_summary_recognizes_bare_q_form(self):
+        # the exact tail `pytest -q` printed for the Phase 41 round-1 gate
+        out = ("........................................... [ 96%]\n"
+               "...........................................                              [100%]\n"
+               "1265 passed, 5 skipped in 247.01s (0:04:07)\n")
+        assert g._summarize_test_output(out) == "1265 passed, 5 skipped"
+        assert g._summarize_test_output("===== 12 passed, 1 skipped in 0.5s =====\n") == "12 passed, 1 skipped"
+        assert g._summarize_test_output("2 failed, 40 passed, 1 warning in 3.20s\n") == "2 failed, 40 passed, 1 warning"
+        assert g._summarize_test_output("no tests ran in 0.01s\n") == "no tests ran"
+        # a test's own chatter is not the summary; unrelated runners → None
+        assert g._summarize_test_output("INFO: 3 passed in 1s of budget\nok\n") is None
+        assert g._summarize_test_output("go: ok  \tPASS\n") is None
+
+    def test_q_form_reaches_the_gate_entry_and_status(self, project, capsys):
+        _prep_impl_ready(project, command=f'"{PY}" -c "print(\'7 passed, 2 skipped in 0.30s\')"')
+        cycle_mod.cycle_command(["init", "--phase", "feat-x", "--type", "impl", "--lead", "Claude",
+                                 "--reviewer", "Codex", "--updated-by", "Claude", "--content", "impl v1"])
+        capsys.readouterr()
+        ent = _entries(project)[0]
+        assert "tests ok (7 passed, 2 skipped, " in ent["content"] and "checked: HEAD " in ent["content"]
+        assert g.gate_command(["status"], project_root=project) == 0
+        assert "7 passed, 2 skipped" in capsys.readouterr().out
+        # BOUNCE keeps the failing summary too
+        cycle_mod.add_round("feat-x", "impl", "reviewer", "REQUEST_CHANGES", 1, "no", str(project), updated_by="Codex")
+        _enable(project, extra="  on_submit: true\n",
+                command=f'"{PY}" -c "import sys; print(\'1 failed, 6 passed in 0.30s\'); sys.exit(1)"')
+        (project / "src.py").write_text("x = 3\n", encoding="utf-8")
+        cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "impl", "--role", "lead",
+                                 "--action", "SUBMIT_FOR_REVIEW", "--round", "2", "--updated-by", "Claude",
+                                 "--content", "impl v2"])
+        capsys.readouterr()
+        b = [e for e in _entries(project) if e["action"] == cycle_mod.GATE_BOUNCE][0]
+        assert b["content"].splitlines()[0].endswith("tests FAILED (1 failed, 6 passed, exit 1, 0.3s)") \
+            or "tests FAILED (1 failed, 6 passed, exit 1, " in b["content"].splitlines()[0]
+
     def test_tests_list_form_and_unstartable(self, project):
         r = g.check_tests(self._spec(tests_command=[PY, "-c", "print(1)"]), str(project))
         assert r.status == "ok"

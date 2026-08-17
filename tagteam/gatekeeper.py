@@ -165,16 +165,23 @@ def check_plan_doc(phase: str, project_root: str) -> CheckResult:
                        f"the phase plan {rel} must exist and be non-empty")
 
 
-_PYTEST_SUMMARY = re.compile(r"=+ (.*?(?:passed|failed|error|skipped|no tests ran).*?) in ([\d.]+)s")
+# pytest's final line, in both spellings: the equals-delimited default
+# ("===== 12 passed, 1 skipped in 0.5s =====") and the bare `-q` form
+# ("1265 passed, 5 skipped in 247.01s (0:04:07)"). Anchored at a line start
+# (after optional bars/whitespace) so a stray "…passed in 3s" inside a test's
+# own output is not mistaken for the summary.
+_PYTEST_SUMMARY = re.compile(
+    r"^\s*(?:=+\s*)?((?:\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|warnings?|deselected|rerun)"
+    r"(?:, )?)+|no tests ran) in ([\d.]+)s")
 
 
 def _summarize_test_output(output: str) -> str | None:
     """A compact 'N passed, M skipped' if the runner printed a pytest-style
-    summary; else None."""
+    summary (with or without the `===` bars, i.e. also under `-q`); else None."""
     for line in reversed(output.splitlines()[-40:]):
         m = _PYTEST_SUMMARY.search(line)
         if m:
-            return m.group(1).strip()
+            return m.group(1).strip().rstrip(",")
     return None
 
 
@@ -237,11 +244,13 @@ def check_tests(spec: GateSpec, project_root: str, *, log_path: Path | None = No
     if timed_out:
         return CheckResult("tests", "fail", f"tests FAILED (timed out after {spec.tests_timeout_s / 60:.0f} min)",
                            f"--- tests: last {spec.max_output_chars} chars ---\n{tail}", dur, data)
+    summ = _summarize_test_output(output)
+    if summ:
+        data["summary"] = summ
     if code == 0:
-        summ = _summarize_test_output(output)
         return CheckResult("tests", "ok", f"tests ok ({summ + ', ' if summ else ''}{_fmt_dur(dur)})",
                            "", dur, data)
-    return CheckResult("tests", "fail", f"tests FAILED (exit {code}, {_fmt_dur(dur)})",
+    return CheckResult("tests", "fail", f"tests FAILED ({summ + ', ' if summ else ''}exit {code}, {_fmt_dur(dur)})",
                        f"--- tests: last {spec.max_output_chars} chars ---\n{tail}", dur, data)
 
 
