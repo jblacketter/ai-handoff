@@ -212,7 +212,16 @@ def project_summary(project_dir: str | Path, *, now: datetime | None = None,
                  "round": None, "turn": None, "status": None, "result": None,
                  "owed_age_s": None, "last_activity": None, "last_activity_age_s": None,
                  "paused": None, "inflight": None, "watcher": None,
-                 "brief_ready": None, "brief_attempts": None, "usage": None}
+                 "brief_ready": None, "brief_attempts": None, "usage": None,
+                 "worktree": None}
+    try:
+        from tagteam import worktree as _wt
+        wt = _wt.lookup(root)
+        if wt:
+            row["worktree"] = {"phase": wt.get("phase"), "parent": wt.get("parent"),
+                               "branch": wt.get("branch")}
+    except Exception:
+        row["worktree"] = None
     try:
         st = read_state_file(root)
         row["state"] = bool(st)
@@ -606,6 +615,13 @@ def _short(path: str) -> str:
     return f"{p.parent.name}/{p.name}" if p.parent.name else p.name
 
 
+def _label(r: dict) -> str:
+    """Hub row label; a phase worktree (Phase 40) says so."""
+    base = _short(r["path"])
+    wt = r.get("worktree") or {}
+    return f"{base} (worktree: {wt.get('phase')})" if wt.get("phase") else base
+
+
 def render_text(payload: dict) -> str:
     g = payload["groups"]; t = payload["totals"]
     lines = [f"Tagteam hub — {t['projects']} project(s) visible, {t['live']} live, "
@@ -631,17 +647,17 @@ def render_text(payload: dict) -> str:
             lines.append("  " + fmt(r))
 
     block("NEEDS YOU", g["needs_you"], lambda r: (
-        f"{_short(r['path']):40} {r.get('phase') or '-'} {r.get('type') or ''} r{r.get('round') or '-'}  "
+        f"{_label(r):40} {r.get('phase') or '-'} {r.get('type') or ''} r{r.get('round') or '-'}  "
         f"{r['why']}  [{_fmt_age(r.get('last_activity_age_s'))} ago]  → {r['hint'] or ''}"))
     block("WAITING", g["waiting"], lambda r: (
-        f"{_short(r['path']):40} {r.get('phase') or '-'} {r.get('type') or ''} r{r.get('round') or '-'}  "
+        f"{_label(r):40} {r.get('phase') or '-'} {r.get('type') or ''} r{r.get('round') or '-'}  "
         f"{r['why']} {_fmt_age(r.get('owed_age_s'))}"
         + (" ABANDONED?" if r.get('abandoned') else " STALE" if r.get('stale') else "")
         + (" · in flight" if (r.get('inflight') or {}).get('alive') else "")
         + (" · watcher" if (r.get('watcher') or {}).get('running') else "")
         + (f"  → {r['hint']}" if r.get('hint') else "")))
     block("QUIET", g["quiet"], lambda r: (
-        f"{_short(r['path']):40} {r.get('phase') or '-'} {r.get('type') or ''} r{r.get('round') or '-'}  "
+        f"{_label(r):40} {r.get('phase') or '-'} {r.get('type') or ''} r{r.get('round') or '-'}  "
         f"{r['why']}  [{_fmt_age(r.get('last_activity_age_s'))} ago]"
         + (f"  ! {r['error']}" if r.get('error') else "")))
     if payload["registry"]["show_all"] or g["hidden"]:

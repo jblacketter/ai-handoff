@@ -50,12 +50,12 @@ class RoadmapGraphError(ValueError):
 
 # Pattern: ### Phase N: <name>
 _PHASE_HEADING_RE = re.compile(
-    r"^###\s+Phase\s+(\d+):\s+(.+)$", re.MULTILINE
+    r"^###[ \t]+Phase[ \t]+(\d+):[ \t]+(.+)$", re.MULTILINE
 )
 # Lenient heading scan for identity validation: also matches a bare
 # `### Phase N:` (no name) that the strict pattern skips.
 _PHASE_HEADING_LENIENT_RE = re.compile(
-    r"^###\s+Phase\s+(\d+):\s*(.*)$", re.MULTILINE
+    r"^###[ \t]+Phase[ \t]+(\d+):[ \t]*(.*)$", re.MULTILINE
 )
 
 # Pattern: - **Status:** <status>
