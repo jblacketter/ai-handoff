@@ -1,7 +1,7 @@
 {
   "state": "in-progress",
   "ready_for": "reviewer",
-  "round": 1,
+  "round": 2,
   "phase": "terminal-app-backend",
   "type": "plan",
   "lead": "Claude",
