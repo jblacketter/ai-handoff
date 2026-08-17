@@ -5,7 +5,7 @@
 - [x] In Review (round 2: --no-gate = synchronous call only, watcher/gate run authoritative, lead never runs the suite on a gated type; gate check w/o --skip-tests labelled the one explicit exception; release script snapshot/restore of all three files on any failure + tests for write-then-fail uv and CITATION write failure; round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
 - [x] Approved (round 3)
 - [x] Implementation
-- [ ] Implementation Review
+- [ ] Implementation Review (round 1: pytest `-q` summary form recognised — `_PYTEST_SUMMARY` accepts the bare line, anchored; PASS and BOUNCE summaries carry `N passed, M skipped`; `data.summary` on the check)
 - [ ] Complete
 
 ## Roles
@@ -301,3 +301,9 @@ says "take the report or gate entry as fact".
 - Docs: how-tagteam-works (gate yaml + entry example + `--skip-tests` + on-submit paragraph +
   `#one-run` + watched-mode watchdog + files table), README, CLI help, `tagteam init` template comments.
 - This repo: `gatekeeper.on_submit: true`.
+- **Impl round 2.** `_summarize_test_output` recognises pytest's bare `-q` summary
+  (`1265 passed, 5 skipped in 247.01s (0:04:07)`) as well as the `===`-delimited form, anchored at
+  line start so a test's own chatter cannot match; the summary is now in the `tests ok (…)` *and*
+  `tests FAILED (…)` report lines (so PASS/BOUNCE entries, `gate status` and the cockpit chip carry
+  it) and in the check's `data.summary`. Regression tests on the exact round-1 tail and an
+  end-to-end on-submit PASS/BOUNCE entry check.
