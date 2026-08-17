@@ -100,6 +100,7 @@ class PanelSpec:
     argv: list | None = None
     timeout_s: float = float(h.DEFAULT_TURN_TIMEOUT_MINUTES) * 60.0
     problems: list = field(default_factory=list)
+    tail_n: int = h.DEFAULT_TAIL_ROUNDS      # the watcher's reviewer tail bound (--tail-rounds)
 
     def applies_to(self, phase: str, cycle_type: str) -> bool:
         if not self.enabled or cycle_type not in (self.on or []):
@@ -126,10 +127,12 @@ def _resolve_brief(name: str, configured: str | None, project_root: Path) -> tup
     return None, "missing"
 
 
-def resolve_panel(config: dict | None, project_root: str | Path) -> PanelSpec:
+def resolve_panel(config: dict | None, project_root: str | Path, *, tail_n: int | None = None) -> PanelSpec:
     """Validate + resolve the panel for a run. Never raises: problems are
-    returned so the watcher can warn and disable (briefer/gate contract)."""
+    returned so the watcher can warn and disable (briefer/gate contract).
+    `tail_n` is the watcher's bounded reviewer tail (`--tail-rounds`)."""
     config = config or {}
+    tail_n = int(tail_n) if tail_n is not None else h.DEFAULT_TAIL_ROUNDS
     root = Path(project_root)
     try:
         problems = list(validate_panel_config(config))
@@ -166,11 +169,56 @@ def resolve_panel(config: dict | None, project_root: str | Path) -> PanelSpec:
     except Exception as e:
         problems.append(f"panel: reviewer headless spec invalid: {e}")
     return PanelSpec(not problems, spec["on"], spec["phases"], lenses, reviewer_name, provider,
-                     executable, argv, timeout_s, problems)
+                     executable, argv, timeout_s, problems, tail_n)
 
 
-def load_spec(project_root: str | Path) -> PanelSpec:
-    return resolve_panel(read_config(Path(project_root) / "tagteam.yaml") or {}, project_root)
+def load_spec(project_root: str | Path, *, tail_n: int | None = None) -> PanelSpec:
+    return resolve_panel(read_config(Path(project_root) / "tagteam.yaml") or {}, project_root, tail_n=tail_n)
+
+
+# ---------------------------------------------------------------------------
+# context (ONE builder for the real run and `panel preview`)
+
+def build_lens_context(root: str, sub: Submission, spec: PanelSpec, *, notes: list[dict] | None = None,
+                       conn=None) -> dict:
+    """Everything a lens prompt needs beyond the brief/contract, built the
+    same way for `run_panel` and `panel preview`: the fresh top-level state,
+    the plan text, the reviewer's BOUNDED round tail (`spec.tail_n`, the
+    watcher's `--tail-rounds`) with lead-only interjections stripped, the
+    gate's entry for this round if any, and the reviewer-scoped pending
+    notes (`notes` when the caller already snapshotted them)."""
+    from tagteam.state import read_state
+    st = read_state(root) or {}
+    try:
+        tail = _cycle.tail_rounds(sub.phase, sub.type, spec.tail_n, root)
+    except Exception:
+        tail = []
+    for e in tail:
+        if isinstance(e, dict) and e.get("interjections"):
+            e["interjections"] = [i for i in e["interjections"] if i.get("target_role") in (None, "reviewer")]
+    plan_file = Path(root) / "docs" / "phases" / f"{sub.phase}.md"
+    plan_text = plan_file.read_text(encoding="utf-8", errors="replace") if plan_file.exists() else None
+    gate_entry = None
+    try:
+        for e in reversed(_cycle.read_rounds_file(sub.phase, sub.type, root)):
+            if e.get("role") == _cycle.ROLE_GATEKEEPER and int(e.get("round") or -1) == sub.round:
+                gate_entry = e
+                break
+    except Exception:
+        pass
+    if notes is None:
+        notes = []
+        try:
+            own = conn is None
+            c = conn or _db.connect(project_dir=root)
+            try:
+                notes = list(_db.pending_interjections_for(c, "reviewer", sub.phase, sub.type))
+            finally:
+                if own:
+                    c.close()
+        except Exception:
+            notes = []
+    return {"state": st, "plan_text": plan_text, "tail": tail, "gate_entry": gate_entry, "interjections": notes}
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +410,7 @@ def merge(results: list[LensResult], lens_order: list[str]) -> dict:
 
 @dataclass
 class PanelResult:
-    status: str                 # merged | fallback | deferred | superseded | error | not-applicable | not-ready | stale
+    status: str                 # merged | fallback | deferred | superseded | cancelled | error | not-applicable | not-ready | stale
     dispatch: bool
     reason: str = ""
     event_key: str | None = None
@@ -410,22 +458,21 @@ def _stamp_delivered(conn, ids: list[int], *, round_: int, stem: str) -> int:
 
 def _finish_row_from_entry(conn, row: dict, entry: dict, root: str) -> str:
     """Crash after `add_round` before the row finish: complete the row from
-    the entry (merged, decision, applied_seq) and stamp exactly the entry's
-    interjection snapshot delivered."""
-    applied_seq = None
-    try:
-        # the seq the entry's transition wrote is the first state_history /
-        # top-level seq after the entry; the current seq is the best
-        # recoverable value when the state has not moved since
-        applied_seq = _seq(root)
-    except Exception:
-        pass
+    the entry. ORDER MATTERS — stamp exactly the entry's interjection
+    snapshot delivered FIRST (idempotent: only undelivered ids change), then
+    terminalise the row: a crash between the two leaves a still-running row
+    that the next sweep completes; the reverse order could leave a terminal
+    row with pending notes forever. `applied_seq` is the exact transition
+    seq the entry carries (`panel_applied_seq`, = submission_seq + 1 under
+    the pinned write) — never the current top-level seq."""
+    ids = entry.get("panel_interjections") or []
+    _stamp_delivered(conn, ids, round_=int(entry.get("round") or row["round"]), stem=row.get("stem") or "panel")
+    applied_seq = entry.get("panel_applied_seq")
     lenses = entry.get("panel_lenses")
     _db.finish_panel(conn, row["id"], status="merged", ts=_now_iso(), decision=entry.get("action"),
                      lenses_json=json.dumps(lenses) if lenses is not None else None,
-                     stem=row.get("stem"), reason=None, applied_seq=applied_seq)
-    ids = entry.get("panel_interjections") or []
-    _stamp_delivered(conn, ids, round_=int(entry.get("round") or row["round"]), stem=row.get("stem") or "panel")
+                     stem=row.get("stem"), reason=None,
+                     applied_seq=int(applied_seq) if applied_seq is not None else None)
     return "merged"
 
 
@@ -654,40 +701,55 @@ def run_panel(root: str, *, kind: str = "auto", spec: PanelSpec | None = None, p
         log(f"   panel: {sub.event_key} attempt {attempt} ({kind}) — lenses: {', '.join(spec.lens_names)}"
             + (f"; notes: {note_ids}" if note_ids else ""))
 
-        # 3. context (once) + lenses (sequential)
+        # 3. context (once, the shared builder) + lenses (sequential)
         pre_entries = _round_log_len(root, sub.phase, sub.type)
-        st = read_state(root) or {}
-        try:
-            tail = _cycle.tail_rounds(sub.phase, sub.type, None, root)
-        except Exception:
-            tail = []
-        for e in tail:
-            if isinstance(e, dict) and e.get("interjections"):
-                e["interjections"] = [i for i in e["interjections"] if i.get("target_role") in (None, "reviewer")]
-        plan_file = Path(root) / "docs" / "phases" / f"{sub.phase}.md"
-        plan_text = plan_file.read_text(encoding="utf-8", errors="replace") if plan_file.exists() else None
-        gate_entry = None
-        try:
-            for e in reversed(_cycle.read_rounds_file(sub.phase, sub.type, root)):
-                if e.get("role") == _cycle.ROLE_GATEKEEPER and int(e.get("round") or -1) == sub.round:
-                    gate_entry = e
-                    break
-        except Exception:
-            pass
+        ctx = build_lens_context(root, sub, spec, notes=notes)
         t0 = time.monotonic()
         results: list[LensResult] = []
         rogue = False
+        cancelled = None
         for i, lens in enumerate(spec.lenses, 1):
-            prompt = compose_lens_prompt(spec, lens, i, sub, state=st, plan_text=plan_text, tail=tail,
-                                         interjections=notes, gate_entry=gate_entry,
+            prompt = compose_lens_prompt(spec, lens, i, sub, state=ctx["state"], plan_text=ctx["plan_text"],
+                                         tail=ctx["tail"], interjections=ctx["interjections"],
+                                         gate_entry=ctx["gate_entry"],
                                          verdict_path=stem_dir / f"{lens.name}.verdict.json")
             r = run_lens(spec, lens, i, sub, root=root, stem_dir=stem_dir, prompt=prompt, slot=slot, log=log)
             results.append(r)
+            if r.outcome == "failed" and r.reason.startswith("cancelled by"):
+                cancelled = r.reason
+                break                                   # the human's cancel wins: no later lenses
             if r.outcome == "failed" and r.reason.startswith("wrote to the cycle"):
                 rogue = True
                 break
         duration = time.monotonic() - t0
         lenses_json = json.dumps([r.as_dict() for r in results])
+        if cancelled:
+            # `tagteam cancel-turn` on a lens: no reviewer transition, no
+            # notes delivered, the attempt is recorded (`error`, reason
+            # cancelled) and dispatch is PAUSED exactly like a cancelled
+            # headless turn — the same reviewer turn stays owed and `tagteam
+            # resume` retries it once (attempt 2).
+            with dualwrite.writer_lock(root):
+                conn = _db.connect(project_dir=root)
+                try:
+                    _db.finish_panel(conn, row_id, status="error", ts=_now_iso(), duration_s=duration,
+                                     lenses_json=lenses_json, stem=stem, reason=cancelled)
+                    payload = {"reason": f"panel lens {cancelled}", "outcome": h.OUTCOME_CANCELLED,
+                               "phase": sub.phase, "type": sub.type, "round": sub.round, "role": "reviewer",
+                               "agent": f"{spec.reviewer_name or 'reviewer'} panel", "provider": spec.provider,
+                               "stem": stem, "panel_id": row_id, "attempt": attempt,
+                               "log_path": str(stem_dir), "ts": _now_iso()}
+                    try:
+                        _db.add_diagnostic(conn, "panel_cancelled", payload, payload["ts"])
+                        conn.commit()
+                    except Exception:
+                        pass
+                finally:
+                    conn.close()
+            h.write_pause(root, payload)
+            log(f"!! panel {cancelled} — dispatch PAUSED; `tagteam resume` retries the reviewer turn once")
+            return PanelResult("cancelled", False, cancelled, sub.event_key, row_id, attempt,
+                               lenses=[r.as_dict() for r in results], stem=stem)
         merged = merge(results, spec.lens_names) if not rogue else {"decision": None, "content": "", "fallback": False,
                                                                      "reason": "a lens wrote to the cycle"}
 
@@ -717,16 +779,25 @@ def run_panel(root: str, *, kind: str = "auto", spec: PanelSpec | None = None, p
                     return PanelResult("fallback", True, merged["reason"], sub.event_key, row_id, attempt,
                                        lenses=[r.as_dict() for r in results], stem=stem)
                 action, content = merged["decision"], merged["content"]
+                # the transition's seq is exact under the pinned write:
+                # `_derive_top_level_state` bumps the top-level seq by one
+                applied_seq = sub.submission_seq + 1
                 meta = {"panel_event": sub.event_key, "panel_id": row_id,
                         "panel_lenses": [{"lens": r.lens, "outcome": r.outcome,
                                           "verdict": r.verdict["verdict"] if r.verdict else None} for r in results],
-                        "panel_interjections": note_ids}
+                        "panel_interjections": note_ids, "panel_applied_seq": applied_seq}
                 _cycle.add_round(sub.phase, sub.type, "reviewer", action, sub.round, content, root,
                                  updated_by=f"{spec.reviewer_name or 'reviewer'} panel", meta=meta)
                 new_seq = _seq(root)
+                if new_seq != applied_seq:
+                    log(f"   panel: note — top-level seq after the write is {new_seq}, expected {applied_seq}")
+                # ORDER: stamp delivery first (idempotent), then terminalise the row —
+                # a crash between the two leaves a running row that reconciles from
+                # the entry; the reverse could strand pending notes behind a
+                # terminal row.
+                _stamp_delivered(conn, note_ids, round_=sub.round, stem=stem)
                 _db.finish_panel(conn, row_id, status="merged", ts=_now_iso(), duration_s=duration,
                                  lenses_json=lenses_json, decision=action, stem=stem, applied_seq=new_seq)
-                _stamp_delivered(conn, note_ids, round_=sub.round, stem=stem)
             finally:
                 conn.close()
         log(f"   panel: {content.splitlines()[0]}")
@@ -787,7 +858,7 @@ def panel_status(root: str, phase: str | None = None, cycle_type: str | None = N
             "last": rows[-1] if rows else None, "rows": rows, "unverifiable": unverifiable}
 
 
-_USAGE = """Usage: tagteam panel <run|status|list|lenses|preview> [--phase P --type T] [--lens L] [--json]
+_USAGE = """Usage: tagteam panel <run|status|list|lenses|preview> [--phase P --type T] [--lens L] [--tail N] [--json]
   run      run the panel now on the current reviewer-ready submission (manual mode / no watcher)
   status   last panel for the current cycle: lens outcomes, decision, paths (--json for the raw rows)
   list     every panel row for a cycle
@@ -815,6 +886,7 @@ def panel_command(args: list[str], project_root: str | Path | None = None, out=N
         return 1
     phase = ctype = lens_name = None
     as_json = False
+    tail_n = None
     i = 1
     while i < len(args):
         a = args[i]
@@ -824,6 +896,12 @@ def panel_command(args: list[str], project_root: str | Path | None = None, out=N
             ctype = args[i + 1]; i += 2
         elif a == "--lens" and i + 1 < len(args):
             lens_name = args[i + 1]; i += 2
+        elif a == "--tail" and i + 1 < len(args):
+            try:
+                tail_n = int(args[i + 1])
+            except ValueError:
+                print("--tail needs an integer", file=out); return 1
+            i += 2
         elif a == "--json":
             as_json = True; i += 1
         else:
@@ -835,7 +913,7 @@ def panel_command(args: list[str], project_root: str | Path | None = None, out=N
     st = read_state(root) or {}
     phase = phase or st.get("phase")
     ctype = ctype or st.get("type")
-    spec = load_spec(root)
+    spec = load_spec(root, tail_n=tail_n)
 
     if sub == "lenses":
         if as_json:
@@ -864,24 +942,10 @@ def panel_command(args: list[str], project_root: str | Path | None = None, out=N
         subm = current_submission(root, phase=phase, cycle_type=ctype)
         if subm is None:
             print("No reviewer-ready submission to preview against.", file=out); return 1
-        try:
-            tail = _cycle.tail_rounds(subm.phase, subm.type, None, root)
-        except Exception:
-            tail = []
-        plan_file = Path(root) / "docs" / "phases" / f"{subm.phase}.md"
-        plan_text = plan_file.read_text(encoding="utf-8", errors="replace") if plan_file.exists() else None
-        notes: list[dict] = []
-        try:
-            conn = _db.connect(project_dir=root)
-            try:
-                notes = list(_db.pending_interjections_for(conn, "reviewer", subm.phase, subm.type))
-            finally:
-                conn.close()
-        except Exception:
-            pass
+        ctx = build_lens_context(root, subm, spec)          # identical to the real run
         idx = spec.lens_names.index(lens.name) + 1
-        print(compose_lens_prompt(spec, lens, idx, subm, state=st, plan_text=plan_text, tail=tail,
-                                  interjections=notes, gate_entry=None,
+        print(compose_lens_prompt(spec, lens, idx, subm, state=ctx["state"], plan_text=ctx["plan_text"],
+                                  tail=ctx["tail"], interjections=ctx["interjections"], gate_entry=ctx["gate_entry"],
                                   verdict_path=_panels_dir(root) / "<stem>" / f"{lens.name}.verdict.json"), file=out)
         return 0
 

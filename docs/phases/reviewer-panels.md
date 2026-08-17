@@ -522,6 +522,31 @@ README.md, docs/how-tagteam-works.md, docs/roadmap.md, docs/phases/reviewer-pane
 pyproject.toml (package-data glob + 3.3.0), CITATION.cff
 ```
 
+## Implementation notes
+
+### Impl round 2 (reviewer r1)
+1. **Supersession no longer strands the turn**: `_maybe_panel` (and `_maybe_gate`) latch on
+   `superseded` too — a rounds-only AMEND leaves the same reviewer-ready seq owed, so the
+   identical next tick runs a fresh attempt (test: AMEND during a lens inside `tick`, then the
+   identical state → attempt 2 merges, no ordinary reviewer dispatched; headless + notify; the
+   gate's twin case tested).
+2. **`cancel-turn` wins**: a cancelled lens stops the panel (no later lenses), writes no
+   transition, delivers no notes, releases the slot, records the attempt `error` (reason
+   `cancelled by …`) + a `panel_cancelled` diagnostic, and writes the pause marker (outcome
+   `cancelled`) exactly like a cancelled headless turn; the same reviewer turn stays owed and
+   `tagteam resume` retries it once (attempt 2). End-to-end test with a hanging fake lens.
+3. **Delivery + terminalisation ordering**: stamp the snapshot delivered FIRST (idempotent), then
+   `finish_panel(merged)` — both in the live path and in `_finish_row_from_entry`; a crash between
+   the two leaves a running row the sweep completes. `applied_seq` is the exact transition seq
+   carried in the entry (`panel_applied_seq` = submission_seq + 1 under the pinned write), never
+   the current top-level seq; entries without it record null. Tests: crash-boundary fault
+   injection; crash-entry → state advances → sweep records the original seq and delivers only the
+   original ids.
+4. **One context builder** (`build_lens_context`) for `run_panel` and `panel preview`: the
+   reviewer's BOUNDED tail (`PanelSpec.tail_n` from the watcher's `--tail-rounds`, default 3;
+   `panel preview/run --tail N`), reviewer-only note scoping, the gate report; tests prove the
+   real prompt equals the preview modulo the verdict-path placeholder.
+
 ## Success criteria
 1. With `panel` absent from `tagteam.yaml`, the full suite and a scripted
    headless plan+impl cycle behave identically to 3.2.0 (no `panels` rows,

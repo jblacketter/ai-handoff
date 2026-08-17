@@ -827,7 +827,11 @@ class _StateProcessor:
             _log(f"   panel error: {type(e).__name__}: {e} — will retry")
             self._panel_owed_seq = seq
             return False
-        if res.status in ("deferred", "error", "not-ready"):
+        if res.status in ("deferred", "error", "not-ready", "cancelled", "superseded"):
+            # undecided: slot busy / live other runner / transient / cancelled
+            # (the pause marker holds; `tagteam resume` re-enters) / superseded
+            # by a rounds-only AMEND (same seq still owed) — retry on identical
+            # ticks; a seq change clears the latch naturally
             if self._panel_owed_seq != seq:
                 _log(f"   panel: undecided ({res.reason}) — reviewer hand-off withheld until the panel decides")
             self._panel_owed_seq = seq
@@ -838,9 +842,6 @@ class _StateProcessor:
             return False
         if res.status == "merged":
             _log("   panel: merged — the panel's entry is the reviewer's response (reviewer not dispatched)")
-            return False
-        if res.status == "superseded":
-            # the submission moved under the panel; the fresh state gets its own tick
             return False
         return bool(res.dispatch)
 
@@ -863,9 +864,10 @@ class _StateProcessor:
             _log(f"   gate error: {type(e).__name__}: {e} — will retry")
             self._gate_owed_seq = seq
             return False
-        if res.status in ("deferred", "error", "not-ready"):
-            # undecided (slot busy / live other runner / transient) — retry
-            # on identical ticks; the reviewer waits for a decision
+        if res.status in ("deferred", "error", "not-ready", "superseded"):
+            # undecided (slot busy / live other runner / transient / superseded
+            # by a rounds-only AMEND on the same seq) — retry on identical
+            # ticks; the reviewer waits for a decision
             if self._gate_owed_seq != seq:
                 _log(f"   gate: undecided ({res.reason}) — reviewer hand-off withheld until the gate decides")
             self._gate_owed_seq = seq
@@ -957,7 +959,9 @@ def _build_processor(
     panel_spec = None
     try:
         from tagteam.panel import resolve_panel
-        ps = resolve_panel(config or {}, project_dir)
+        from tagteam.headless import DEFAULT_TAIL_ROUNDS as _DTR
+        ps = resolve_panel(config or {}, project_dir,
+                           tail_n=(tail_rounds if tail_rounds is not None else _DTR))
         if ps.enabled:
             panel_spec = ps
         elif ps.problems:
