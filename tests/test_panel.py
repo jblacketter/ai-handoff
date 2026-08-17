@@ -526,24 +526,76 @@ class TestInterjections:
                             updated_by="Codex panel",
                             meta={"panel_event": sub.event_key, "panel_id": rid,
                                   "panel_lenses": [{"lens": "scope", "outcome": "ok", "verdict": "REQUEST_CHANGES"}],
-                                  "panel_interjections": [n1]})
+                                  "panel_interjections": [n1], "panel_applied_seq": sub.submission_seq + 1})
         seq = _state(paneled)["seq"]
+        assert seq == sub.submission_seq + 1
         n2 = _note(paneled, "second, later")
+        # the state ADVANCES before the sweep (lead re-submits) — reconciliation
+        # must still record the ORIGINAL applied seq and deliver only n1
+        cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", 2, "again", str(paneled), updated_by="Claude")
+        assert _state(paneled)["seq"] == seq + 1
         out = pnl.sweep_abandoned_panels(str(paneled), _spec(paneled))
         assert out["reconciled"] == [rid]
         row = _rows(paneled)[0]
         assert row["status"] == "merged" and row["decision"] == "REQUEST_CHANGES" and row["applied_seq"] == seq
         d = _delivered(paneled)
         assert d[n1] == "crashed-stem" and d[n2] is None
-        assert _state(paneled)["seq"] == seq
+        assert _state(paneled)["seq"] == seq + 1                                # untouched by the sweep
         # idempotent
         assert pnl.sweep_abandoned_panels(str(paneled), _spec(paneled))["reconciled"] == []
-        # a later attempt's entry never completes an earlier abandoned row (gate_id rule)
+        # an entry without the seq key (older writer) records null, never a fabricated seq
+        sub2 = pnl.current_submission(str(paneled))
         conn = db.connect(project_dir=str(paneled))
         try:
-            assert db.decided_panel_for_event(conn, sub.event_key)["id"] == rid
+            rid2, _ = db.claim_panel(conn, ts=pnl._now_iso(), phase=sub2.phase, cycle_type=sub2.type, round_=sub2.round,
+                                     submission_seq=sub2.submission_seq, event_key=sub2.event_key, kind="auto",
+                                     runner_pid=dead.pid, runner_ident="gone")
         finally:
             conn.close()
+        cycle_mod.add_round("feat-x", "impl", "reviewer", "APPROVE", 2, "PANEL: APPROVE — …", str(paneled),
+                            updated_by="Codex panel", meta={"panel_event": sub2.event_key, "panel_id": rid2,
+                                                             "panel_lenses": [], "panel_interjections": []})
+        pnl.sweep_abandoned_panels(str(paneled), _spec(paneled))
+        assert _rows(paneled)[-1]["status"] == "merged" and _rows(paneled)[-1]["applied_seq"] is None
+
+    def test_stamp_before_finish_crash_boundary(self, paneled, monkeypatch):
+        """Fault-inject the delivery/terminalisation boundary: a crash right
+        after `add_round` + stamping but before `finish_panel` leaves a
+        still-running row that the next sweep completes idempotently (no
+        double delivery, exact applied seq); and if `finish_panel` were
+        reached first the ordering would have stranded the note — assert the
+        implementation stamps first."""
+        n1 = _note(paneled, "note")
+        real_finish = db.finish_panel
+        calls = []
+
+        def boom(conn, id_, **kw):
+            calls.append(kw.get("status"))
+            if kw.get("status") == "merged" and len(calls) == 1:
+                raise RuntimeError("crash before terminalisation")
+            return real_finish(conn, id_, **kw)
+        with patch.object(db, "finish_panel", boom):
+            res = _run(paneled)
+        assert res.status == "error"                              # the crash surfaced as an error return …
+        rows = _rows(paneled)
+        assert len(rows) == 1 and rows[0]["status"] in ("running", "error")
+        # … but the entry + delivery already happened (stamp came first)
+        assert len(_entries(paneled)) == 1 and _delivered(paneled)[n1] is not None
+        seq = _state(paneled)["seq"]
+        conn = db.connect(project_dir=str(paneled))
+        try:
+            # simulate the crash precisely: the row is still running (the error path finished it as
+            # `error` after the exception — put it back to running to model a hard crash)
+            conn.execute("UPDATE panels SET status='running', finished_at=NULL, reason=NULL WHERE id=?", (rows[0]["id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        out = pnl.sweep_abandoned_panels(str(paneled), _spec(paneled))
+        assert out["reconciled"] == [rows[0]["id"]]
+        row = _rows(paneled)[0]
+        assert row["status"] == "merged" and row["applied_seq"] == seq
+        assert _delivered(paneled)[n1] is not None and len(_entries(paneled)) == 1
+        assert _state(paneled)["seq"] == seq
 
 
 # ---------------------------------------------------------------------------
@@ -780,3 +832,180 @@ class TestCliDocs:
             conn.close()
         assert _entries(project) == []
         assert not [u for u in _usage(project) if (u.get("kind") or "").startswith("panel")]
+
+
+# ---------------------------------------------------------------------------
+# impl round 2: watcher supersession latch, cancel-turn, prompt context parity
+# ---------------------------------------------------------------------------
+
+class TestRound2:
+    @pytest.mark.parametrize("mode", ["headless", "notify"])
+    def test_watcher_amend_during_lens_then_identical_tick_merges(self, paneled, monkeypatch, mode):
+        """A rounds-only AMEND during a lens inside `tick` supersedes the
+        attempt WITHOUT changing seq; the identical next tick must run a fresh
+        attempt that merges — never dispatch an ordinary reviewer, never
+        strand the turn."""
+        real = pnl.run_lens
+        calls = {"n": 0}
+
+        def racing(spec, lens, index, sub, **kw):
+            r = real(spec, lens, index, sub, **kw)
+            if lens.name == "scope" and calls["n"] == 0:
+                calls["n"] += 1
+                cycle_mod.add_round(sub.phase, "impl", "lead", "AMEND", 1, "ps", str(paneled), updated_by="Claude")
+            return r
+        eng = MagicMock(); eng.paused.return_value = None; eng.slot_busy = None
+        p = _proc(mode, paneled, _spec(paneled), engine=eng if mode == "headless" else None)
+        st = _state(paneled)
+        with patch.object(pnl, "run_lens", racing), patch("tagteam.watcher.notify_macos") as notify:
+            p.tick(st)
+            assert p._panel_owed_seq == st["seq"] and _rows(paneled)[-1]["status"] == "superseded"
+            assert _state(paneled)["seq"] == st["seq"]                       # AMEND: seq unchanged
+            p.tick(st)                                                        # identical tick → fresh attempt
+            assert p._panel_owed_seq is None
+            assert [r["status"] for r in _rows(paneled)] == ["superseded", "merged"]
+            notify.assert_not_called()
+            eng.run_owed_turn.assert_not_called()
+        assert _state(paneled)["status"] == "done"                            # merged APPROVE
+
+    def test_gate_superseded_on_same_seq_re_arms_latch(self, paneled, monkeypatch):
+        """The same stranding existed for the gate; superseded → latch."""
+        from tagteam import gatekeeper as g
+        subprocess.run(["git", "init", "-q"], cwd=str(paneled), check=True)
+        (paneled / "tagteam.yaml").write_text("agents:\n  lead:\n    name: Claude\n  reviewer:\n    name: Codex\n"
+                                              f"gatekeeper:\n  enabled: true\n  scope: false\n  tests:\n    command: {json.dumps(f'\"{PY}\" -c \"print(1)\"')}\n")
+        gate = g.load_spec(paneled)
+        p = _proc("notify", paneled, None, gate=gate)
+        st = _state(paneled)
+        real = g.run_checks
+        done = {"n": 0}
+
+        def racing(*a, **kw):
+            res = real(*a, **kw)
+            if done["n"] == 0:
+                done["n"] += 1
+                cycle_mod.add_round("feat-x", "impl", "lead", "AMEND", 1, "ps", str(paneled), updated_by="Claude")
+            return res
+        with patch.object(g, "run_checks", racing), patch("tagteam.watcher.notify_macos") as notify:
+            p.tick(st)
+            assert p._gate_owed_seq == st["seq"] and notify.call_count == 0
+            p.tick(st)                                                            # identical tick → decides + hands off
+            assert p._gate_owed_seq is None and notify.call_count == 1
+
+    def test_cancel_turn_on_a_hanging_lens(self, paneled, monkeypatch):
+        """`tagteam cancel-turn` during a lens: later lenses do not run, no
+        reviewer transition, no notes delivered, slot released, row `error`
+        (cancelled), dispatch PAUSED with a diagnostic; `tagteam resume`
+        retries the same owed reviewer turn once (attempt 2 merges)."""
+        import threading, time
+        from tagteam import controls
+        n1 = _note(paneled, "note")
+        _verdicts(monkeypatch, {"correctness": "hang", "scope": "approve", "verification": "approve"})
+        spec = _spec(paneled)
+        spec.timeout_s = 120.0
+        p = _proc("notify", paneled, spec)
+        st = _state(paneled)
+        outcome = {}
+
+        def cancel_when_running():
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                m = h.read_inflight(paneled)
+                if m and m.get("kind") == "panel" and m.get("pid"):
+                    outcome["rc"] = controls.cancel_turn_command(["--by", "jack"], project_root=paneled)
+                    return
+                time.sleep(0.1)
+            outcome["rc"] = "never saw a lens pid"
+        t = threading.Thread(target=cancel_when_running); t.start()
+        with patch("tagteam.watcher.notify_macos") as notify:
+            p.tick(st)
+            t.join(60)
+            notify.assert_not_called()
+        assert outcome.get("rc") == 0
+        rows = _rows(paneled)
+        assert len(rows) == 1 and rows[0]["status"] == "error" and "cancelled by jack" in rows[0]["reason"]
+        lenses = json.loads(rows[0]["lenses_json"])
+        assert [l["lens"] for l in lenses] == ["correctness"] and "cancelled" in lenses[0]["reason"]   # no later lenses
+        assert _entries(paneled) == [] and _state(paneled)["seq"] == st["seq"] and _state(paneled)["turn"] == "reviewer"
+        assert _delivered(paneled)[n1] is None
+        assert not h.slot_status(paneled)["held"]
+        pause = h.read_pause(paneled)
+        assert pause and pause["outcome"] == "cancelled" and "panel lens cancelled by jack" in pause["reason"]
+        conn = db.connect(project_dir=str(paneled))
+        try:
+            kinds = [r[0] for r in conn.execute("SELECT kind FROM diagnostics ORDER BY id")]
+        finally:
+            conn.close()
+        assert "panel_cancelled" in kinds
+        assert p._panel_owed_seq == st["seq"]
+        # paused: identical ticks do nothing
+        _verdicts(monkeypatch, default="approve")
+        with patch("tagteam.watcher.notify_macos") as notify:
+            p.tick(st)
+            assert len(_rows(paneled)) == 1 and notify.call_count == 0
+            # resume → the same owed reviewer turn is retried once → attempt 2 merges
+            controls.resume_command([], project_root=paneled)
+            p.tick(st)
+            assert [r["status"] for r in _rows(paneled)] == ["error", "merged"] and _rows(paneled)[-1]["attempt"] == 2
+            notify.assert_not_called()
+        assert _state(paneled)["status"] == "done" and _delivered(paneled)[n1] is not None
+
+    def test_context_bounded_tail_note_scoping_gate_report_and_preview_parity(self, paneled, monkeypatch, capsys):
+        # build history: 5 lead/reviewer rounds so the tail bound bites
+        for r in range(1, 5):
+            cycle_mod.add_round("feat-x", "impl", "reviewer", "REQUEST_CHANGES", r, f"no {r}", str(paneled), updated_by="Codex")
+            cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", r + 1, f"again {r + 1}", str(paneled), updated_by="Claude")
+        sub = pnl.current_submission(str(paneled))
+        assert sub.round == 5
+        # a gate entry for this round + a lead-only note + a reviewer note
+        rp = cycle_mod._rounds_path("feat-x", "impl", str(paneled))
+        with open(rp, "a") as f:
+            f.write(json.dumps({"round": 5, "role": "gatekeeper", "action": "GATE_PASS", "content": "GATE: PASS | tests ok (1s)",
+                                "ts": pnl._now_iso(), "gate_event": sub.event_key}) + "\n")
+        n_lead = _note(paneled, "lead-only note", target="lead")
+        n_rev = _note(paneled, "reviewer note")
+        # spec with tail_n=2 (the watcher's --tail-rounds)
+        spec = pnl.load_spec(paneled, tail_n=2)
+        assert spec.tail_n == 2
+        ctx = pnl.build_lens_context(str(paneled), sub, spec)
+        assert [e["round"] for e in ctx["tail"]] == [4, 5]                          # bounded
+        assert ctx["gate_entry"]["content"].startswith("GATE: PASS")
+        assert [n["id"] for n in ctx["interjections"]] == [n_rev]                   # reviewer-scoped
+        # the real run's prompt == preview's prompt (modulo the verdict-path placeholder)
+        _verdicts(monkeypatch, default="approve")
+        res = pnl.run_panel(str(paneled), spec=spec)
+        assert res.status == "merged"
+        real_prompt = (Path(paneled) / ".tagteam" / "panels" / res.stem / "scope.prompt").read_text()
+        assert "again 5" in real_prompt and "again 4" in real_prompt and "again 2" not in real_prompt
+        assert "GATE: PASS | tests ok (1s)" in real_prompt and "reviewer note" in real_prompt and "lead-only" not in real_prompt
+        # preview against the same submission (reopen an equivalent state: preview needs a reviewer-ready one)
+        # → compare on the previous submission by regenerating from the recorded context: use a fresh cycle
+        _open_impl(paneled, phase="feat-p")
+        (paneled / "docs" / "phases" / "feat-p.md").write_text("# p\n")
+        sub2 = pnl.current_submission(str(paneled))
+        n3 = _note(paneled, "note for p")
+        _note(paneled, "lead-only for p", target="lead")
+        capsys.readouterr()                                                          # drop the interject chatter
+        assert pnl.panel_command(["preview", "--lens", "scope", "--tail", "2"], project_root=paneled) == 0
+        preview = capsys.readouterr().out
+        ctx2 = pnl.build_lens_context(str(paneled), sub2, pnl.load_spec(paneled, tail_n=2))
+        expected = pnl.compose_lens_prompt(pnl.load_spec(paneled, tail_n=2), spec.lenses[1], 2, sub2, state=ctx2["state"],
+                                           plan_text=ctx2["plan_text"], tail=ctx2["tail"], interjections=ctx2["interjections"],
+                                           gate_entry=ctx2["gate_entry"],
+                                           verdict_path=Path(paneled) / ".tagteam" / "panels" / "<stem>" / "scope.verdict.json")
+        assert preview.strip() == expected.strip()
+        assert "note for p" in preview and "lead-only for p" not in preview
+        # and the real run for that submission differs from the preview ONLY in the verdict path
+        res2 = pnl.run_panel(str(paneled), spec=pnl.load_spec(paneled, tail_n=2))
+        real2 = (Path(paneled) / ".tagteam" / "panels" / res2.stem / "scope.prompt").read_text()
+        norm = lambda t: t.replace(res2.stem, "<stem>").strip()
+        assert norm(real2) == preview.strip()
+
+    def test_build_processor_passes_tail_rounds(self, paneled):
+        from tagteam.watcher import _build_processor
+        p = _build_processor(mode="notify", lead_pane="l", reviewer_pane="r", confirm=False, timeout_minutes=30,
+                             project_dir=str(paneled), max_retries=1, retry_delay=0, pre_send_delay=0, tail_rounds=7)
+        assert p.panel.tail_n == 7
+        p = _build_processor(mode="notify", lead_pane="l", reviewer_pane="r", confirm=False, timeout_minutes=30,
+                             project_dir=str(paneled), max_retries=1, retry_delay=0, pre_send_delay=0)
+        assert p.panel.tail_n == h.DEFAULT_TAIL_ROUNDS
