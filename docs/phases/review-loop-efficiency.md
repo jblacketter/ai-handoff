@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review (round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
+- [ ] In Review (round 2: --no-gate = synchronous call only, watcher/gate run authoritative, lead never runs the suite on a gated type; gate check w/o --skip-tests labelled the one explicit exception; release script snapshot/restore of all three files on any failure + tests for write-then-fail uv and CITATION write failure; round 1: one-run rule table + gate entry contents; watchdog per-seq state machine + tests; release script write order/rollback + lock-enabled test)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -83,8 +83,9 @@ checks, MCP server, any cockpit work.
   - Exit code: **0** for pass and bounce (the round was added; the verdict
     is data), 1 only when the round itself failed to be added. `--json`
     unaffected (cycle add has none).
-- Escape hatch: `--no-gate` on `cycle add`/`cycle init` skips the on-submit
-  run for that call (e.g. a watcher will gate it).
+- Escape hatch: `--no-gate` on `cycle add`/`cycle init` skips the
+  *synchronous* run for that call only; the submission remains gate-eligible
+  for a running watcher / `tagteam gate run` (semantics in §C).
 - `tagteam gate check --skip-tests`: runs scope + plan-doc only, prints the
   report with `tests: skipped`, exit code from the remaining checks. Because
   the on-submit gate is the single full run, the lead's pre-flight no
@@ -162,15 +163,25 @@ submission, and it is the one whose result is on the record:
 | Situation | The one full run | Lead does | Reviewer does |
 |---|---|---|---|
 | `on_submit: true` (gated type) | the on-submit gate's `check_tests` | `gate check --skip-tests` pre-flight (optional), then `cycle add`; the submission text cites the gate result and commit (`gate: PASS @ <sha>` — the gate entry carries the numbers) | starts from the `GATE:` entry; never re-runs |
-| `on_submit: true` but `--no-gate` | the lead's own run **before** `cycle add` | runs the suite once, reports `full suite: N passed, M skipped @ <sha>` in the submission; the watcher / `gate run` may still gate it later — that run is the *gate's* record, and the lead must not run the suite again for the same tree | as today: report or gate entry is fact |
+| `on_submit: true` but `--no-gate` | the **watcher's / `gate run`'s** gate — `--no-gate` suppresses only the synchronous call; the submission stays gate-eligible exactly as before this phase (same event key, so at most one gate ever runs for it) | does **not** run the suite; uses `--no-gate` only when a watcher is running (or will run `tagteam gate run` next); cites nothing — the gate entry is the record | starts from the `GATE:` entry (if none has appeared yet, the gate is still owed: wait / `tagteam gate status`, do not run the suite) |
 | gate not enabled / not `on` for this type | the lead's own run | same as the previous row | same |
 | gate BOUNCE (any mode) | the bounced attempt's run is spent; the **re-submission** gets one new run (on-submit again, or the lead's own if `--no-gate`) | fixes, re-submits `--round N+1` | — |
 
-The lead does not run the suite *and* let the on-submit gate run it on the
-same tree; `gate check` without `--skip-tests` on an `on_submit` project
-prints a one-line reminder (`note: on_submit is on — the submit will run
-the suite; use --skip-tests for the pre-flight`) but still runs (opt-in
-double run is the lead's call, e.g. before a large fix).
+`--no-gate` is therefore *never* "I ran it myself": on a gated type the
+gate's run is authoritative whether it happens synchronously or from the
+watcher; the lead's own run is the record only when no gate applies
+(`enabled: false` or the type is not in `on`; there `--no-gate` is a no-op
+and is accepted silently). Test: `cycle add --no-gate` on a gated type
+writes no gate row, leaves the submission reviewer-ready, and a subsequent
+`gate run` runs the checks exactly once.
+
+**Explicit exception (not the default path):** `tagteam gate check`
+*without* `--skip-tests` on an `on_submit` project still runs the suite —
+that is a deliberate extra run the lead opts into (e.g. before a large fix)
+and the command says so first (`note: on_submit is on — the submit will run
+the suite again; use --skip-tests for the pre-flight`). The "exactly one"
+success criterion is about what the tooling does on the default path; this
+opt-in is the only sanctioned way to exceed it.
 
 **Gate entry contents (unchanged format, made a requirement):** the
 `GATE: PASS | tests ok (<duration>) | scope N paths | plan-doc ok` line,
@@ -194,25 +205,35 @@ says "take the report or gate entry as fact".
   (warns if `uv` is missing); prints the changed files and the recipe
   (`git commit -am "release: X.Y.Z" && git tag vX.Y.Z && git push && git push --tags`).
   No git side effects. `--dry-run` prints without writing.
-- Write order and rollback: the script reads all three files, computes the
-  new contents, then — because `uv lock` needs the real `pyproject.toml` —
-  writes in this order: write `pyproject.toml` → run `uv lock` → on success write
-  `CITATION.cff`; on `uv lock` failure (non-zero, missing binary without
-  `--no-lock`, timeout) **restore `pyproject.toml` from the in-memory
-  original byte-for-byte**, leave `uv.lock`/`CITATION.cff` untouched, print
-  the uv output and exit 2 — the tree is unchanged, nothing looks half-released.
-  `--dry-run` writes nothing and runs nothing (prints the three planned edits).
-- Test `tests/test_release_script.py` runs it via `runpy` against a temp
-  root with copies of the three files: `--no-lock` happy path (pyproject +
-  CITATION updated, `date-released` set), refusal on a non-increasing
-  version (`3.4.0`, `3.4.0-x`, `3.3.9`) with no writes, `--dry-run` leaves
-  all three files byte-identical, and a **lock-enabled** case with a
-  deterministic fake `uv` on `PATH` (a shell script that rewrites the
-  project's `version = "…"` entry in `uv.lock`, keeps every other line):
-  the project package entry changes old → new, unrelated dependency entries
-  are byte-identical, and a fake `uv` that exits 1 leaves `pyproject.toml`
-  restored and `CITATION.cff`/`uv.lock` untouched with exit 2. No git
-  commands are executed by the script (test asserts no `.git` is required).
+- Transactional write (all three files): the script first **snapshots the
+  original bytes** of `pyproject.toml`, `uv.lock` (if present) and
+  `CITATION.cff`, then proceeds: write `pyproject.toml` (temp file +
+  `os.replace`) → run `uv lock` (unless `--no-lock`) → write `CITATION.cff`
+  (temp + `os.replace`). On **any** failure at any step — `uv lock`
+  non-zero / timeout / binary missing (without `--no-lock`), a write error on
+  either file, or an unexpected exception — the script restores **every**
+  file whose current bytes differ from its snapshot (a failing `uv lock`
+  may have partially rewritten `uv.lock`; a `CITATION.cff` failure after a
+  successful lock must roll back both `pyproject.toml` and `uv.lock`), prints
+  what failed (uv output included) and exits 2. Success criterion: after a
+  failed run the three files are byte-identical to before; nothing looks
+  half-released. `--dry-run` writes nothing and runs nothing (prints the
+  three planned edits). No git command is ever executed.
+- Test `tests/test_release_script.py` imports the script as a module
+  (`importlib.util.spec_from_file_location`) and calls `main(argv)` against
+  a temp root with copies of the three files: `--no-lock` happy path
+  (pyproject + CITATION updated, `date-released` set), refusal on a
+  non-increasing version (`3.4.0`, `3.4.0-x`, `3.3.9`) with no writes,
+  `--dry-run` leaves all three files byte-identical, and **lock-enabled**
+  cases with a deterministic fake `uv` on `PATH` (a shell script that
+  rewrites the project's `version = "…"` entry in `uv.lock` and keeps every
+  other line): (a) success — the project package entry changes old → new,
+  unrelated dependency entries are byte-identical; (b) a fake `uv` that
+  **writes garbage into `uv.lock` and then exits 1** → all three files
+  byte-identical to before, exit 2; (c) a `CITATION.cff` write failure after
+  a successful lock (the test monkeypatches the module's `_write_atomic` to
+  raise for that path) → `pyproject.toml` and `uv.lock` restored, exit 2.
+  The temp root has no `.git`, which also proves the script needs none.
 - `docs/how-tagteam-works.md` release notes / memory recipe point at it.
 
 ## Files
@@ -254,6 +275,8 @@ says "take the report or gate entry as fact".
 - The gate entry (PASS or BOUNCE) carries the runner's test summary line and
   the checked commit sha; a lead submission on an `on_submit` project cites
   the gate result and commit, not a second run.
-- `scripts/release.py` with a failing `uv lock` leaves the tree
-  byte-identical (pyproject restored) and exits 2.
+- `scripts/release.py`: any failure (lock, either write) leaves all three
+  files byte-identical to before and exits 2; `--no-gate` on a gated type
+  writes no gate row and leaves the submission gate-eligible (one later
+  gate run, never two).
 - Full suite passes; docs and both SKILL copies identical.
