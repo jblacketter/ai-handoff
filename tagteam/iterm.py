@@ -6,13 +6,18 @@ AppleScript's `write text`. Each tab is an independent terminal session --
 no pane sharing, no nesting, no corruption.
 """
 
-import json
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SESSION_FILE = ".handoff-session.json"
+from tagteam.tabs import (  # noqa: F401  (re-exported: patch points + callers)
+    SESSION_FILE,
+    _find_session_file,
+    _read_session_file,
+    _session_file_path,
+    _write_session_file,
+)
 _ITERM_LAUNCH_TIMEOUT_S = 10.0
 _ITERM_POLL_INTERVAL_S = 0.2
 _ITERM_READY_PROBE = 'tell application "iTerm2" to count windows'
@@ -86,40 +91,6 @@ def _ensure_iterm_ready() -> None:
         f"iTerm2 scripting did not become ready within "
         f"{_ITERM_LAUNCH_TIMEOUT_S:.0f}s: {last_error}"
     )
-
-
-def _session_file_path(project_dir: str) -> Path:
-    return Path(project_dir) / SESSION_FILE
-
-
-def _find_session_file(project_dir: str) -> Path | None:
-    """Find .handoff-session.json in project_dir or any parent directory."""
-    current = Path(project_dir).resolve()
-    for _ in range(20):  # safety limit
-        candidate = current / SESSION_FILE
-        if candidate.exists():
-            return candidate
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return None
-
-
-def _read_session_file(project_dir: str) -> dict | None:
-    """Read the session file, searching parent directories if needed."""
-    path = _find_session_file(project_dir)
-    if path is None:
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _write_session_file(project_dir: str, data: dict) -> None:
-    path = _session_file_path(project_dir)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def create_session(project_dir: str, launch: bool = False) -> bool:
@@ -464,3 +435,7 @@ def kill_session(project_dir: str) -> bool:
 
     print("iTerm2 session killed.")
     return True
+
+
+# Common tab-driver surface name (see tagteam.tabs).
+list_sessions = list_iterm_sessions
