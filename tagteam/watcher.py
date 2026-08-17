@@ -58,7 +58,17 @@ BUSY_PATTERNS = [
     "Running",
     "Do you want to proceed",
     "Do you want to make this edit",
+    # Phase 41: current Claude Code / Codex busy UI
+    "to run in background",   # Claude Code: "(ctrl+b to run in background)" under a running shell command
+    "tokens)",                # Claude Code spinner: "✶ Burrowing… (10m 30s · ↓ 12.8k tokens)"
+    "· ↓",                    # same spinner, token counter
+    "working (",              # Codex: "• Working (12s • Esc to interrupt)"
 ]
+
+# Phase 41: lines captured for idle/busy detection. BUSY markers are checked
+# over the whole capture (the spinner sits above the input box), IDLE
+# markers over the last 4 lines only (the prompt / status bar).
+CAPTURE_LINES = 8
 
 IDLE_PATTERNS = [
     # Claude Code
@@ -85,17 +95,19 @@ IDLE_PATTERNS = [
 def _check_idle_patterns(content: str) -> bool:
     """Check terminal content for idle/busy patterns.
 
-    Returns True if the agent appears idle (at input prompt),
-    False if busy or content is empty.
+    Returns True if the agent appears *positively* idle (no BUSY marker
+    anywhere in the capture and an IDLE marker in the last 4 lines),
+    False if busy, inconclusive, or content is empty.
     """
     if not content.strip():
         return False
 
     lines = content.strip().splitlines()
+    whole = "\n".join(lines[-CAPTURE_LINES:]).lower()
     tail = "\n".join(lines[-4:]).lower()
 
     for pattern in BUSY_PATTERNS:
-        if pattern.lower() in tail:
+        if pattern.lower() in whole:
             return False
 
     for pattern in IDLE_PATTERNS:
@@ -107,14 +119,14 @@ def _check_idle_patterns(content: str) -> bool:
 
 def is_agent_idle(pane_target: str) -> bool:
     """Check if an agent TUI in a tmux pane is idle (at input prompt)."""
-    content = capture_pane(pane_target, last_n_lines=5)
+    content = capture_pane(pane_target, last_n_lines=CAPTURE_LINES)
     return _check_idle_patterns(content)
 
 
 def is_agent_idle_iterm(session_id: str, debug: bool = False) -> bool:
     """Check if an agent TUI in an iTerm2 session is idle."""
     from tagteam.iterm import get_session_contents
-    content = get_session_contents(session_id, last_n_lines=5)
+    content = get_session_contents(session_id, last_n_lines=CAPTURE_LINES)
     idle = _check_idle_patterns(content)
     if debug and not idle:
         tail = content.strip().splitlines()[-2:] if content.strip() else []
@@ -581,7 +593,12 @@ class _StateProcessor:
     what triggered the tick.
     """
 
-    RESEND_TIMEOUT = 1800  # seconds — re-send command if still 'ready' (interim 30m; Phase 41 makes this configurable + idle-gated)
+    # Phase 41: the watchdog re-send is configurable (`watcher.resend_minutes`,
+    # default 15, 0 = never), fires only when the agent's pane is positively
+    # idle AND unchanged since the previous probe, at most WATCHDOG_MAX_RESENDS
+    # times per submission (seq), then notifies the human exactly once.
+    WATCHDOG_MAX_RESENDS = 2
+    WATCHDOG_PROBE_S = 30.0       # min seconds between pane captures once the interval has elapsed
 
     def __init__(
         self,
@@ -603,8 +620,16 @@ class _StateProcessor:
         briefer=None,
         gatekeeper=None,
         panel=None,
+        resend_minutes: int | None = None,
     ):
         self.mode = mode
+        from tagteam.config import WATCHER_DEFAULT_RESEND_MINUTES
+        rm = WATCHER_DEFAULT_RESEND_MINUTES if resend_minutes is None else int(resend_minutes)
+        self.resend_minutes = max(0, rm)
+        self.resend_s = float(self.resend_minutes * 60)
+        # Phase 41: watchdog record — one per submission (seq); see _watchdog_due
+        self._watchdog: dict = {"seq": None, "resends": 0, "last_tail": None,
+                                "notified": False, "last_probe": 0.0, "last_busy_log": 0.0}
         # Phase 31: HeadlessEngine when mode == "headless" (else None).
         self.engine = engine
         # Phase 33: BriefSpec (enabled) or None — escalation briefer.
@@ -756,22 +781,92 @@ class _StateProcessor:
                             self._dispatch(state)
                 return
 
-            if (state.get("status") == "ready"
-                    and self.last_ready_send_time is not None
-                    and (time.time() - self.last_ready_send_time
-                         > self.RESEND_TIMEOUT)):
-                _log("Watchdog: state still 'ready' after 30m"
-                     " — re-sending command")
+            if state.get("status") == "ready" and self._watchdog_due(state):
+                _log(f"Watchdog: state still 'ready' after {self.resend_minutes}m"
+                     f" — re-sending command ({self._watchdog['resends']}/{self.WATCHDOG_MAX_RESENDS})")
                 self.last_ready_send_time = None  # avoid rapid re-sends
                 # fall through to re-process
             else:
                 return
 
         # New state (or watchdog re-send) — record and dispatch
+        if self._watchdog["seq"] != current_seq:
+            # Phase 41: a new submission — fresh watchdog record (counters,
+            # baseline, notification) so nothing from an older seq carries over
+            self._watchdog = {"seq": current_seq, "resends": 0, "last_tail": None,
+                              "notified": False, "last_probe": 0.0, "last_busy_log": 0.0}
         self.last_processed_seq = current_seq
         self.last_processed_at = updated_at
         self.idle_since = time.time()
         self._dispatch(state)
+
+    # -- watchdog (Phase 41) ----------------------------------------------
+
+    def _capture_tail(self, state: dict) -> str | None:
+        """Last CAPTURE_LINES lines of the current-turn agent's pane, or
+        None when there is no pane for this mode or the capture failed /
+        came back empty (inconclusive — never a reason to re-send)."""
+        turn = state.get("turn")
+        try:
+            if self.mode == "iterm2":
+                sid = self.lead_session_id if turn == "lead" else self.reviewer_session_id
+                if not sid:
+                    return None
+                from tagteam.iterm import get_session_contents
+                content = get_session_contents(sid, last_n_lines=CAPTURE_LINES)
+            elif self.mode == "tmux":
+                pane = self.lead_pane if turn == "lead" else self.reviewer_pane
+                content = capture_pane(pane, last_n_lines=CAPTURE_LINES)
+            else:
+                return None
+        except Exception:
+            return None
+        return content if content and content.strip() else None
+
+    def _watchdog_busy_log(self, msg: str) -> None:
+        wd = self._watchdog
+        now = time.time()
+        if now - wd["last_busy_log"] >= max(self.resend_s, 60.0):
+            wd["last_busy_log"] = now
+            _log(f"   watchdog: {msg} — not re-sending ({wd['resends']}/{self.WATCHDOG_MAX_RESENDS} used)")
+
+    def _watchdog_due(self, state: dict) -> bool:
+        """Decide whether the still-'ready' turn for this seq may be re-sent
+        now (see the class comment). Side effects: advances the record
+        (baseline tail, resend counter, one-time cap notification)."""
+        wd = self._watchdog
+        if self.resend_s <= 0 or self.last_ready_send_time is None:
+            return False
+        if wd["seq"] != state.get("seq") or wd["notified"]:
+            return False
+        if time.time() - self.last_ready_send_time <= self.resend_s:
+            return False
+        if wd["resends"] >= self.WATCHDOG_MAX_RESENDS:
+            agent = self.lead_name if state.get("turn") == "lead" else self.reviewer_name
+            mins = int(round((time.time() - self.last_ready_send_time) / 60)) + self.resend_minutes * wd["resends"]
+            _log(f"   watchdog: {agent}'s turn still 'ready' after ~{mins}m and {wd['resends']} re-sends"
+                 f" — not re-sending again; check {agent}'s tab")
+            notify_macos("Tagteam", f"{agent}'s turn is still waiting ({mins}m) — check {agent}'s tab")
+            wd["notified"] = True
+            return False
+        if self.mode in ("iterm2", "tmux"):
+            now = time.time()
+            if now - wd["last_probe"] < self.WATCHDOG_PROBE_S:
+                return False
+            wd["last_probe"] = now
+            tail = self._capture_tail(state)
+            if tail is None:
+                self._watchdog_busy_log("pane capture unavailable")
+                return False
+            if wd["last_tail"] is None or tail != wd["last_tail"]:
+                wd["last_tail"] = tail          # (re)baseline; the agent produced output, or first look
+                self._watchdog_busy_log("agent output still changing")
+                return False
+            if not _check_idle_patterns(tail):
+                self._watchdog_busy_log("agent busy")
+                return False
+        wd["resends"] += 1
+        return True
 
     def _dispatch(self, state: dict) -> None:
         current_status = state.get("status")
@@ -1119,6 +1214,20 @@ def _build_processor(
     except Exception as e:
         _log(f"WARNING: reviewer panel disabled for this run: {e}")
 
+    # Phase 41: watchdog re-send interval — problems warn and use the default.
+    resend_minutes = None
+    try:
+        from tagteam.config import validate_watcher_config, get_watcher_spec, WATCHER_DEFAULT_RESEND_MINUTES
+        wproblems = validate_watcher_config(config or {})
+        if wproblems:
+            _log(f"WARNING: watcher config ignored (default resend {WATCHER_DEFAULT_RESEND_MINUTES}m):")
+            for pr in wproblems:
+                _log(f"  - {pr}")
+        else:
+            resend_minutes = get_watcher_spec(config or {})["resend_minutes"]
+    except Exception as e:
+        _log(f"WARNING: watcher config ignored: {e}")
+
     engine = None
     if mode == "headless":
         from tagteam.headless import (HeadlessEngine,
@@ -1160,6 +1269,7 @@ def _build_processor(
         briefer=briefer_spec,
         gatekeeper=gate_spec,
         panel=panel_spec,
+        resend_minutes=resend_minutes,
     )
 
 
@@ -1167,6 +1277,9 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
     _log(f"Watching handoff-state.json"
          f" (interval: {interval}s, mode: {processor.mode})")
     _log(f"Lead: {processor.lead_name} | Reviewer: {processor.reviewer_name}")
+    rm = getattr(processor, "resend_minutes", None)
+    if rm is not None:
+        _log(f"Watchdog re-send: {'off' if rm == 0 else f'every {rm}m when the agent is idle, max {processor.WATCHDOG_MAX_RESENDS}'}")
     gk = getattr(processor, "gatekeeper", None)
     if gk is not None and getattr(gk, "enabled", False):
         _log(f"Gatekeeper: on ({', '.join(gk.on)} cycles"

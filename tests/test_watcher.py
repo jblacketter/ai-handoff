@@ -134,29 +134,159 @@ def test_working_status_does_not_notify():
     notify.assert_not_called()
 
 
-# --- Watchdog re-send ---
+# --- Watchdog re-send (Phase 41 state machine) ---
 
-def test_watchdog_resends_after_resend_timeout():
-    """If state stays 'ready' for >RESEND_TIMEOUT, re-dispatch on next tick."""
+def _age(p, seconds):
+    """Pretend the last send happened `seconds` ago."""
+    p.last_ready_send_time = p.last_ready_send_time - seconds
+
+
+def test_watchdog_resends_after_resend_interval_notify_mode():
+    """notify mode has no pane: after the interval the human is re-notified."""
     p = _make_processor()
+    assert p.resend_minutes == 15 and p.resend_s == 900.0
     with patch("tagteam.watcher.notify_macos") as notify:
         p.tick(_state(seq=5, status="ready"))
-        # Simulate time passing past the resend timeout
-        p.last_ready_send_time = (
-            p.last_ready_send_time - p.RESEND_TIMEOUT - 1
-        )
+        _age(p, p.resend_s + 1)
         notify.reset_mock()
         p.tick(_state(seq=5, status="ready"))  # same seq
     notify.assert_called_once()
+    assert p._watchdog["resends"] == 1 and p._watchdog["seq"] == 5
 
 
-def test_watchdog_does_not_resend_within_timeout():
+def test_watchdog_does_not_resend_within_interval():
     p = _make_processor()
     with patch("tagteam.watcher.notify_macos") as notify:
         p.tick(_state(seq=5, status="ready"))
         notify.reset_mock()
         p.tick(_state(seq=5, status="ready"))  # immediate, same seq
     notify.assert_not_called()
+
+
+def test_watchdog_zero_disables():
+    p = _make_processor(resend_minutes=0)
+    with patch("tagteam.watcher.notify_macos") as notify:
+        p.tick(_state(seq=5, status="ready"))
+        _age(p, 10 ** 6)
+        notify.reset_mock()
+        for _ in range(3):
+            p.tick(_state(seq=5, status="ready"))
+    notify.assert_not_called()
+
+
+def test_watchdog_cap_then_one_notification_per_seq():
+    p = _make_processor()
+    with patch("tagteam.watcher.notify_macos") as notify:
+        p.tick(_state(seq=5, status="ready"))
+        for _ in range(2):
+            _age(p, p.resend_s + 1)
+            p.tick(_state(seq=5, status="ready"))          # two re-sends
+        assert p._watchdog["resends"] == 2 and notify.call_count == 3
+        _age(p, p.resend_s + 1)
+        p.tick(_state(seq=5, status="ready"))              # cap → one notification, no send
+        assert p._watchdog["notified"] is True and notify.call_count == 4
+        assert "still waiting" in notify.call_args[0][1]
+        _age(p, p.resend_s + 1)
+        p.tick(_state(seq=5, status="ready"))              # nothing more for this seq
+        p.tick(_state(seq=5, status="ready"))
+        assert notify.call_count == 4
+        # a new seq gets a fresh record: dispatched, counters reset
+        p.tick(_state(seq=6, status="ready", turn="reviewer"))
+        assert p._watchdog == {"seq": 6, "resends": 0, "last_tail": None, "notified": False,
+                               "last_probe": 0.0, "last_busy_log": 0.0}
+        assert notify.call_count == 5
+
+
+BUSY_CLAUDE = ("some output\n✶ Burrowing… (10m 30s · ↓ 12.8k tokens)\n\n"
+               "╭──────────────╮\n│ ❯            │\n╰──────────────╯\n  ? for shortcuts")
+BUSY_CLAUDE_SHELL = ("  ⎿  $ pytest -q\n     (ctrl+b to run in background)\n\n"
+                     "╭──────────────╮\n│ ❯            │\n╰──────────────╯\n  ? for shortcuts")
+IDLE_CLAUDE = ("done.\n\n╭──────────────╮\n│ ❯            │\n╰──────────────╯\n  ? for shortcuts")
+BUSY_CODEX = "• Working (12s • Esc to interrupt)\n\n› \n  /skills to list"
+IDLE_CODEX = "• Done\n\n› \n  /skills to list  •  100% context left"
+
+
+@pytest.mark.parametrize("mode,capture_target", [
+    ("iterm2", "tagteam.iterm.get_session_contents"),
+    ("tmux", "tagteam.watcher.capture_pane"),
+])
+class TestWatchdogPane:
+    def _sender(self, mode):
+        return "tagteam.watcher.send_iterm_command" if mode == "iterm2" else "tagteam.watcher.send_tmux_keys"
+
+    def _run(self, mode, capture_target, captures, *, ticks=None, resend_minutes=None):
+        """Dispatch seq 5, then tick once per capture with the interval elapsed
+        and the probe throttle bypassed. Returns (processor, send mock)."""
+        kw = {} if resend_minutes is None else {"resend_minutes": resend_minutes}
+        p = _make_processor(mode=mode, **kw)
+        p.WATCHDOG_PROBE_S = 0.0
+        with patch(self._sender(mode), return_value=True) as send, \
+             patch("tagteam.watcher.notify_macos") as notify, \
+             patch(capture_target, side_effect=captures) as cap:
+            p.tick(_state(seq=5, status="ready"))
+            for st in (ticks or [_state(seq=5, status="ready")] * len(captures)):
+                _age(p, p.resend_s + 1)
+                p.tick(st)
+        return p, send, notify, cap
+
+    def test_capture_failure_never_resends(self, mode, capture_target):
+        p, send, notify, cap = self._run(mode, capture_target, ["", "", Exception("boom")])
+        assert send.call_count == 1 and p._watchdog["resends"] == 0 and p._watchdog["last_tail"] is None
+        notify.assert_not_called()
+
+    def test_changing_tail_rebaselines_and_suppresses(self, mode, capture_target):
+        p, send, notify, cap = self._run(mode, capture_target, [IDLE_CLAUDE, IDLE_CLAUDE + " ", IDLE_CLAUDE + "  "])
+        assert send.call_count == 1 and p._watchdog["last_tail"] == IDLE_CLAUDE + "  "
+
+    def test_busy_markers_suppress_even_when_tail_is_stable(self, mode, capture_target):
+        for busy in (BUSY_CLAUDE, BUSY_CLAUDE_SHELL, BUSY_CODEX):
+            p, send, notify, cap = self._run(mode, capture_target, [busy, busy, busy])
+            assert send.call_count == 1, busy
+            assert p._watchdog["resends"] == 0
+
+    def test_positive_idle_twice_resends_then_cap(self, mode, capture_target):
+        caps = [IDLE_CLAUDE, IDLE_CLAUDE,           # baseline, then identical → re-send 1
+                IDLE_CODEX, IDLE_CODEX,             # new baseline (differs), identical → re-send 2
+                IDLE_CODEX, IDLE_CODEX]             # cap: notify once, no send
+        p, send, notify, cap = self._run(mode, capture_target, caps)
+        assert send.call_count == 3 and p._watchdog["resends"] == 2 and p._watchdog["notified"] is True
+        assert notify.call_count == 1 and cap.call_count == 4     # no capture once capped
+
+    def test_seq_rollover_resets_baseline_and_counters(self, mode, capture_target):
+        caps = [IDLE_CLAUDE, IDLE_CLAUDE, IDLE_CLAUDE]
+        ticks = [_state(seq=5, status="ready"), _state(seq=5, status="ready"),
+                 _state(seq=6, status="ready", turn="reviewer")]
+        p, send, notify, cap = self._run(mode, capture_target, caps, ticks=ticks)
+        # seq 5: baseline + one re-send; seq 6: fresh dispatch, record reset (stale tail dropped)
+        assert send.call_count == 3
+        assert p._watchdog["seq"] == 6 and p._watchdog["resends"] == 0 and p._watchdog["last_tail"] is None
+        assert cap.call_count == 2
+
+    def test_non_ready_state_leaves_record_alone(self, mode, capture_target):
+        p, send, notify, cap = self._run(mode, capture_target, [IDLE_CLAUDE],
+                                         ticks=[_state(seq=5, status="working")])
+        assert send.call_count == 1 and cap.call_count == 0 and p._watchdog["seq"] == 5
+
+
+def test_idle_patterns_busy_over_whole_capture_idle_over_tail():
+    from tagteam.watcher import _check_idle_patterns
+    assert _check_idle_patterns(IDLE_CLAUDE) is True
+    assert _check_idle_patterns(IDLE_CODEX) is True
+    assert _check_idle_patterns(BUSY_CLAUDE) is False        # spinner 6 lines above the prompt
+    assert _check_idle_patterns(BUSY_CLAUDE_SHELL) is False
+    assert _check_idle_patterns(BUSY_CODEX) is False
+    assert _check_idle_patterns("") is False
+
+
+def test_watcher_config_block():
+    from tagteam.config import validate_watcher_config, get_watcher_spec
+    assert validate_watcher_config({}) == [] and get_watcher_spec({})["resend_minutes"] == 15
+    assert validate_watcher_config({"watcher": {"resend_minutes": 0}}) == []
+    assert get_watcher_spec({"watcher": {"resend_minutes": 0}})["resend_minutes"] == 0
+    for bad in ({"watcher": {"resend_minutes": -1}}, {"watcher": {"resend_minutes": True}},
+                {"watcher": {"resend_minutes": "5"}}, {"watcher": {"nope": 1}}, {"watcher": []}):
+        assert validate_watcher_config(bad), bad
+    assert get_watcher_spec({"watcher": {"resend_minutes": "5"}})["resend_minutes"] == 15
 
 
 # --- iterm2 mode dispatch ---
