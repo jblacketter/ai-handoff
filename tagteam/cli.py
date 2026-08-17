@@ -204,6 +204,7 @@ def setup_command(target_dir: str = ".") -> int:
 _BACKEND_SURFACE = {
     "iterm2": "tab",
     "tmux": "pane",
+    "terminal": "window",
     "manual": "terminal",
 }
 
@@ -248,7 +249,7 @@ def quickstart_command(args: list[str]) -> int:
             i += 1
 
     if backend is not None and backend not in SUPPORTED_BACKENDS:
-        print(f"Invalid backend: {backend}. Use 'iterm2', 'tmux', or 'manual'.")
+        print(f"Invalid backend: {backend}. Use 'iterm2', 'tmux', 'terminal', or 'manual'.")
         return 1
 
     project_dir = str(Path(project_dir).resolve())

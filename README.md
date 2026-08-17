@@ -46,9 +46,10 @@ You'll be prompted for your two agent names, then quickstart sets up the workspa
 
 - **iTerm2** (macOS, default when iTerm2 is installed) — opens three labeled tabs in a single window, auto-launching iTerm2 if it isn't already running.
 - **tmux** (Linux, WSL, or macOS without iTerm2) — creates one `tmux` session with three labeled panes.
+- **Terminal.app** (macOS with neither iTerm2 nor tmux — nothing to install) — opens three labeled *windows* (Lead, Watcher, Reviewer) in the built-in Terminal. Also available anywhere on macOS with `--backend terminal`. The first run asks macOS for permission to control Terminal (System Settings → Privacy & Security → Automation) — allow it once.
 - **manual** (anywhere else, including Windows without WSL) — prints the three commands for you to run in terminals you open yourself.
 
-When quickstart finishes it prints what to paste into the Lead and Reviewer agents to kick off the first phase. Override the auto-detection with `--backend iterm2|tmux|manual` if you need a specific one.
+When quickstart finishes it prints what to paste into the Lead and Reviewer agents to kick off the first phase. Override the auto-detection with `--backend iterm2|tmux|terminal|manual` if you need a specific one.
 
 **Single phase** — start a plan cycle, let the watcher handle the back-and-forth, and stop when the phase completes:
 
@@ -152,7 +153,7 @@ flowchart LR
     H --> C["+ Cockpit & Hub<br/>talk to the lead, launch,<br/>watch and steer"]
 ```
 
-Every rung is the same loop and the same files; only the automation changes. **Manual** costs nothing to set up. **Watched** (`tagteam watch --mode notify|iterm2|tmux`) types the next command into the right terminal for you. **Headless** is for running unattended, on Windows, or whenever long-lived agent sessions become the problem. The **cockpit** starts any of them from the browser and lets you talk to the lead without a terminal.
+Every rung is the same loop and the same files; only the automation changes. **Manual** costs nothing to set up. **Watched** (`tagteam watch --mode notify|iterm2|terminal|tmux`) types the next command into the right terminal for you. **Headless** is for running unattended, on Windows, or whenever long-lived agent sessions become the problem. The **cockpit** starts any of them from the browser and lets you talk to the lead without a terminal.
 
 ### Headless: fresh process per turn
 

@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tagteam.tabs import TAB_BACKENDS
 from tagteam.config import read_config, get_agent_names
 from tagteam.state import read_state, update_state, get_state_path, normalize_phase_key
 
@@ -123,15 +124,21 @@ def is_agent_idle(pane_target: str) -> bool:
     return _check_idle_patterns(content)
 
 
-def is_agent_idle_iterm(session_id: str, debug: bool = False) -> bool:
-    """Check if an agent TUI in an iTerm2 session is idle."""
-    from tagteam.iterm import get_session_contents
-    content = get_session_contents(session_id, last_n_lines=CAPTURE_LINES)
+def is_agent_idle_tab(driver, session_id: str, debug: bool = False) -> bool:
+    """Check if an agent TUI in a tab-backend session (iTerm2 / Terminal.app)
+    is idle. *driver* is the backend module (see tagteam.tabs.driver_for)."""
+    content = driver.get_session_contents(session_id, last_n_lines=CAPTURE_LINES)
     idle = _check_idle_patterns(content)
     if debug and not idle:
         tail = content.strip().splitlines()[-2:] if content.strip() else []
         _log(f"   (not idle yet, last lines: {tail!r})")
     return idle
+
+
+def is_agent_idle_iterm(session_id: str, debug: bool = False) -> bool:
+    """Check if an agent TUI in an iTerm2 session is idle."""
+    from tagteam import iterm
+    return is_agent_idle_tab(iterm, session_id, debug=debug)
 
 
 def wait_for_idle(
@@ -226,17 +233,61 @@ def send_tmux_keys(
     return False
 
 
+def wait_for_idle_tab(
+    driver,
+    session_id: str,
+    timeout: float = 300.0,
+    poll_interval: float = 5.0,
+) -> bool:
+    """Wait until the agent in the given tab-backend session is idle."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if is_agent_idle_tab(driver, session_id, debug=True):
+            return True
+        time.sleep(poll_interval)
+    return False
+
+
 def wait_for_idle_iterm(
     session_id: str,
     timeout: float = 300.0,
     poll_interval: float = 5.0,
 ) -> bool:
     """Wait until the agent in the given iTerm2 session is idle."""
-    start = time.time()
-    while time.time() - start < timeout:
-        if is_agent_idle_iterm(session_id, debug=True):
+    from tagteam import iterm
+    return wait_for_idle_tab(iterm, session_id, timeout=timeout, poll_interval=poll_interval)
+
+
+def send_tab_command(
+    driver,
+    session_id: str,
+    command: str,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> bool:
+    """Send a command to a tab-backend session (iTerm2 / Terminal.app) with
+    retry logic. *driver* is the backend module (tagteam.tabs.driver_for).
+
+    Simpler than tmux: no pre-send input clearing is needed. Submission
+    is handled inside the driver's write_text_to_session().
+    """
+    if not driver.session_id_is_valid(session_id):
+        _log(f"   ERROR: Session '{session_id}' does not exist")
+        return False
+
+    for attempt in range(1, max_retries + 1):
+        _log(f"   Checking if agent is idle...")
+        if not wait_for_idle_tab(driver, session_id, timeout=10.0, poll_interval=2.0):
+            _log("   Idle detection inconclusive, proceeding after 10s")
+
+        if driver.write_text_to_session(session_id, command):
             return True
-        time.sleep(poll_interval)
+
+        _log(f"   Attempt {attempt}/{max_retries} failed")
+        if attempt < max_retries:
+            _log(f"   Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
+
     return False
 
 
@@ -246,31 +297,22 @@ def send_iterm_command(
     max_retries: int = 3,
     retry_delay: float = 2.0,
 ) -> bool:
-    """Send a command to an iTerm2 session with retry logic.
+    """Send a command to an iTerm2 session with retry logic (see send_tab_command)."""
+    from tagteam import iterm
+    return send_tab_command(iterm, session_id, command,
+                            max_retries=max_retries, retry_delay=retry_delay)
 
-    Simpler than tmux: no pre-send input clearing is needed. Submission
-    is handled inside write_text_to_session() with an explicit CR.
-    """
-    from tagteam.iterm import write_text_to_session, session_id_is_valid
 
-    if not session_id_is_valid(session_id):
-        _log(f"   ERROR: Session '{session_id}' does not exist")
-        return False
-
-    for attempt in range(1, max_retries + 1):
-        _log(f"   Checking if agent is idle...")
-        if not wait_for_idle_iterm(session_id, timeout=10.0, poll_interval=2.0):
-            _log("   Idle detection inconclusive, proceeding after 10s")
-
-        if write_text_to_session(session_id, command):
-            return True
-
-        _log(f"   Attempt {attempt}/{max_retries} failed")
-        if attempt < max_retries:
-            _log(f"   Retrying in {retry_delay}s...")
-            time.sleep(retry_delay)
-
-    return False
+def send_terminal_command(
+    session_id: str,
+    command: str,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> bool:
+    """Send a command to a Terminal.app tab (tty) with retry logic (see send_tab_command)."""
+    from tagteam import terminal
+    return send_tab_command(terminal, session_id, command,
+                            max_retries=max_retries, retry_delay=retry_delay)
 
 
 def _try_roadmap_advance(state: dict, project_dir: str = ".") -> dict | None:
@@ -623,6 +665,12 @@ class _StateProcessor:
         resend_minutes: int | None = None,
     ):
         self.mode = mode
+        # Tab backends (iterm2 / terminal): the driver module used for every
+        # send / capture / validity check; None for the other modes.
+        self.tabs = None
+        if mode in TAB_BACKENDS:
+            from tagteam.tabs import driver_for
+            self.tabs = driver_for(mode)
         from tagteam.config import WATCHER_DEFAULT_RESEND_MINUTES
         rm = WATCHER_DEFAULT_RESEND_MINUTES if resend_minutes is None else int(resend_minutes)
         self.resend_minutes = max(0, rm)
@@ -802,18 +850,33 @@ class _StateProcessor:
 
     # -- watchdog (Phase 41) ----------------------------------------------
 
+    def _send_tab(self, session_id: str, command: str) -> bool:
+        """Send via the mode's tab driver. iTerm2 keeps its historical entry
+        point (`send_iterm_command`, patched by tests and callers); Terminal.app
+        goes through the shared `send_tab_command`."""
+        if self.mode == "iterm2":
+            return send_iterm_command(
+                session_id, command,
+                max_retries=self.max_retries,
+                retry_delay=self.retry_delay,
+            )
+        return send_tab_command(
+            self.tabs, session_id, command,
+            max_retries=self.max_retries,
+            retry_delay=self.retry_delay,
+        )
+
     def _capture_tail(self, state: dict) -> str | None:
         """Last CAPTURE_LINES lines of the current-turn agent's pane, or
         None when there is no pane for this mode or the capture failed /
         came back empty (inconclusive — never a reason to re-send)."""
         turn = state.get("turn")
         try:
-            if self.mode == "iterm2":
+            if self.mode in TAB_BACKENDS:
                 sid = self.lead_session_id if turn == "lead" else self.reviewer_session_id
-                if not sid:
+                if not sid or self.tabs is None:
                     return None
-                from tagteam.iterm import get_session_contents
-                content = get_session_contents(sid, last_n_lines=CAPTURE_LINES)
+                content = self.tabs.get_session_contents(sid, last_n_lines=CAPTURE_LINES)
             elif self.mode == "tmux":
                 pane = self.lead_pane if turn == "lead" else self.reviewer_pane
                 content = capture_pane(pane, last_n_lines=CAPTURE_LINES)
@@ -849,7 +912,7 @@ class _StateProcessor:
             notify_macos("Tagteam", f"{agent}'s turn is still waiting ({mins}m) — check {agent}'s tab")
             wd["notified"] = True
             return False
-        if self.mode in ("iterm2", "tmux"):
+        if self.mode in TAB_BACKENDS or self.mode == "tmux":
             now = time.time()
             if now - wd["last_probe"] < self.WATCHDOG_PROBE_S:
                 return False
@@ -921,18 +984,14 @@ class _StateProcessor:
             return
         send_success = False
 
-        if self.mode == "iterm2":
+        if self.mode in TAB_BACKENDS:
             if self.confirm:
                 try:
                     input(f"[{_ts()}]    Press Enter to send"
                           f" '{command}' to {agent_name}...")
                 except EOFError:
                     return
-            send_success = send_iterm_command(
-                session_id, command,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-            )
+            send_success = self._send_tab(session_id, command)
             if send_success:
                 _log(f"   Sent to {agent_name}: {command}")
             else:
@@ -1001,12 +1060,8 @@ class _StateProcessor:
             notify_macos("Tagteam", f"Cycle complete: {result}")
 
         _log(f"   Sending completion notice to {self.lead_name}...")
-        if self.mode == "iterm2":
-            send_iterm_command(
-                self.lead_session_id, done_msg,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-            )
+        if self.mode in TAB_BACKENDS:
+            self._send_tab(self.lead_session_id, done_msg)
         elif self.mode == "tmux":
             send_tmux_keys(
                 self.lead_pane, done_msg,
@@ -1161,8 +1216,16 @@ def _build_processor(
 
     lead_session_id = None
     reviewer_session_id = None
-    if mode == "iterm2":
-        from tagteam.iterm import get_session_id
+    if mode in TAB_BACKENDS:
+        from tagteam.tabs import get_session_id, session_backend
+        file_backend = session_backend(project_dir)
+        if file_backend is not None and file_backend != mode:
+            _log(f"ERROR: .handoff-session.json was written by the {file_backend!r}"
+                 f" backend, but --mode {mode} was requested.")
+            _log(f"  Run 'tagteam watch --mode {file_backend}' (or just 'tagteam watch'"
+                 " to auto-detect), or recreate the session with"
+                 f" 'tagteam session start --backend {mode}'.")
+            return None
         lead_session_id = get_session_id("lead", project_dir)
         reviewer_session_id = get_session_id("reviewer", project_dir)
         if not lead_session_id or not reviewer_session_id:
@@ -1297,15 +1360,15 @@ def _log_startup_banner(processor: _StateProcessor, interval: int) -> None:
                 _log(f"  {name} pane OK: {pane}")
             else:
                 _log(f"  WARNING: {name} pane '{pane}' not found")
-    elif processor.mode == "iterm2":
-        from tagteam.iterm import session_id_is_valid
+    elif processor.mode in TAB_BACKENDS:
+        app = "iTerm2" if processor.mode == "iterm2" else "Terminal.app"
         for name, sid in [("lead", processor.lead_session_id),
                           ("reviewer", processor.reviewer_session_id)]:
-            if session_id_is_valid(sid):
+            if processor.tabs.session_id_is_valid(sid):
                 _log(f"  {name} session OK: {sid}")
             else:
                 _log(f"  WARNING: {name} session '{sid}'"
-                     " not found in iTerm2")
+                     f" not found in {app}")
     elif processor.mode == "headless" and processor.engine is not None:
         eng = processor.engine
         for role in ("lead", "reviewer"):
@@ -1552,20 +1615,23 @@ def _auto_detect_mode(project_dir: str = ".") -> tuple[str, str | None]:
     (or why we fell back to notify).
 
     Priority:
-      1. iterm2 — if `.handoff-session.json` has session IDs for BOTH
-         lead and reviewer roles. Means `tagteam session start
-         --backend iterm2 --launch` ran successfully.
+      1. iterm2 / terminal — if `.handoff-session.json` has session IDs for
+         BOTH lead and reviewer roles; the file's `backend` field picks
+         which (a pre-3.6 file without one is iTerm2). Means `tagteam
+         session start --backend iterm2|terminal --launch` ran successfully.
       2. tmux — if the default tmux session exists. Means
          `tagteam session start --backend tmux --launch` ran.
       3. notify — fallback. The watcher will pop macOS notifications
          but won't auto-type into either agent's terminal.
     """
     try:
-        from tagteam.iterm import get_session_id
+        from tagteam.tabs import get_session_id, session_backend
         lead_sid = get_session_id("lead", project_dir)
         reviewer_sid = get_session_id("reviewer", project_dir)
         if lead_sid and reviewer_sid:
-            return "iterm2", "iterm2 session IDs found"
+            backend = session_backend(project_dir) or "iterm2"
+            if backend in TAB_BACKENDS:
+                return backend, f"{backend} session IDs found"
     except Exception:
         pass
 
@@ -1577,7 +1643,7 @@ def _auto_detect_mode(project_dir: str = ".") -> tuple[str, str | None]:
         pass
 
     return "notify", (
-        "no iterm2 session file or tmux session detected — "
+        "no iterm2/terminal session file or tmux session detected — "
         "watcher will only post notifications. Run "
         "`tagteam session start --launch` to enable auto-send."
     )
@@ -1611,9 +1677,9 @@ def watch_command(args: list[str]) -> int:
             i += 2
         elif arg == "--mode" and i + 1 < len(args):
             mode = args[i + 1]
-            if mode not in ("notify", "tmux", "iterm2", "headless"):
+            if mode not in ("notify", "tmux", "iterm2", "terminal", "headless"):
                 print(f"Invalid mode: {mode}. Use 'notify', 'tmux', 'iterm2',"
-                      " or 'headless'.")
+                      " 'terminal', or 'headless'.")
                 return 1
             i += 2
         elif arg == "--lead-pane" and i + 1 < len(args):
@@ -1657,7 +1723,7 @@ def watch_command(args: list[str]) -> int:
             print()
             print("Options:")
             print("  --interval N       Poll interval in seconds (default: 10)")
-            print("  --mode MODE        'notify', 'tmux', 'iterm2', or 'headless'")
+            print("  --mode MODE        'notify', 'tmux', 'iterm2', 'terminal', or 'headless'")
             print("                     (default: auto-detect from session state;")
             print("                      'headless' is never auto-detected)")
             print("  --lead-pane TARGET tmux pane target for lead (default: tagteam:0.0)")

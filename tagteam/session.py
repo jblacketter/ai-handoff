@@ -1,9 +1,11 @@
 """
 Session management for handoff orchestration.
 
-Supports three backends:
+Supports four backends:
 - iterm2: Creates iTerm2 tabs via AppleScript on macOS
 - tmux: Creates a tmux session with named panes
+- terminal: Creates Terminal.app windows via AppleScript on macOS (opt-in;
+  no install needed)
 - manual: Prints the commands for a manual multi-terminal workflow
 """
 
@@ -18,7 +20,9 @@ import time
 from pathlib import Path
 
 SESSION_NAME = "tagteam"
-SUPPORTED_BACKENDS = ("iterm2", "tmux", "manual")
+SUPPORTED_BACKENDS = ("iterm2", "tmux", "terminal", "manual")
+_TAB_BACKEND_LABELS = {"iterm2": "iTerm2", "terminal": "Terminal.app"}
+TAB_BACKENDS_FOR_MESSAGES = tuple(_TAB_BACKEND_LABELS)
 PRIME_MESSAGE = (
     "Read tagteam.yaml to see your role, then read"
     " .claude/skills/handoff/SKILL.md for the workflow."
@@ -85,7 +89,7 @@ def wait_for_agent_ready(
 
 
 def _backend_choices_text() -> str:
-    return "'iterm2', 'tmux', or 'manual'"
+    return "'iterm2', 'tmux', 'terminal', or 'manual'"
 
 
 def _tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -117,12 +121,27 @@ def _tmux_supported() -> bool:
     return shutil.which("tmux") is not None
 
 
+def _terminal_supported() -> bool:
+    """Terminal.app ships with every Mac; claim it only on macOS with
+    osascript and the app bundle present."""
+    if sys.platform != "darwin" or shutil.which("osascript") is None:
+        return False
+    from tagteam.terminal import _TERMINAL_APP_PATHS
+    return any(Path(p).exists() for p in _TERMINAL_APP_PATHS)
+
+
 def default_backend() -> str:
-    """Choose the best available session backend for this machine."""
+    """Choose the best available session backend for this machine.
+
+    iTerm2, then tmux, then (macOS only) Terminal.app — so a Mac with
+    nothing installed still gets an automated backend — then manual.
+    """
     if _iterm2_supported():
         return "iterm2"
     if _tmux_supported():
         return "tmux"
+    if _terminal_supported():
+        return "terminal"
     return "manual"
 
 
@@ -157,6 +176,16 @@ def _print_backend_unavailable(backend: str) -> None:
             print("  For full automation on Windows today, run under WSL with tmux.")
         else:
             print("  Or install tmux and retry.")
+        return
+
+    if backend == "terminal":
+        if sys.platform != "darwin":
+            print("Terminal.app session management is only available on macOS.")
+        else:
+            print("Terminal.app session management requires AppleScript and Terminal.app.")
+        print("  Use '--backend manual' for the manual workflow.")
+        if _tmux_supported():
+            print("  Or use '--backend tmux' if you prefer tmux.")
 
 
 def _validate_backend(backend: str) -> bool:
@@ -170,6 +199,10 @@ def _validate_backend(backend: str) -> bool:
 
     if backend == "tmux" and not _tmux_supported():
         _print_backend_unavailable("tmux")
+        return False
+
+    if backend == "terminal" and not _terminal_supported():
+        _print_backend_unavailable("terminal")
         return False
 
     return True
@@ -359,7 +392,7 @@ def create_manual_session(project_dir: str | None = None, launch: bool = False) 
 
     print()
     print("The watcher will log turn changes and the command to run next.")
-    print("For automated terminal orchestration, use macOS + iTerm2 or tmux on PATH.")
+    print("For automated terminal orchestration, use macOS (iTerm2 or Terminal.app) or tmux on PATH.")
     if sys.platform.startswith("win"):
         print("On Windows today, WSL + tmux is the supported automation path.")
     return True
@@ -397,28 +430,40 @@ def ensure_session(
         ok = create_tmux_session(project_dir=project_dir, launch=launch)
         return "created" if ok else "error"
 
-    from tagteam.iterm import (
-        _any_session_alive,
+    # Tab backends (iterm2 / terminal): one driver module each, same surface.
+    from tagteam.tabs import (
         _find_session_file,
         _read_session_file,
         _session_file_path,
-        create_session as create_iterm_session,
+        driver_for,
+        session_backend,
     )
 
+    driver = driver_for(backend)
+    label = _TAB_BACKEND_LABELS[backend]
     existing = _read_session_file(project_dir)
     if existing:
-        if _any_session_alive(existing):
-            print("iTerm2 session already exists; skipping session creation.")
+        file_backend = session_backend(project_dir)
+        if file_backend == backend and driver._any_session_alive(existing):
+            print(f"{label} session already exists; skipping session creation.")
             return "exists"
+        if file_backend != backend and file_backend in TAB_BACKENDS_FOR_MESSAGES:
+            other = driver_for(file_backend)
+            if other._any_session_alive(existing):
+                print(f"A live {_TAB_BACKEND_LABELS[file_backend]} session already exists"
+                      f" ({_find_session_file(project_dir) or _session_file_path(project_dir)}).")
+                print(f"  Kill it first (tagteam session kill --backend {file_backend})"
+                      f" or use --backend {file_backend}.")
+                return "error"
         stale_path = _find_session_file(project_dir) or _session_file_path(project_dir)
-        print(f"Stale iTerm2 session file (no live tabs): {stale_path}")
+        print(f"Stale {label} session file (no live tabs): {stale_path}")
         print("  Removing and creating a fresh session.")
         try:
             stale_path.unlink()
         except OSError:
             pass
 
-    ok = create_iterm_session(project_dir, launch=launch)
+    ok = driver.create_session(project_dir, launch=launch)
     return "created" if ok else "error"
 
 
@@ -450,12 +495,13 @@ def _print_session_usage() -> None:
     print("  start       Create or describe an orchestration session")
     print("  kill        Kill the managed tmux/iTerm2 session")
     print("  attach      Attach to an existing tmux session")
-    print("  adopt       Register manually-opened iTerm2 tabs (iterm2 only)")
+    print("  adopt       Register manually-opened iTerm2 tabs / Terminal.app windows")
     print("  list-iterm  List currently-open iTerm2 sessions and their IDs")
+    print("  list-terminal  List currently-open Terminal.app tabs and their ttys")
     print()
     print("Options:")
     print(
-        "  --backend iterm2|tmux|manual  Backend to use"
+        "  --backend iterm2|tmux|terminal|manual  Backend to use"
         " (default: auto-detect)"
     )
     print("  --dir PATH                    Project directory (default: .)")
@@ -463,16 +509,21 @@ def _print_session_usage() -> None:
 
 
 def _adopt_command(args: list[str], backend: str) -> int:
-    """Register manually-opened iTerm2 tabs as the watcher's panes.
+    """Register manually-opened iTerm2 tabs (or Terminal.app windows) as
+    the watcher's panes.
 
     Writes ``.handoff-session.json`` in the same shape as
     ``session start --launch`` (so all existing consumers — watcher
     auto-detect, get_session_id, _any_session_alive, server log-tail —
-    work unchanged).
+    work unchanged). The ids are iTerm2 ``unique ID``s or Terminal.app
+    ttys, validated through the selected backend's driver.
     """
-    if backend != "iterm2":
-        print("'session adopt' is only supported for the iterm2 backend.")
+    if backend not in TAB_BACKENDS_FOR_MESSAGES:
+        print("'session adopt' is only supported for the iterm2 backend and the terminal backend.")
         return 1
+    label = _TAB_BACKEND_LABELS[backend]
+    id_word = "unique-id" if backend == "iterm2" else "tty"
+    list_cmd = "list-iterm" if backend == "iterm2" else "list-terminal"
 
     lead_id = None
     reviewer_id = None
@@ -494,12 +545,12 @@ def _adopt_command(args: list[str], backend: str) -> int:
         elif a == "--force":
             force = True; i += 1
         elif a in ("-h", "--help"):
-            print("Usage: tagteam session adopt --lead <unique-id>"
+            print(f"Usage: tagteam session adopt [--backend {backend}] --lead <{id_word}>"
                   " [--reviewer <id>] [--watcher <id>] [--force]")
             print()
-            print("Register iTerm2 tabs you opened manually so the watcher")
-            print("can send-keys to them. Use `tagteam session list-iterm`")
-            print("to discover the unique IDs of currently-open sessions.")
+            print(f"Register {label} tabs you opened manually so the watcher")
+            print(f"can send-keys to them. Use `tagteam session {list_cmd}`")
+            print(f"to discover the {id_word}s of currently-open sessions.")
             return 0
         else:
             print(f"Unknown arg: {a}")
@@ -509,13 +560,14 @@ def _adopt_command(args: list[str], backend: str) -> int:
         print("--lead is required.")
         return 1
 
-    from tagteam.iterm import session_id_is_valid
+    from tagteam.tabs import driver_for
 
+    session_id_is_valid = driver_for(backend).session_id_is_valid
     for role, sid in [("lead", lead_id), ("watcher", watcher_id),
                       ("reviewer", reviewer_id)]:
         if sid and not session_id_is_valid(sid):
             print(f"ERROR: {role} session id {sid!r}"
-                  " is not a live iTerm2 session.")
+                  f" is not a live {label} session.")
             return 1
 
     path = Path(project_dir) / ".handoff-session.json"
@@ -529,9 +581,9 @@ def _adopt_command(args: list[str], backend: str) -> int:
     if reviewer_id:
         tabs["reviewer"] = {"session_id": reviewer_id}
 
-    payload = {"backend": "iterm2", "tabs": tabs}
+    payload = {"backend": backend, "tabs": tabs}
     path.write_text(json.dumps(payload, indent=2))
-    print(f"Adopted iTerm2 sessions into {path}")
+    print(f"Adopted {label} sessions into {path}")
     for role, info in tabs.items():
         print(f"  {role}: {info['session_id']}")
     return 0
@@ -547,6 +599,23 @@ def _list_iterm_command() -> int:
         return 1
 
     print(f"{'unique-id':<40} {'tab-title':<30} window")
+    print("-" * 80)
+    for s in sessions:
+        print(f"{s['unique_id']:<40} {s['tab_title']:<30}"
+              f" {s['window_id']}")
+    return 0
+
+
+def _list_terminal_command() -> int:
+    """List currently-open Terminal.app tabs and their ttys."""
+    from tagteam.terminal import list_sessions
+
+    sessions = list_sessions()
+    if not sessions:
+        print("No Terminal.app tabs found (is Terminal.app running?)")
+        return 1
+
+    print(f"{'tty':<40} {'tab-title':<30} window")
     print("-" * 80)
     for s in sessions:
         print(f"{s['unique_id']:<40} {s['tab_title']:<30}"
@@ -606,6 +675,9 @@ def session_command(args: list[str]) -> int:
         if effective_backend == "iterm2":
             print("The 'attach' command is not needed for iTerm2 (tabs are already visible).")
             return 0
+        if effective_backend == "terminal":
+            print("The 'attach' command is not needed for Terminal.app (windows are already visible).")
+            return 0
         if effective_backend == "manual":
             print("The manual backend does not manage terminal sessions to attach to.")
             return 0
@@ -623,14 +695,17 @@ def session_command(args: list[str]) -> int:
     if subcmd == "list-iterm":
         return _list_iterm_command()
 
+    if subcmd == "list-terminal":
+        return _list_terminal_command()
+
     if subcmd == "kill":
-        if effective_backend == "iterm2":
-            from tagteam.iterm import kill_session
+        if effective_backend in TAB_BACKENDS_FOR_MESSAGES:
+            from tagteam.tabs import driver_for
 
             project_dir = None
             if len(remaining) > 2 and remaining[1] == "--dir":
                 project_dir = remaining[2]
-            kill_session(project_dir or ".")
+            driver_for(effective_backend).kill_session(project_dir or ".")
             return 0
 
         if effective_backend == "manual":
