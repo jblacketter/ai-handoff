@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [x] In Review (round 2: one dependency-satisfaction rule (roadmap disposition ∪ active run's `completed`) + cross-worktree publication contract; `queue [start]` pulls in nonterminal ancestors; dynamic advance over a stale queue; graph identity validation; worktree merge target recorded at creation)
+- [x] In Review (round 2: one dependency-satisfaction rule (roadmap disposition ∪ active run's `completed`) + cross-worktree publication contract; `queue [start]` pulls in nonterminal ancestors; dynamic advance over a stale queue; graph identity validation; worktree merge target recorded at creation; round 3: advance scans the whole selected queue (blocked entries are never lost behind `current_index`); worktree creation publication boundary (clean parent, base must contain the completion HEAD, readiness evaluated on the roadmap at `base`); empty heading = identity error)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -76,9 +76,14 @@ the line (it stays lenient — identity/graph validation lives in the graph
 functions below, so `roadmap phases` keeps listing whatever the file has).
 
 **Graph identity (validated first).** Before any slug-keyed structure is
-built, `validate_identities(phases)` collects *every* problem: duplicate
-heading numbers, duplicate normalized slugs (two different names that
-`_slugify` to the same slug included), and empty names. Any problem →
+built, `validate_identities(roadmap_text)` collects *every* problem:
+duplicate heading numbers, duplicate normalized slugs (two different names
+that `_slugify` to the same slug included), and empty names. Because
+`parse_roadmap`'s heading regex (`(.+)`) silently skips a bare
+`### Phase N:` heading (and a whitespace-only name strips to `""`), the
+identity pass runs its own lenient heading scan
+(`^###\s+Phase\s+(\d+):\s*(.*)$`) over the raw text so both forms are
+reported as `phase N: empty name` — tested for both spellings. Any problem →
 `RoadmapGraphError` (all problems listed); `roadmap check`, `queue`,
 `ready`, `graph`, worktree creation and the full-roadmap advance all refuse
 a roadmap with identity errors (the advance pauses with
@@ -157,17 +162,21 @@ calls the same function) is **dynamic** on every call:
 
 1. re-parse `docs/roadmap.md`; identity/graph errors → pause with
    `pause_reason = "roadmap invalid: <problems>"` (never start anything);
-2. walk `queue[current_index+1:]` in order, **skipping** entries that are
-   terminal in the roadmap or already in `completed` (skipped entries are
-   logged, not started, and not appended to `completed` — `completed` stays
-   "approved in this run");
-3. select the first remaining entry whose deps are all `satisfied`; set
-   `current_index` to **that entry's index** (not `+1`), `phase`, `type:
-   plan`, `round 1`, `turn: lead`, `command: /handoff start <phase>`,
-   `pause_reason: None`;
-4. if no incomplete entry remains → `status: done, result:
-   roadmap-complete` (as today);
-5. if incomplete entries remain but every one is blocked → do not start:
+2. compute `remaining` = every entry of the **whole selected `queue`** (not
+   the suffix after `current_index`) that is not terminal in the roadmap,
+   not in `completed` and not the phase just approved — `current_index`
+   only *describes* the current selection, it never defines the remaining
+   set, so an entry that was blocked and jumped over earlier is reconsidered
+   on every later advance; skipped entries are logged, never started, and
+   not appended to `completed` (`completed` stays "approved in this run");
+3. select the first entry of `remaining` in queue order (the queue is
+   topological, so queue order is a valid priority) whose deps are all
+   `satisfied`; set `current_index` to **that entry's index** (may be lower
+   than before), `phase`, `type: plan`, `round 1`, `turn: lead`, `command:
+   /handoff start <phase>`, `pause_reason: None`;
+4. if `remaining` is empty → `status: done, result: roadmap-complete`
+   (roadmap-complete is defined over the selected queue, not the suffix);
+5. if `remaining` is non-empty but every entry is blocked → do not start:
    `pause_reason = "blocked: <phase> depends on <unmet deps>[; …]"`, `turn:
    lead`, `command` = the same text (`tagteam roadmap resume` once
    unblocked), `current_index` unchanged. The arbiter clears it by merging
@@ -184,9 +193,14 @@ ancestor rule above. Tests pin: same-run approval unblocks a dependent
 without a roadmap edit; the diamond `A → {B, C} → D` where `B` completes
 externally (terminal on disk, merged) while the watcher is on `A` — the
 advance skips `B`, selects `C` with `current_index = 2`, and after `C`
-starts `D` (B terminal on disk, C in `completed`); all-blocked → pause +
-`resume` after unblocking; last incomplete entry → `roadmap-complete` even
-when the tail of the queue was completed externally.
+starts `D` (B terminal on disk, C in `completed`); the **mixed case** `A`
+approved, `B` blocked (its dep runs elsewhere), `C` ready → run `C`
+(`current_index = 2`); `B`'s dep becomes satisfied; after `C`'s approval
+the advance selects `B` (`current_index = 1`, lower than before); after
+`B` → `roadmap-complete` without re-running `A` or `C`; all-blocked →
+pause + `resume` after unblocking; last incomplete entry →
+`roadmap-complete` even when the tail of the queue was completed
+externally.
 
 ### Worktrees (parallel phases)
 
@@ -199,9 +213,8 @@ tagteam roadmap worktree <phase> --remove   # git worktree remove + unregister (
 ```
 
 Creation: refuses if the roadmap has identity/graph errors, if the phase
-is not **ready** (`satisfied` rule, using the parent project's roadmap +
-active-run `completed`) or not in the roadmap, or if the path/branch/phase
-already has a worktree; `git worktree add -b phase-<slug> <path> HEAD` (branch
+is not in the roadmap, if the path/branch/phase already has a worktree, or
+if the **publication boundary** below is not met; `git worktree add -b phase-<slug> <path> HEAD` (branch
 name mirrors this repo's convention; `--from <ref>` overrides HEAD);
 copies `tagteam.yaml` verbatim (agents, satellites); does **not** copy
 runtime state (`handoff-state.json`, `.tagteam/`, `docs/handoffs/*` are
@@ -218,7 +231,36 @@ branch: the parent's checked-out branch at creation, or `--target BRANCH`),
 `--from REF`), `created_at`; prints `cd <path> && tagteam session start` (or `tagteam serve`) and
 `/handoff start <phase>`. Two worktrees are two projects: their watchers,
 turn slots, gates and panels are independent; port leases keep servers
-apart. **Merging is the human's** (`git merge`/PR per branch). `merged?` is
+apart. **Publication boundary for creation** (a worktree must start from code
+that actually contains every dependency that made the phase ready):
+
+- the parent must be **clean** — no modified/staged tracked files and no
+  untracked, non-ignored files (`git status --porcelain
+  --untracked-files=all` empty); otherwise refuse and list the paths
+  ("commit or stash first — an approved dependency may live in these
+  changes"). No override flag: the fix is a commit.
+- `base` = resolved `--from REF`, else HEAD. Readiness is evaluated on the
+  **roadmap as of `base`** (`git show <base>:docs/roadmap.md`), so a
+  dependency's terminal disposition counts only if that commit carries it.
+- the active run's `completed` may additionally satisfy a dependency
+  **only if `base` contains the completion HEAD** — i.e. `base` is HEAD or
+  a descendant of it (`git merge-base --is-ancestor HEAD <base>`); a clean
+  HEAD is where every approved change of this run lives. An older or
+  divergent `--from` with a `completed`-satisfied dependency is refused
+  with the reason (`--from <ref> does not contain HEAD <sha>, and <dep>
+  was approved in the active run but is not terminal in the roadmap at
+  <ref>`).
+- documented in HTW/README: approved phases must be committed (and, to be
+  visible to other worktrees, published per the contract above) before
+  spawning dependents. `base` (the sha) is recorded in the sidecar.
+
+Tests: dirty parent (modified tracked file; untracked file) → refuse;
+dep satisfied only via `completed` + `--from` at an older commit → refuse,
+`--from` a descendant of HEAD → ok, no `--from` → ok; dep terminal at HEAD
+but not in the roadmap at an older `--from` → refuse; dep terminal at both
+→ ok.
+
+**Merging is the human's** (`git merge`/PR per branch). `merged?` is
 evaluated against the **recorded `target`**, never against whatever branch
 the parent happens to have checked out later: `git merge-base
 --is-ancestor <branch> <target>` run in the parent repo (`refs/heads/<target>`,
@@ -257,10 +299,13 @@ tagteam roadmap worktrees [--json]
   `blocked_phases`, `roadmap check|graph|ready [--roadmap-only]|resume`,
   `queue` topological, `phases` column.
 - **B. `watcher.py`** — `_try_roadmap_advance` becomes the dynamic
-  five-step advance above (skip terminal/completed, select first ready,
-  `current_index` = selected index, roadmap-complete, blocked → pause);
+  five-step advance above (whole-queue `remaining`, select first ready,
+  `current_index` = selected index, roadmap-complete over the selected
+  queue, blocked → pause);
   `roadmap resume` calls it; `--roadmap` start uses the topological queue.
-- **C. `worktree.py`** (new) — create/list/remove; registers the path via
+- **C. `worktree.py`** (new) — create (publication boundary: clean parent,
+  roadmap-at-base readiness, `completed` only when base ⊇ HEAD)/list/
+  remove; registers the path via
   the existing `register_project` (registry format unchanged) + sidecar
   `~/.tagteam/worktrees.json` for worktree metadata; hub `--list` label
   `<name> (worktree: <phase>)` when the sidecar knows the path (read side
@@ -275,8 +320,8 @@ tagteam roadmap worktrees [--json]
   → 3.4.0.
 - **E. Tests** — `tests/test_roadmap.py`: parsing (all reference forms,
   multi-line, no line), identity validation (duplicate numbers, duplicate
-  slugs from different names, all problems listed, refused by
-  check/queue/ready/graph), graph validation (unknown/self/cycle/multiple
+  slugs from different names, empty heading name in both spellings, all
+  problems listed, refused by check/queue/ready/graph), graph validation (unknown/self/cycle/multiple
   problems), topological queue (well-formed edge-free == today's output on
   the existing fixtures AND on this repo's roadmap; diamond; ties;
   `queue [start]` pulls in nonterminal ancestors ahead of `start`, drops
@@ -285,12 +330,16 @@ tagteam roadmap worktrees [--json]
   `--roadmap-only` and the active-run note); `tests/test_watcher.py`:
   same-run approval unblocks a dependent (no roadmap edit), diamond with an
   externally-completed middle entry (skip + `current_index` = selected),
+  the mixed case (A approved, B blocked, C ready → C; B unblocked → B with
+  a lower `current_index`; then roadmap-complete without re-running A/C),
   all-blocked → pause_reason + no start, unblock + `roadmap resume`,
   externally-completed tail → roadmap-complete, invalid roadmap → pause,
   `--roadmap [start]` with an unmet ancestor; `tests/test_worktree.py`
   (new): create in a temp git repo (branch, base sha, target, files,
   registry entry + sidecar, kickoff text), refuse invalid graph / not-ready
-  / unknown / duplicate, list with state, merged-vs-target with the parent
+  / unknown / duplicate, publication boundary (dirty parent; `--from`
+  older/divergent with a `completed`-satisfied dep; roadmap-at-base
+  readiness; descendant `--from` ok), list with state, merged-vs-target with the parent
   switched to another branch, remove merged / refuse unmerged and missing
   target / `--force`, cross-worktree publication (terminal status committed
   + merged → parent's `ready` unblocks; not before), two worktrees are
@@ -337,15 +386,17 @@ pyproject.toml, CITATION.cff → 3.4.0
    `queue [start]` pulls in nonterminal ancestors and never bypasses an
    edge; `roadmap ready` lists exactly the phases whose deps are satisfied
    under the one rule (roadmap disposition ∪ active run's `completed`).
-4. Full-roadmap advance is dynamic: skips terminal/completed entries,
-   selects the first ready one (index = selected), never starts a blocked
-   phase (pause reason), `roadmap resume` continues once unblocked,
+4. Full-roadmap advance is dynamic over the whole selected queue: skips
+   terminal/completed entries, selects the first ready one (index =
+   selected, may move backwards), never loses a blocked entry, never starts
+   a blocked phase (pause reason), `roadmap resume` continues once unblocked,
    roadmap-complete when nothing incomplete remains; same-run approval
    unblocks dependents without a roadmap edit.
 5. `roadmap worktree <phase>` creates a working tagteam project on its own
    branch (kickoff printed, registered, sidecar with target/base, visible to
    `roadmap worktrees` with its state); refuses invalid/not-ready/unknown/
-   duplicate; `merged?` and `--remove` use the recorded target (refuse
+   duplicate and enforces the publication boundary (clean parent, base ⊇
+   HEAD when readiness relies on `completed`, roadmap-at-base); `merged?` and `--remove` use the recorded target (refuse
    unmerged or missing target without `--force`); the publication contract
    (terminal status committed + merged) is what unblocks other projects; two
    worktrees run independent loops.
