@@ -376,7 +376,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ### Phase 42: Terminal.app backend (3.6)
 - **Depends on:** Phase 41
-- **Status:** ✅ Complete — plan approved round 2, impl approved round 1 (2026-08-17); PR #20; **3.6.0** (tag on merge).
+- **Status:** ✅ Complete — plan approved round 2, impl approved round 1 (2026-08-17); PR #20 merged; released as **3.6.0** (tag `v3.6.0`, PyPI 2026-08-17).
 - **Description:** a fourth session backend, `terminal`, drives macOS Terminal.app through AppleScript like `iterm2` drives iTerm2: `session start --backend terminal --launch` opens three windows (Lead/Watcher/Reviewer), launches and primes the agents, writes `.handoff-session.json` (`backend: terminal`, tab identity = tty); `tagteam watch --mode terminal` (auto-detected from the file) sends commands with the same idle/retry/watchdog discipline; `session kill|adopt|list-terminal`, `state` health and the dashboard log tail work for it. Opt-in; the only default change is that a Mac with neither iTerm2 nor tmux falls through to `terminal` instead of `manual`. iTerm2/tmux paths byte-identical. No cockpit work.
 - **Plan:** `docs/phases/terminal-app-backend.md`
 - **Source:** backlog item "Terminal.app backend (macOS, optional)"; promoted 2026-08-17.
