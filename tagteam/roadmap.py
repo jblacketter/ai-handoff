@@ -241,7 +241,11 @@ def validate_identities(roadmap_text: str) -> list[str]:
             problems.append(f"{label}: empty name")
         numbers.setdefault(number, []).append(name or "(empty)")
         if name:
-            slugs.setdefault(_slugify(name), []).append(label)
+            slug = _slugify(name)
+            if not slug:
+                problems.append(f"{label}: empty normalized slug ({name!r})")
+            else:
+                slugs.setdefault(slug, []).append(label)
     for number, names in sorted(numbers.items()):
         if len(names) > 1:
             problems.append(

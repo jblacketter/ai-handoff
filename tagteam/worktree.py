@@ -192,12 +192,10 @@ def _phases_from_text(text: str) -> list[_rm.RoadmapPhase]:
 
 
 def create_worktree(project_dir: str | Path, phase: str, *, from_ref: str | None = None,
-                    target: str | None = None, path: str | Path | None = None,
-                    out=None) -> WorktreeInfo:
+                    target: str | None = None, path: str | Path | None = None) -> WorktreeInfo:
     """Create `../<repo>-<phase>` on branch `phase-<slug>` from `base`, seed
     it as a tagteam project, register it, record the sidecar entry. Raises
     `WorktreeError` with the reason on any refusal."""
-    out = out or sys.stdout
     project_dir = Path(project_dir).resolve()
     repo = _repo_root(project_dir)
     if repo != project_dir:
@@ -267,42 +265,68 @@ def create_worktree(project_dir: str | Path, phase: str, *, from_ref: str | None
         raise WorktreeError(
             f"branch '{branch}' already exists — remove it or check it out manually")
 
-    # 4. create.
+    # 4. create — transactional: any failure after `git worktree add` rolls
+    # back the worktree, the branch, the registry row and the sidecar row.
     target_branch = target or _current_branch(repo)
     _git(repo, "worktree", "add", "-b", branch, str(wt_path), base)
     try:
-        _seed_project(repo, wt_path, out=out)
-        registry.register_project(str(wt_path))
+        _seed_project(repo, wt_path)
         info = WorktreeInfo(path=str(wt_path), parent=str(repo), phase=slug, branch=branch,
                             target=target_branch, base=base,
                             created_at=datetime.now(timezone.utc).isoformat())
-        entries = _read_sidecar()
+        entries = [e for e in _read_sidecar() if e.get("path") != str(wt_path)]
         entries.append(asdict(info))
         _write_sidecar(entries)
+        registry.register_project(str(wt_path))
     except Exception:
-        _git(repo, "worktree", "remove", "--force", str(wt_path), check=False)
-        _git(repo, "branch", "-D", branch, check=False)
+        _rollback_create(repo, wt_path, branch)
         raise
     return info
 
 
-def _seed_project(repo: Path, wt_path: Path, *, out=None) -> None:
+def _rollback_create(repo: Path, wt_path: Path, branch: str) -> None:
+    """Undo a partial creation. Every step is best-effort and independent so
+    one failure does not leave the others behind."""
+    try:
+        registry.unregister_project(str(wt_path))
+    except Exception:
+        pass
+    try:
+        entries = _read_sidecar()
+        kept = [e for e in entries if e.get("path") != str(wt_path)]
+        if len(kept) != len(entries):
+            _write_sidecar(kept)
+    except Exception:
+        pass
+    _git(repo, "worktree", "remove", "--force", str(wt_path), check=False)
+    if wt_path.exists():
+        shutil.rmtree(wt_path, ignore_errors=True)
+        _git(repo, "worktree", "prune", check=False)
+    _git(repo, "branch", "-D", branch, check=False)
+
+
+def _seed_project(repo: Path, wt_path: Path) -> None:
     """Copy `tagteam.yaml` verbatim when the branch does not carry it and add
     any missing framework files (the equivalent of `tagteam setup`, only for
-    what is absent). Runtime state is never copied."""
+    what is absent). Runtime state is never copied. Incomplete seeding is
+    fatal (the caller rolls the creation back)."""
     src_yaml = repo / "tagteam.yaml"
     dst_yaml = wt_path / "tagteam.yaml"
     if src_yaml.exists() and not dst_yaml.exists():
         shutil.copyfile(src_yaml, dst_yaml)
-    try:
-        from tagteam.setup import needs_setup, main as setup_main
-        if needs_setup(str(wt_path)):
-            import contextlib, io
-            buf = io.StringIO()
+    from tagteam.setup import needs_setup, main as setup_main
+    if needs_setup(str(wt_path)):
+        import contextlib, io
+        buf = io.StringIO()
+        try:
             with contextlib.redirect_stdout(buf):
                 setup_main(str(wt_path))
-    except Exception as e:  # setup is best-effort; the worktree still works
-        print(f"  (framework files not seeded: {e})", file=out or sys.stdout)
+        except Exception as e:
+            raise WorktreeError(f"framework files could not be seeded into {wt_path}: {e}") from e
+        if needs_setup(str(wt_path)):
+            raise WorktreeError(
+                f"framework files are still missing in {wt_path} after setup — "
+                "creation rolled back")
 
 
 def kickoff_text(info: WorktreeInfo) -> str:
@@ -367,8 +391,7 @@ def list_worktrees(parent: str | Path | None = None) -> list[dict]:
     return rows
 
 
-def remove_worktree(project_dir: str | Path, phase: str, *, force: bool = False,
-                    out=None) -> dict:
+def remove_worktree(project_dir: str | Path, phase: str, *, force: bool = False) -> dict:
     """Remove the phase worktree + branch and unregister it. Refuses an
     unmerged branch (or a missing target) unless `force`."""
     project_dir = Path(project_dir).resolve()
@@ -389,8 +412,12 @@ def remove_worktree(project_dir: str | Path, phase: str, *, force: bool = False,
     else:
         _git(repo, "worktree", "prune", check=False)
     if _branch_exists(repo, entry["branch"]):
-        _git(repo, "branch", "-D" if force or state != "merged" else "-d", entry["branch"],
-             check=False)
+        # `-D`, not `-d`: git's `-d` judges "merged" against the CURRENTLY
+        # checked-out branch, while we already established the merge against
+        # the recorded target (or the caller forced). A failure here is an
+        # error, not a shrug — the sidecar/registry rows stay so a re-run can
+        # finish the job.
+        _git(repo, "branch", "-D", entry["branch"])
     registry.unregister_project(str(wt_path))
     _write_sidecar([e for e in entries if e is not entry])
     return {"path": str(wt_path), "branch": entry["branch"], "merged": state}
@@ -432,11 +459,11 @@ def worktree_command(args: list[str], out=None) -> int:
     root = _project_root()
     try:
         if remove:
-            res = remove_worktree(root, phase, force=force, out=out)
+            res = remove_worktree(root, phase, force=force)
             print(f"Removed worktree {res['path']} (branch {res['branch']}, was {res['merged']})",
                   file=out)
             return 0
-        info = create_worktree(root, phase, from_ref=from_ref, target=target, path=path, out=out)
+        info = create_worktree(root, phase, from_ref=from_ref, target=target, path=path)
     except (WorktreeError, ValueError) as e:
         print(f"Error: {e}", file=out)
         return 1

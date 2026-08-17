@@ -264,3 +264,92 @@ class TestRuntimePaths:
         (repo / "notes.md").write_text("n")
         assert wt._dirty_paths(repo) == ["notes.md"]
         assert wt._is_runtime_path(".tagteam/x/y") and not wt._is_runtime_path("docs/handoffs/x.jsonl")
+
+
+class TestImplRound2Fixes:
+    """Impl round 1 findings: transactional creation, -D removal."""
+
+    def _nothing_remains(self, repo, path):
+        assert not path.exists()
+        assert "phase-beta" not in _git(repo, "branch")
+        assert str(path) not in registry_mod.read_registry_raw()
+        assert wt._read_sidecar() == []
+        assert str(path) not in _git(repo, "worktree", "list")
+
+    def test_setup_failure_rolls_back_everything(self, repo, monkeypatch):
+        import tagteam.setup as setup_mod
+
+        def boom(target):
+            from tagteam.registry import register_project
+            register_project(target)              # setup registers before failing
+            raise RuntimeError("disk full")
+        monkeypatch.setattr(setup_mod, "main", boom)
+        path = repo.parent / "repo-beta"
+        with pytest.raises(wt.WorktreeError, match="could not be seeded.*disk full"):
+            wt.create_worktree(repo, "beta")
+        self._nothing_remains(repo, path)
+
+    def test_incomplete_seeding_is_fatal(self, repo, monkeypatch):
+        import tagteam.setup as setup_mod
+        monkeypatch.setattr(setup_mod, "main", lambda target: None)   # "succeeds" but seeds nothing
+        path = repo.parent / "repo-beta"
+        with pytest.raises(wt.WorktreeError, match="still missing .* after setup"):
+            wt.create_worktree(repo, "beta")
+        self._nothing_remains(repo, path)
+
+    def test_sidecar_write_failure_rolls_back_including_registry(self, repo, monkeypatch):
+        def fail(entries):
+            raise OSError("read-only home")
+        monkeypatch.setattr(wt, "_write_sidecar", fail)
+        path = repo.parent / "repo-beta"
+        with pytest.raises(OSError, match="read-only home"):
+            wt.create_worktree(repo, "beta")
+        # the failing sidecar writer is still patched; check the rest directly
+        assert not path.exists()
+        assert "phase-beta" not in _git(repo, "branch")
+        assert str(path) not in registry_mod.read_registry_raw()
+
+    def test_registry_failure_rolls_back(self, repo, monkeypatch):
+        monkeypatch.setattr(registry_mod, "register_project",
+                            lambda p: (_ for _ in ()).throw(OSError("registry locked")))
+        path = repo.parent / "repo-beta"
+        # setup registers the project itself, so this surfaces as a seeding failure
+        with pytest.raises(wt.WorktreeError, match="registry locked"):
+            wt.create_worktree(repo, "beta")
+        self._nothing_remains(repo, path)
+
+    def test_normal_remove_deletes_branch_when_parent_on_unrelated_branch(self, repo):
+        info = wt.create_worktree(repo, "beta")
+        path = Path(info.path)
+        (path / "work.txt").write_text("w")
+        _commit_all(path, "work")
+        _git(repo, "merge", "-q", "phase-beta")           # merged into recorded target main
+        _git(repo, "checkout", "-q", "-b", "unrelated", "HEAD~1")  # does not contain the phase
+        (repo / "u.txt").write_text("u")
+        _commit_all(repo, "unrelated")
+        # git branch -d judges "merged" against the checked-out branch and would
+        # refuse here ("not fully merged"); removal must still succeed
+        assert not wt._is_ancestor(repo, "phase-beta", "HEAD")
+        res = wt.remove_worktree(repo, "beta")
+        assert res["merged"] == "merged"
+        assert "phase-beta" not in _git(repo, "branch")
+        assert wt._read_sidecar() == [] and str(path) not in registry_mod.read_registry_raw()
+
+    def test_branch_deletion_failure_is_not_swallowed(self, repo, monkeypatch):
+        info = wt.create_worktree(repo, "beta")
+        path = Path(info.path)
+        real_git = wt._git
+
+        def fake_git(r, *args, check=True):
+            if args[:2] == ("branch", "-D"):
+                raise wt.WorktreeError("git branch -D failed: simulated")
+            return real_git(r, *args, check=check)
+        monkeypatch.setattr(wt, "_git", fake_git)
+        with pytest.raises(wt.WorktreeError, match="simulated"):
+            wt.remove_worktree(repo, "beta")
+        # rows stay so a re-run can finish; nothing claimed success
+        assert wt._read_sidecar()[0]["phase"] == "beta"
+        assert str(path) in registry_mod.read_registry_raw()
+        monkeypatch.setattr(wt, "_git", real_git)
+        assert wt.remove_worktree(repo, "beta")["merged"] == "merged"
+        assert wt._read_sidecar() == []

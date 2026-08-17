@@ -873,3 +873,68 @@ class TestDynamicAdvance:
         assert roadmap_resume(str(tmp_path)) == 0
         st = read_state(str(tmp_path))
         assert st["phase"] == "dashboard" and st["roadmap"]["completed"] == ["api-gateway"]
+
+
+class TestImplRound2Fixes:
+    """Impl round 1 findings: stale queue entries, empty normalized slugs."""
+
+    def test_stale_queue_entry_pauses_never_starts(self, tmp_path):
+        text = ("### Phase 1: A\n- **Status:** Not Started\n"
+                "### Phase 2: B\n- **Status:** Not Started\n")
+        _write_roadmap(tmp_path, text)
+        # queue recorded when a phase "deleted-phase" still existed
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "deleted-phase", "b"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["status"] == "escalated"
+        assert new["roadmap"]["pause_reason"] == \
+            "stale queue: deleted-phase not in docs/roadmap.md (removed or renamed?)"
+        assert new["phase"] == "a"                      # nothing started
+        assert new["roadmap"]["completed"] == ["a"]
+        # roadmap resume while still stale → still paused (2); a renamed phase too
+        assert roadmap_resume(str(tmp_path)) == 2
+        # arbiter fixes the roadmap (adds the phase back) → resume starts it
+        (tmp_path / "docs" / "roadmap.md").write_text(
+            text + "### Phase 3: Deleted Phase\n- **Status:** Not Started\n")
+        assert roadmap_resume(str(tmp_path)) == 0
+        st = read_state(str(tmp_path))
+        assert st["phase"] == "deleted-phase" and st["roadmap"]["current_index"] == 1
+
+    def test_renamed_queue_entry_pauses(self, tmp_path):
+        text = ("### Phase 1: A\n- **Status:** Not Started\n"
+                "### Phase 2: B Renamed\n- **Status:** Not Started\n")
+        _write_roadmap(tmp_path, text)
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "b"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["status"] == "escalated" and new["roadmap"]["pause_reason"].startswith("stale queue: b ")
+
+    def test_select_next_phase_direct_stale(self, tmp_path):
+        from tagteam.watcher import _select_next_phase
+        _write_roadmap(tmp_path, "### Phase 1: A\n- **Status:** Not Started\n")
+        write_state({"status": "done", "result": "approved", "type": "impl", "phase": "a",
+                     "run_mode": "full-roadmap",
+                     "roadmap": {"queue": ["deleted-phase"], "current_index": 0,
+                                 "completed": [], "pause_reason": None}}, str(tmp_path))
+        seq = read_state(str(tmp_path)).get("seq", 0)
+        new = _select_next_phase(["deleted-phase"], 0, [], seq, str(tmp_path))
+        assert new["status"] == "escalated" and "stale queue: deleted-phase" in new["roadmap"]["pause_reason"]
+
+    def test_missing_roadmap_file_still_falls_back(self, tmp_path):
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "whatever"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["phase"] == "whatever" and new["status"] == "ready"
+
+    def test_empty_normalized_slug_is_identity_error(self, tmp_path, monkeypatch, capsys):
+        assert validate_identities("### Phase 1: !!!\n- **Status:** Not Started\n") == \
+            ["Phase 1: empty normalized slug ('!!!')"]
+        assert validate_identities("### Phase 1: ***\n### Phase 2: (…)\n") == [
+            "Phase 1: empty normalized slug ('***')", "Phase 2: empty normalized slug ('(…)')"]
+        assert validate_identities("### Phase 1: A-1\n") == []
+        text = "### Phase 1: !!!\n- **Status:** Not Started\n### Phase 2: Real\n- **Status:** Not Started\n"
+        _write_roadmap(tmp_path, text)
+        monkeypatch.chdir(tmp_path)
+        for sub in (["check"], ["queue"], ["ready"], ["graph"]):
+            assert roadmap_command(sub) == 1
+            assert "empty normalized slug" in capsys.readouterr().out
+        state = _roadmap_state(tmp_path, phase="real", queue=["real", "x"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["status"] == "escalated" and "empty normalized slug" in new["roadmap"]["pause_reason"]
