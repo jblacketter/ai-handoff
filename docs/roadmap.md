@@ -359,13 +359,19 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Description:** opt-in panel that takes the reviewer's turn as 2–3 independent lens reviews (correctness / scope / verification by default; each a fresh reviewer process with a lens brief, writing a structured verdict) merged deterministically into exactly one reviewer entry — one `REQUEST_CHANGES` with findings grouped by lens, or `APPROVE` only when every lens approves; any lens failure with no objection → fallback to the ordinary reviewer turn (never a partial approval). Runs after the gate at the watcher's reviewer seam in every mode; at-most-once per submission (`panels` claim row, schema v9, shared `_claim_satellite` with the gate); `tagteam panel run|status|list|lenses|preview`. No cockpit work.
 - **Plan:** `docs/phases/reviewer-panels.md`
 
+### Phase 40: Roadmap as a DAG (3.4)
+- **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-40-roadmap-dag`; PR at the end. Release **3.4.0** after impl approval.
+- **Description:** phases gain an optional `- **Depends on:** …` line and tagteam treats the roadmap as a directed acyclic graph: `roadmap queue` becomes a stable topological order (byte-identical for edge-free roadmaps), `roadmap check|graph|ready` validate and show the graph, full-roadmap mode never starts a blocked phase (pause reason + `roadmap resume`), and `tagteam roadmap worktree <phase>` gives each independent ready phase its own git worktree — a separate tagteam project root with its own state, watcher, gate and panel — so independent phases can run in parallel; `roadmap worktrees` lists them, `--remove` cleans up merged ones. No cockpit work.
+- **Plan:** `docs/phases/roadmap-dag.md`
+- **Source:** 3.0 proposal §4 candidate "Roadmap as DAG (`depends_on`, parallel phases in worktrees)"; promoted 2026-08-16.
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
 - **Status:** Not started — deliberately kept out of the 3.0 arc to protect focus; see `docs/tagteam-3.0-proposal.md` §4 "Candidate later phases"
 - ~~Gatekeeper pre-checks~~ → promoted to Phase 38 (2026-08-16)
 - ~~Reviewer panels~~ → promoted to Phase 39 (2026-08-16)
-- Roadmap as DAG (`depends_on`, parallel phases in worktrees)
+- ~~Roadmap as DAG (`depends_on`, parallel phases in worktrees)~~ → promoted to Phase 40 (2026-08-16)
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
 ### Licensing & attribution decision
