@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "terminal-app-backend",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-17",
+  "baseline": {
+    "sha": "fcac2f9c9fdff7348970c35952b5cf71ccf5b3ec",
+    "dirty_paths": [],
+    "captured_at": "2026-08-17T22:33:48.357462+00:00",
+    "source": "plan-init"
+  }
+}
