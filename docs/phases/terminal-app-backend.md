@@ -2,8 +2,8 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review (round 1: cold-launch window accounting — targeted Lead reuse rule, id-diff identification, exact-three invariant + tests)
-- [ ] Approved
+- [x] In Review (round 1: cold-launch window accounting — targeted Lead reuse rule, id-diff identification, exact-three invariant + tests)
+- [x] Approved (round 2)
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
