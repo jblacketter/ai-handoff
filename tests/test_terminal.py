@@ -48,7 +48,7 @@ class FakeTerminal:
         return f"/dev/ttys{wid:03d}"
 
     def _tab_by_tty(self, script):
-        m = re.search(r'if tty of t is "([^"]+)"', script)
+        m = re.search(r'if tty of tab i of w is "([^"]+)"', script)
         tty = m.group(1)
         for wid in self.windows:
             if self.tty_for(wid) == tty:
@@ -58,13 +58,13 @@ class FakeTerminal:
     def __call__(self, script, timeout=None):
         self.calls.append(script)
         s = script.strip()
-        if "repeat with w in windows" in s:
+        if "repeat with i from 1 to (count of tabs of w)" in s:
             wid, tty = self._tab_by_tty(s)
-            if "return contents of t" in s:
+            if "return contents of tab i of w" in s:
                 return self.contents.get(tty, "") if wid else ""
             if 'return "found"' in s:
                 return "found" if wid else "not_found"
-            if "close t saving no" in s:
+            if "close tab i of w saving no" in s:
                 if wid:
                     self.windows.remove(wid)
                     self.closed.append(wid)
@@ -72,8 +72,8 @@ class FakeTerminal:
                 return "not_found"
             if "do script" in s:
                 if wid:
-                    lit = re.search(r"do script (.*) in t", s).group(1)
-                    self.tab_do_scripts.append((tty, lit))
+                    for lit in re.findall(r"do script (.*) in tab i of w", s):
+                        self.tab_do_scripts.append((tty, lit))
                     return "ok"
                 return "not_found"
             raise AssertionError(f"unexpected tab script: {s}")
@@ -239,13 +239,10 @@ def test_write_text_targets_tab_by_tty_and_escapes():
     with patch("tagteam.terminal._osascript", fake):
         assert terminal.write_text_to_session(tty, 'say "hi" \\ there') is True
         assert terminal.write_text_to_session("/dev/ttys777", "x") is False
-    (t, literal), = fake.tab_do_scripts
-    assert t == tty
-    assert literal.startswith('"say \\"hi\\" \\\\ there"')
-    if terminal._SUBMIT_SUFFIX == "\r":
-        assert literal.endswith(" & return")
-    else:
-        assert not literal.endswith(" & return")
+    # two do scripts in one call: the escaped text, then the empty submit
+    assert fake.tab_do_scripts == [(tty, '"say \\"hi\\" \\\\ there"'), (tty, '""')]
+    text_script = fake.calls[0]
+    assert text_script.index('do script "say') < text_script.index("delay ") < text_script.index('do script ""')
 
 
 def test_get_session_contents_tail_and_validity():
@@ -284,8 +281,12 @@ def test_kill_session_closes_recorded_ttys_only_and_removes_file(tmp_path, capsy
         "tabs": {r: {"session_id": FakeTerminal.tty_for(w)} for r, w in
                  (("lead", 5), ("watcher", 6), ("reviewer", 7))},
     }))
-    with patch("tagteam.terminal._osascript", fake):
+    with patch("tagteam.terminal._osascript", fake), \
+         patch("tagteam.terminal.subprocess.run") as run:
         assert terminal.kill_session(str(tmp_path)) is True
+    # processes on each recorded tty are hung up before the close
+    assert [c.args[0] for c in run.call_args_list] == [
+        ["pkill", "-HUP", "-t", f"ttys{w:03d}"] for w in (5, 6, 7)]
     assert sorted(fake.closed) == [5, 6, 7]
     assert fake.windows == [8]
     assert not (tmp_path / ".handoff-session.json").exists()
