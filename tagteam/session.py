@@ -24,6 +24,65 @@ PRIME_MESSAGE = (
     " .claude/skills/handoff/SKILL.md for the workflow."
 )
 
+# Markers that an agent TUI (not the shell) has drawn its input prompt and
+# will accept keystrokes. Claude Code discards anything typed before its
+# prompt is painted, so priming must wait for one of these rather than a
+# fixed sleep. Deliberately excludes shell-prompt markers ("$ ", "% ", "@")
+# that watcher.IDLE_PATTERNS accepts — a shell prompt means the agent has
+# NOT started yet.
+AGENT_PROMPT_PATTERNS = [
+    # Claude Code
+    "\u276f",           # ❯ input prompt
+    "? for shortcuts",
+    "shift+tab",        # status bar: "⏵⏵ auto mode on (shift+tab to cycle)"
+    "context left",
+    # Codex
+    "\u203a",           # › input prompt
+    "/model to change",
+    "/skills to list",
+    "type a message",
+    "enter a command",
+]
+AGENT_READY_TIMEOUT_S = 60.0
+AGENT_READY_POLL_S = 0.5
+AGENT_READY_SETTLE_S = 0.5
+AGENT_READY_TAIL_LINES = 8
+
+
+def agent_prompt_visible(content: str) -> bool:
+    """True if the tail of a terminal capture shows an agent input prompt."""
+    if not content or not content.strip():
+        return False
+    tail = "\n".join(content.strip().splitlines()[-AGENT_READY_TAIL_LINES:]).lower()
+    return any(p.lower() in tail for p in AGENT_PROMPT_PATTERNS)
+
+
+def wait_for_agent_ready(
+    read_contents,
+    label: str = "agent",
+    timeout: float = AGENT_READY_TIMEOUT_S,
+    poll: float = AGENT_READY_POLL_S,
+) -> bool:
+    """Poll ``read_contents()`` until an agent prompt is visible.
+
+    Returns True once ready (after a short settle so the TUI finishes
+    painting), False on timeout — callers should still send the prime and
+    tell the user it may need re-sending.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if agent_prompt_visible(read_contents()):
+            time.sleep(AGENT_READY_SETTLE_S)
+            return True
+        if time.monotonic() >= deadline:
+            print(
+                f"  Warning: {label} prompt not detected after {int(timeout)}s;"
+                " sending priming message anyway. If it did not arrive, paste:"
+            )
+            print(f'    "{PRIME_MESSAGE}"')
+            return False
+        time.sleep(poll)
+
 
 def _backend_choices_text() -> str:
     return "'iterm2', 'tmux', or 'manual'"
@@ -221,10 +280,14 @@ def create_tmux_session(project_dir: str | None = None, launch: bool = False) ->
                 )
                 _tmux("send-keys", "-t", f"{SESSION_NAME}:0.2", reviewer_cmd, "Enter")
                 print("  Waiting for agents to start before priming...")
-                time.sleep(3)
-                _tmux("send-keys", "-t", f"{SESSION_NAME}:0.0", PRIME_MESSAGE, "Enter")
-                time.sleep(1)
-                _tmux("send-keys", "-t", f"{SESSION_NAME}:0.2", PRIME_MESSAGE, "Enter")
+                from tagteam.watcher import capture_pane
+
+                for pane, label in ((f"{SESSION_NAME}:0.0", "lead"), (f"{SESSION_NAME}:0.2", "reviewer")):
+                    wait_for_agent_ready(
+                        lambda pane=pane: capture_pane(pane, last_n_lines=AGENT_READY_TAIL_LINES),
+                        label=label,
+                    )
+                    _tmux("send-keys", "-t", pane, PRIME_MESSAGE, "Enter")
             else:
                 _tmux(
                     "send-keys",

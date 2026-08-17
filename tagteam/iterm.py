@@ -239,20 +239,28 @@ def create_session(project_dir: str, launch: bool = False) -> bool:
     # can find .handoff-session.json on startup.
     # Pass raw commands — write_text_to_session() handles escaping internally.
     if launch:
-        from tagteam.session import PRIME_MESSAGE, _watcher_command
-        import time
+        from tagteam.session import (
+            AGENT_READY_TAIL_LINES,
+            PRIME_MESSAGE,
+            _watcher_command,
+            wait_for_agent_ready,
+        )
 
         write_text_to_session(ids[0], lead_cmd)
         write_text_to_session(ids[2], reviewer_cmd)
         # Start watcher last — agents need a moment to initialize
         watcher_cmd = _watcher_command(project_dir, "iterm2")
         write_text_to_session(ids[1], watcher_cmd)
-        # Auto-prime agents after they boot
+        # Auto-prime each agent once ITS prompt is visible. A fixed sleep
+        # raced Claude Code's startup (MCP init etc.) and the prime was
+        # silently discarded while the reviewer, which boots faster, got it.
         print("  Waiting for agents to start before priming...")
-        time.sleep(3)
-        write_text_to_session(ids[0], PRIME_MESSAGE)
-        time.sleep(1)
-        write_text_to_session(ids[2], PRIME_MESSAGE)
+        for sid, label in ((ids[0], "lead"), (ids[2], "reviewer")):
+            wait_for_agent_ready(
+                lambda sid=sid: get_session_contents(sid, last_n_lines=AGENT_READY_TAIL_LINES),
+                label=label,
+            )
+            write_text_to_session(sid, PRIME_MESSAGE)
 
     launched = " (launched)" if launch else ""
     print(f"Created iTerm2 session with 3 tabs{launched}:")

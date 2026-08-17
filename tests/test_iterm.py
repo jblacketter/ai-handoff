@@ -129,12 +129,15 @@ class TestOsascriptCalls:
 class TestCreateSessionLaunch:
     """Tests for create_session with --launch flag."""
 
+    @patch("tagteam.session.time.sleep")
+    @patch("tagteam.iterm.get_session_contents", return_value="\u276f \n  ? for shortcuts")
     @patch("tagteam.iterm.iterm_is_running", return_value=True)
     @patch("tagteam.iterm._ensure_iterm_ready")
     @patch("tagteam.iterm.write_text_to_session")
     @patch("tagteam.iterm._osascript")
     def test_launch_sends_raw_commands_after_session_file(
-        self, mock_osascript, mock_write_text, mock_ensure, mock_running, tmp_path
+        self, mock_osascript, mock_write_text, mock_ensure, mock_running,
+        mock_contents, mock_sleep, tmp_path
     ):
         """Launch commands must be sent after session file exists,
         and must NOT be double-escaped (regression test)."""
@@ -203,6 +206,50 @@ class TestCreateSessionLaunch:
         assert result is True
         # Session created but no launch commands sent (only the creation script)
         assert mock_osascript.call_count == 1
+
+
+    @patch("tagteam.session.time.sleep")
+    @patch("tagteam.iterm.get_session_contents")
+    @patch("tagteam.iterm.iterm_is_running", return_value=True)
+    @patch("tagteam.iterm._ensure_iterm_ready")
+    @patch("tagteam.iterm.write_text_to_session")
+    @patch("tagteam.iterm._osascript")
+    def test_launch_primes_each_tab_only_after_its_prompt_is_visible(
+        self, mock_osascript, mock_write_text, mock_ensure, mock_running,
+        mock_contents, mock_sleep, tmp_path
+    ):
+        """Regression: a fixed 3s sleep raced Claude Code's startup and the
+        prime was discarded. Priming must wait per tab for the agent prompt;
+        a shell prompt (agent not started) must not count as ready."""
+        mock_osascript.return_value = "lead-id,watcher-id,reviewer-id"
+        mock_write_text.return_value = True
+        (tmp_path / "tagteam.yaml").write_text(
+            "agents:\n  lead:\n    name: Claude\n  reviewer:\n    name: Codex\n"
+        )
+        # Lead: shell prompt, still booting, then Claude prompt. Reviewer: Codex prompt at once.
+        lead_polls = iter(["jack@mac tagteam % claude", "  Loading...", "\u276f \n  shift+tab to cycle"])
+
+        def contents(sid, last_n_lines=5):
+            if sid == "lead-id":
+                return next(lead_polls)
+            return "\u203a Ask Codex\n  /model to change"
+
+        mock_contents.side_effect = contents
+
+        assert create_session(str(tmp_path), launch=True) is True
+
+        from tagteam.session import PRIME_MESSAGE
+        calls = mock_write_text.call_args_list
+        assert calls[3] == call("lead-id", PRIME_MESSAGE)
+        assert calls[4] == call("reviewer-id", PRIME_MESSAGE)
+        # Lead was polled three times before its prime went out (2 not-ready + 1 ready).
+        lead_polls_seen = [c for c in mock_contents.call_args_list if c[0][0] == "lead-id"]
+        assert len(lead_polls_seen) == 3
+        # And every lead poll happened before the lead prime.
+        # (write_text_to_session and get_session_contents are separate mocks;
+        # order is asserted through the poll iterator being exhausted.)
+        with pytest.raises(StopIteration):
+            next(lead_polls)
 
 
 class TestEnsureItermReady:
