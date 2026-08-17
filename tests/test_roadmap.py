@@ -683,8 +683,11 @@ class TestTopologicalQueue:
         if repo_roadmap.exists():
             all_phases = parse_roadmap(repo_roadmap)
             flat = [p.slug for p in all_phases if not is_terminal(p.status)]
-            queue, _ = topological_queue(all_phases)
-            if not has_edges(all_phases):
+            # The repo roadmap is live data: when every phase is complete
+            # there is nothing to queue (topological_queue raises), so only
+            # compare when something is still actionable.
+            if flat and not has_edges(all_phases):
+                queue, _ = topological_queue(all_phases)
                 assert queue == flat
 
     def test_diamond_and_ties_are_roadmap_order(self, tmp_path):
