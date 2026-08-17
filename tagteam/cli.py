@@ -347,7 +347,7 @@ Commands:
   panel         Reviewer panel: run | status | list | lenses | preview --lens L
   rule          Rule on an escalation: approve | request-changes | answer (--to lead|reviewer)
   state         View or update the orchestration state file
-  roadmap       Query roadmap phases and build execution queue
+  roadmap       Roadmap phases, DAG queue, check | graph | ready | resume, worktree | worktrees (3.4)
   cycle         Manage cycle documents (init, add, status, rounds [--tail N], render)
   serve         Start the web dashboard server (--theme cockpit for the arbiter cockpit;
                 default is the Saloon; --host, --max-sse; `serve.theme` in tagteam.yaml)

@@ -58,7 +58,7 @@ If there is no state file, show: `Phase: — | Type: — | Round: — | Turn: �
   - If plan → "Plan approved! Implement, then `/handoff start [phase] impl`."
   - If impl and `run_mode == "full-roadmap"` → "Implementation approved! Watcher will auto-advance to next phase." (The watcher sets `turn: lead` for the next phase — lead runs `/handoff start [next-phase]`.)
   - If impl (single-phase) → "Implementation approved! Start next phase."
-- **Escalated:** "Escalated to human arbiter." The arbiter reads `tagteam brief` (a decision brief, if the escalation briefer is enabled) and rules with `tagteam rule approve|request-changes --content "…"` — or from the cockpit's Needs-you card (`tagteam serve --theme cockpit`), which runs the same command.
+- **Escalated:** "Escalated to human arbiter." (If `roadmap.pause_reason` is set instead — `blocked: …` / `roadmap invalid: …` — this is a full-roadmap pause, not a ruling: the arbiter unblocks and runs `tagteam roadmap resume`.) The arbiter reads `tagteam brief` (a decision brief, if the escalation briefer is enabled) and rules with `tagteam rule approve|request-changes --content "…"` — or from the cockpit's Needs-you card (`tagteam serve --theme cockpit`), which runs the same command.
 - **Needs-human:** "Paused for human input." The arbiter answers with `tagteam rule answer --to lead|reviewer --content "…"` (the answer arrives as an interjection and the cycle is re-armed for that role). Do not hand-edit cycle files.
 - **Aborted:** "Cycle was aborted. See cycle file for reason."
 - **Not your turn:** "Waiting for [other agent]. Tell them to run `/handoff`."
@@ -137,7 +137,7 @@ An impl cycle opened over an unchanged tree is a contract violation, not a forma
 2. Build the phase queue using the CLI:
    - All incomplete phases: `tagteam roadmap queue`
    - Starting from a specific phase: `tagteam roadmap queue [phase-slug]`
-   - This prints a comma-separated list of phase slugs (e.g. `api-gateway,dashboard,ci-integration`)
+   - This prints a comma-separated list of phase slugs (e.g. `api-gateway,dashboard,ci-integration`). Since 3.4 the roadmap is a DAG: phases may carry `- **Depends on:** …` lines and the queue is a stable topological order (identical to document order when no phase has one). With a start phase, unmet dependency ancestors are pulled in ahead of it (a `note:` on stderr says which). `tagteam roadmap check` explains a refused roadmap; `tagteam roadmap ready` lists what can start now.
 3. The first slug in the output is the starting phase
 4. Create the plan for the first phase at `docs/phases/[phase].md` if it doesn't exist
 5. Create the cycle via CLI: `tagteam cycle init --phase [phase] --type plan --lead [lead-name] --reviewer [reviewer-name] --content "summary of initial submission"`
@@ -156,7 +156,8 @@ An impl cycle opened over an unchanged tree is a contract violation, not a forma
 **Lifecycle in full-roadmap mode:**
 - Each phase goes through: plan cycle → (lead implements) → impl cycle → (advance)
 - After plan approval, watcher sets `turn: lead` — lead implements and runs `/handoff start [phase] impl`
-- After impl approval, watcher advances to next phase and sets `turn: lead` — lead runs `/handoff start [next-phase]`
+- After impl approval, watcher advances to the next **ready** phase (re-reading the roadmap: phases completed elsewhere are skipped, a phase whose dependencies are not yet satisfied is never started) and sets `turn: lead` — lead runs `/handoff start [next-phase]`
+- If everything left is blocked, the run pauses (`status: escalated`, `roadmap.pause_reason: "blocked: …"`); the arbiter merges the dependency / fixes the roadmap and runs `tagteam roadmap resume`
 - After the last phase's impl approval, state is set to `result: "roadmap-complete"`
 
 **`/handoff status` in roadmap mode shows:**
