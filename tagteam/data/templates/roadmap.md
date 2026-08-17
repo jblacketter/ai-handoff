@@ -25,6 +25,7 @@
 
 ### Phase 3: [Name]
 - **Status:** Not Started
+- **Depends on:** Phase 2
 - **Description:** [Brief description]
 - **Key Deliverables:**
   - [Deliverable 1]

@@ -213,6 +213,41 @@ tagteam panel preview --lens L # the exact prompt lens L would get (spawns nothi
 
 Each lens's tokens are recorded in `tagteam usage` as role `reviewer`, kind `panel:<lens>`.
 
+<a id="roadmap-dag"></a>
+## Roadmap as a DAG (3.4)
+
+`docs/roadmap.md` is already a graph in practice — a phase usually builds on an earlier one, and some phases could run beside each other. Since 3.4 you can say so, and tagteam uses it.
+
+**Syntax.** Inside a phase block, one optional line (several lines merge; `,` and `;` separate):
+
+```markdown
+### Phase 40: Roadmap as a DAG (3.4)
+- **Status:** In progress
+- **Depends on:** Phase 35, reviewer-panels-33, `Gatekeeper Pre-checks (3.2)`
+```
+
+A reference is a slug, `Phase N` / `phase-N` (the heading number), the exact name, or the `phase-N-slug` state form. Unknown references, self-references and cycles are errors; so are duplicate phase numbers, duplicate slugs (two names that slugify identically) and empty headings. `tagteam roadmap check` lists **every** problem at once, and `queue`, `ready`, `graph`, worktree creation and the full-roadmap advance refuse a broken roadmap rather than run on part of it. `RoadmapPhase` gained `number` and `depends_on`; `roadmap phases` shows a fourth `depends_on` column only when some phase has one.
+
+**One satisfaction rule.** A dependency is satisfied when its roadmap disposition on disk is terminal (✅ Complete / Absorbed / Deferred / …) **or** it was approved in the active full-roadmap run (`handoff-state.json` → `roadmap.completed`). The same predicate serves `roadmap ready` (which reads the project's active run and says `(+ N completed in the active run)`; `--roadmap-only` ignores it), the watcher's advance / `roadmap resume`, and `roadmap worktree`. So an impl approval unblocks its dependents in the same run without anyone editing the roadmap.
+
+**Queue.** `tagteam roadmap queue [start]` is a stable topological order — among the phases whose dependencies are met, always the earliest in roadmap order — so a well-formed roadmap with no `Depends on` lines queues exactly as before. With a start phase, the queue is that phase plus everything after it plus every *unmet* dependency ancestor of those, pulled in ahead of the phase that needs it (reported on stderr: `note: pulled in 2 dependency ancestor(s) …`); an unblocked edge is never silently bypassed. Actionable phases before the start that nothing later needs are dropped, as before.
+
+**Full-roadmap mode is dynamic.** The stored queue is a plan, not a promise: another worktree may finish and merge a queued phase, and the roadmap may be edited mid-run. On every impl approval (and on `tagteam roadmap resume`) the watcher (1) re-parses the roadmap — an invalid roadmap pauses the run with `roadmap invalid: …`; (2) takes the **whole** queue minus entries terminal on disk or already completed in this run (`current_index` only describes the current selection, so an entry that was blocked and jumped over is reconsidered every time); (3) starts the first remaining entry whose dependencies are satisfied and sets `current_index` to *its* index (it may move backwards); (4) declares `roadmap-complete` when nothing remains; (5) otherwise **pauses instead of starting a blocked phase** — status `escalated`, `roadmap.pause_reason: "blocked: <phase> depends on <deps>"`, `command: tagteam roadmap resume`. Merge the dependency (or fix the roadmap) and run `tagteam roadmap resume`; it re-runs the same five steps through the same compare-and-swap state write as the watcher. `roadmap resume` is not `tagteam resume` (which clears the dispatch pause marker).
+
+**Parallel phases in worktrees.** A worktree is just another tagteam project root — its own `tagteam.yaml`, `handoff-state.json`, watcher, turn slot, gate and panel — so the single-turn-slot invariant holds per project and nothing new is orchestrated:
+
+```bash
+tagteam roadmap worktree <phase> [--from REF] [--target BRANCH]   # ../<repo>-<phase>/ on branch phase-<slug>
+tagteam roadmap worktrees [--json]                                # path, branch, phase, that project's state, merged?
+tagteam roadmap worktree <phase> --remove [--force]               # refuses an unmerged branch without --force
+```
+
+Creation copies `tagteam.yaml` verbatim (when the branch does not carry it), adds only the framework files that are missing (never runtime state), registers the path like any other project (`~/.tagteam/projects.json` stays a flat list; the hub row reads `… (worktree: <phase>)`), records the metadata in `~/.tagteam/worktrees.json` — `path, parent, phase, branch, target, base, created_at` — and prints the kickoff (`cd …; tagteam session start; /handoff start <phase>`). **`merged?`** is always evaluated against the recorded `target` (the parent's checked-out branch at creation, or `--target`), via `refs/heads/<target>` then `origin/<target>`, never against whatever the parent happens to have checked out later; a missing target counts as unmerged.
+
+**Publication boundary.** A worktree must start from code that actually contains every dependency that made the phase ready, so creation refuses unless: the parent is **clean** (no modified/staged tracked files, no untracked non-ignored files — tagteam runtime files excepted; the fix is a commit, there is no override); readiness is evaluated on the roadmap **as of the base** (`git show <base>:docs/roadmap.md`, base = `--from REF` or HEAD); and the active run's `completed` list may vouch for a dependency only when the base **contains HEAD** (HEAD or a descendant — an older or divergent `--from` is refused with the reason). Corollary — the **cross-worktree publication contract**: another project observes a phase's completion only through `docs/roadmap.md` in its own checked-out tree. A phase running in a worktree is published by committing a terminal `- **Status:**` for it on the phase branch and merging that branch into the target; a sibling worktree sees it after merging/rebasing the target. Until then its dependents stay blocked there — by design. Merging is yours (`git merge` / a PR per branch); `docs/roadmap.md` status edits from two branches can conflict on merge and are resolved by hand.
+
+Out of scope, deliberately: two phases inside one project root, auto-merge, a scheduler that starts worktrees itself. The hub is the cross-project view.
+
 <a id="cockpit"></a>
 ## The Cockpit
 
@@ -311,3 +346,4 @@ tagteam serve --theme saloon --dir ~/projects/myproject     # legacy Saloon
 | `docs/escalations/<phase>_<type>_r<N>_<event>-a<attempt>.md` (+ `_latest.md`) | the briefer | decision briefs, one per escalation event and attempt |
 | `docs/roadmap.md`, `docs/decision_log.md`, `docs/checklists/`, `templates/`, `.claude/skills/handoff/SKILL.md` | `tagteam setup` / `tagteam upgrade` | the framework files (created once; skill/templates/checklists refreshed on upgrade) |
 | `~/.tagteam/projects.json` | `tagteam setup` (register), `tagteam upgrade` (prune), `tagteam registry unregister` | the registry of set-up projects the hub and `upgrade` read |
+| `~/.tagteam/worktrees.json` | `tagteam roadmap worktree` (create/remove) | phase-worktree metadata: path, parent, phase, branch, target (integration branch), base sha, created_at |

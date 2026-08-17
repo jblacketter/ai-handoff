@@ -355,11 +355,13 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Source:** 3.0 proposal §4 candidate; promoted 2026-08-16 as the first post-arc phase (best value-to-risk of the four candidates).
 
 ### Phase 39: Reviewer Panels (3.3)
+- **Depends on:** Phase 38
 - **Status:** ✅ Complete — plan approved round 3, impl approved round 3 (2026-08-16); PR #17 merged; released as **3.3.0** (tag `v3.3.0`, PyPI 2026-08-16).
 - **Description:** opt-in panel that takes the reviewer's turn as 2–3 independent lens reviews (correctness / scope / verification by default; each a fresh reviewer process with a lens brief, writing a structured verdict) merged deterministically into exactly one reviewer entry — one `REQUEST_CHANGES` with findings grouped by lens, or `APPROVE` only when every lens approves; any lens failure with no objection → fallback to the ordinary reviewer turn (never a partial approval). Runs after the gate at the watcher's reviewer seam in every mode; at-most-once per submission (`panels` claim row, schema v9, shared `_claim_satellite` with the gate); `tagteam panel run|status|list|lenses|preview`. No cockpit work.
 - **Plan:** `docs/phases/reviewer-panels.md`
 
 ### Phase 40: Roadmap as a DAG (3.4)
+- **Depends on:** Phase 35, Phase 39
 - **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-40-roadmap-dag`; PR at the end. Release **3.4.0** after impl approval.
 - **Description:** phases gain an optional `- **Depends on:** …` line and tagteam treats the roadmap as a directed acyclic graph: `roadmap queue` becomes a stable topological order (byte-identical for edge-free roadmaps), `roadmap check|graph|ready` validate and show the graph, full-roadmap mode never starts a blocked phase (pause reason + `roadmap resume`), and `tagteam roadmap worktree <phase>` gives each independent ready phase its own git worktree — a separate tagteam project root with its own state, watcher, gate and panel — so independent phases can run in parallel; `roadmap worktrees` lists them, `--remove` cleans up merged ones. No cockpit work.
 - **Plan:** `docs/phases/roadmap-dag.md`

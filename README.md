@@ -219,6 +219,16 @@ panel:
 
 With the panel on, the reviewer's turn on impl cycles is taken by 2–3 independent **lens** reviews — each a fresh reviewer process with a one-axis brief (does it do what the plan says? is everything there and nothing extra? is it verified?) writing a structured verdict — merged deterministically into **one** reviewer entry: `PANEL: REQUEST_CHANGES — …` with findings grouped by lens, or `PANEL: APPROVE` only when every lens approves. A lens that fails never causes a partial approval: the ordinary reviewer turn runs instead. Runs after the gate in every watcher mode; `tagteam panel status|lenses|preview --lens L|run`. Details: [reviewer panels](docs/how-tagteam-works.md#panels).
 
+### Roadmap as a DAG: dependencies, readiness, parallel phases in worktrees
+
+```markdown
+### Phase 40: Roadmap as a DAG (3.4)
+- **Status:** In progress
+- **Depends on:** Phase 35, Phase 39          # optional; slug, `Phase N` or the exact name
+```
+
+Phases can declare what they depend on and tagteam treats the roadmap as a **directed acyclic graph**: `tagteam roadmap queue` is a stable topological order (a roadmap without `Depends on` lines queues exactly as before), `roadmap ready` lists what can start now, `roadmap check` reports every identity or edge problem, `roadmap graph [--mermaid]` draws it. In full-roadmap mode the watcher **never starts a blocked phase** — it re-reads the roadmap on every advance, skips phases completed elsewhere, pauses with the reason when everything left is blocked, and `tagteam roadmap resume` continues once you merged the dependency. Independent phases can run **in parallel**: `tagteam roadmap worktree <phase>` gives a ready phase its own git worktree (`../<repo>-<phase>`, branch `phase-<slug>`), registered as its own tagteam project — its own state, watcher, gate and panel — and `roadmap worktrees` / `--remove` track and clean up merged ones. Details: [roadmap as a DAG](docs/how-tagteam-works.md#roadmap-dag).
+
 ## Talk to the lead, launch, watch and steer
 
 **The Cockpit** — the browser surface for one project, built around the arbiter's actual job: *how do I begin?*, *let me tell the lead something*, *does anything need me?*, then *is it healthy and what is it doing?*
@@ -294,7 +304,9 @@ tagteam gate check | run | status [--json] | list      # gatekeeper pre-checks (
 tagteam panel run | status [--json] | list | lenses | preview --lens L   # reviewer panel (opt-in `panel:` block)
 tagteam rule approve|request-changes|answer [--content ...] [--to lead|reviewer]
 tagteam rollback 0.8.0 [--yes]
-tagteam roadmap phases
+tagteam roadmap phases | queue [start] | check | graph [--mermaid] | ready [--json] [--roadmap-only] | resume
+tagteam roadmap worktree <phase> [--from REF] [--target BRANCH] | --remove [--force]   # parallel phases (3.4)
+tagteam roadmap worktrees [--json]
 tagteam serve --dir .
 tagteam tui                            # optional Textual TUI (pip install 'tagteam[tui]')
 tagteam upgrade                        # re-copy framework files into every registered project
