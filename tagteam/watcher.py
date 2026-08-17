@@ -415,16 +415,31 @@ def _select_next_phase(queue: list, idx: int, completed: list, seq: int,
     if problems:
         return _pause("roadmap invalid: " + "; ".join(problems))
 
+    roadmap_present = roadmap_path.exists()
     remaining: list[tuple[int, str]] = []
+    stale: list[str] = []
     for i, slug in enumerate(queue):
         key = normalize_phase_key(slug)
         if key in completed_norm:
             continue
         ph = by_slug.get(key)
-        if ph is not None and _rm.is_terminal_status(ph.status):
+        if ph is None:
+            if roadmap_present:
+                # A queued identity that the roadmap no longer has (removed
+                # or renamed mid-run) is never started: it has no status
+                # and no dependencies to check. Pause and let the arbiter
+                # fix the roadmap or the queue.
+                stale.append(slug)
+            else:
+                remaining.append((i, slug))
+            continue
+        if _rm.is_terminal_status(ph.status):
             _log(f"   skip {slug}: terminal in docs/roadmap.md")
             continue
         remaining.append((i, slug))
+    if stale:
+        return _pause("stale queue: " + ", ".join(stale)
+                      + " not in docs/roadmap.md (removed or renamed?)")
 
     if not remaining:
         roadmap_update = {
@@ -910,7 +925,7 @@ class _StateProcessor:
         pause_reason = roadmap.get("pause_reason") or state.get("reason")
         if pause_reason:
             _log(f"!! Paused: {pause_reason}")
-            if str(pause_reason).startswith(("blocked:", "roadmap invalid:")):
+            if str(pause_reason).startswith(("blocked:", "roadmap invalid:", "stale queue:")):
                 _log("   Resume with: tagteam roadmap resume"
                      " (after unblocking)")
             else:
