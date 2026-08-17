@@ -6,7 +6,7 @@
 - [x] Approved (round 3)
 - [x] Implementation
 - [x] Implementation Review (approved round 2)
-- [ ] Complete (release **3.4.0** via PR)
+- [x] Complete — PR #18 merged, released 3.4.0 (2026-08-16)
 
 ## Roles
 - Lead: Claude

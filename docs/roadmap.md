@@ -362,7 +362,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ### Phase 40: Roadmap as a DAG (3.4)
 - **Depends on:** Phase 35, Phase 39
-- **Status:** In progress — plan cycle opened 2026-08-16 on branch `phase-40-roadmap-dag`; PR at the end. Release **3.4.0** after impl approval.
+- **Status:** ✅ Complete — plan approved round 3, impl approved round 2 (2026-08-16); PR #18 merged; released as **3.4.0** (tag `v3.4.0`, PyPI 2026-08-16).
 - **Description:** phases gain an optional `- **Depends on:** …` line and tagteam treats the roadmap as a directed acyclic graph: `roadmap queue` becomes a stable topological order (byte-identical for edge-free roadmaps), `roadmap check|graph|ready` validate and show the graph, full-roadmap mode never starts a blocked phase (pause reason + `roadmap resume`), and `tagteam roadmap worktree <phase>` gives each independent ready phase its own git worktree — a separate tagteam project root with its own state, watcher, gate and panel — so independent phases can run in parallel; `roadmap worktrees` lists them, `--remove` cleans up merged ones. No cockpit work.
 - **Plan:** `docs/phases/roadmap-dag.md`
 - **Source:** 3.0 proposal §4 candidate "Roadmap as DAG (`depends_on`, parallel phases in worktrees)"; promoted 2026-08-16.
