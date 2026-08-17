@@ -48,6 +48,8 @@ def repo(tmp_path, monkeypatch):
     r = tmp_path / "repo"
     r.mkdir()
     _git(r, "init", "-q", "-b", "main", ".")
+    _git(r, "config", "user.email", "t@t")      # merges need an identity on CI
+    _git(r, "config", "user.name", "t")
     (r / "docs").mkdir()
     (r / "docs" / "roadmap.md").write_text(ROADMAP)
     (r / "tagteam.yaml").write_text("agents:\n  lead: {name: Claude}\n  reviewer: {name: Codex}\n")
