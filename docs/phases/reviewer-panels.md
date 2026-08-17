@@ -5,7 +5,7 @@
 - [x] In Review (round 2: enriched-entry metadata contract on `add_round`, terminal claim policy + fallback, crash-safe interjection snapshot/delivery, tie ordering, NEED_HUMAN question; round 3: entry-level vs state-level attribution — `updated_by` serialised into the entry when `meta` is supplied)
 - [x] Approved (round 3)
 - [x] Implementation
-- [ ] Implementation Review (round 1 open)
+- [x] Implementation Review (approved round 3)
 - [ ] Complete (release **3.3.0** via PR)
 
 ## Roles
