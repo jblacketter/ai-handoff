@@ -38,6 +38,6 @@ Use this checklist when reviewing implemented code.
 
 ## Testing
 - [ ] Key functionality has tests
-- [ ] Tests pass
+- [ ] Tests pass — per the lead's reported full-suite result (or the gate entry); re-run only the test files the diff touches, not the whole suite
 - [ ] Application runs without errors
 - [ ] Manual testing confirms behavior
