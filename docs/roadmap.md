@@ -369,7 +369,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ### Phase 41: Review-loop efficiency (3.5)
 - **Depends on:** Phase 38
-- **Status:** 🔄 Approved — plan round 3, impl round 2 (2026-08-16); PR #19 awaiting merge → 3.5.0
+- **Status:** ✅ Complete — plan approved round 3, impl approved round 2 (2026-08-16); PR #19 merged; released as **3.5.0** (tag `v3.5.0`, PyPI 2026-08-16).
 - **Description:** one full-suite run and zero spurious prompts per review round: `gatekeeper.on_submit` runs the gate synchronously from the lead's `cycle add SUBMIT_FOR_REVIEW` (works without a watcher; `gate check --skip-tests` is the cheap pre-flight); the watcher's watchdog re-sends only on positive idle, at `watcher.resend_minutes` (default 15), at most twice; verification-budget contract in the SKILL (lead reports the suite once, reviewer does not re-run it); `scripts/release.py X.Y.Z` bumps pyproject/CITATION/uv.lock.
 - **Plan:** `docs/phases/review-loop-efficiency.md`
 - **Source:** measured 2026-08-16 — four suite runs per impl round, 5-minute watchdog nudges to both agents.

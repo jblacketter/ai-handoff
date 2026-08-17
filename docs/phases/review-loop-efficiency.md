@@ -6,7 +6,7 @@
 - [x] Approved (round 3)
 - [x] Implementation
 - [x] Implementation Review (approved round 2; round 1: pytest `-q` summary form recognised — `_PYTEST_SUMMARY` accepts the bare line, anchored; PASS and BOUNCE summaries carry `N passed, M skipped`; `data.summary` on the check)
-- [ ] Complete
+- [x] Complete — PR #19 merged, released 3.5.0 (2026-08-16)
 
 ## Roles
 - Lead: Claude
