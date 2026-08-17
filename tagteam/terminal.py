@@ -13,9 +13,15 @@ Differences from iTerm2 that shape this module:
 * There is no persistent session UUID; a tab's ``tty`` (``/dev/ttys004``)
   is unique among open tabs and stable for the tab's lifetime, so it is the
   ``session_id``. Windows are identified by ``id`` for bookkeeping only.
-* Text is sent with ``do script … in <tab>``, which writes the text into the
-  tab's tty followed by a newline. ``_SUBMIT_SUFFIX`` (see below) is what we
-  append before that newline so the agent TUI submits the line.
+* Text is sent with ``do script <text> in <tab>`` (Terminal writes the text
+  into the tab's tty followed by a newline) and then a second, empty
+  ``do script "" in <tab>`` — a lone newline. Measured 2026-08-17: Claude
+  Code submits on the first call already (the extra newline on its now-empty
+  input is a no-op, and does not dismiss an open dialog); Codex keeps the
+  first call's text *in its composer* (Terminal delivers `do script` text as
+  a paste, so the trailing newline — even an explicit ``& return`` — is a
+  literal newline to it) and submits only on the separate newline. Same
+  two-step shape as iTerm2's ``write text … newline NO`` + CR.
 """
 
 from __future__ import annotations
@@ -43,12 +49,9 @@ _TERMINAL_APP_PATHS = (
     "/Applications/Utilities/Terminal.app",
 )
 
-# What we append to the text before Terminal.app's own trailing newline.
-# "" relies on that newline to submit; "\r" adds an explicit carriage return
-# first (belt-and-braces for TUIs that only submit on CR — iTerm2's driver
-# sends an explicit CR for the same reason). Decided empirically against a
-# live Claude Code + Codex; see docs/how-tagteam-works.md.
-_SUBMIT_SUFFIX = "\r"
+# Pause between the text `do script` and the submitting empty one (seconds,
+# AppleScript `delay`); mirrors iTerm2's 0.05 s between text and CR.
+_SUBMIT_DELAY_S = 0.05
 
 _ROLES = ("lead", "watcher", "reviewer")
 _ROLE_TITLES = {"lead": "Lead", "watcher": "Watcher", "reviewer": "Reviewer"}
@@ -386,14 +389,17 @@ def create_session(project_dir: str, launch: bool = False) -> bool:
 # -- per-tab operations (session_id == tty) ---------------------------------
 
 def _tab_script(session_id: str, body: str, not_found: str = "not_found") -> str:
-    """Wrap *body* in a loop that binds `t` to the tab whose tty is
-    *session_id*; *body* must `return`."""
+    """Wrap *body* in a loop over every window `w` / tab index `i` that
+    stops at the tab whose tty is *session_id*; *body* must `return` and must
+    address the tab as ``tab i of w`` (never a loop variable: in AppleScript
+    ``contents of <variable>`` is the dereference operator, so ``contents of
+    t`` yields the tab object, not its screen text)."""
     sid = _applescript_string(session_id)
     return f'''
     tell application "Terminal"
         repeat with w in windows
-            repeat with t in tabs of w
-                if tty of t is "{sid}" then
+            repeat with i from 1 to (count of tabs of w)
+                if tty of tab i of w is "{sid}" then
 {body}
                 end if
             end repeat
@@ -406,14 +412,16 @@ def _tab_script(session_id: str, body: str, not_found: str = "not_found") -> str
 def write_text_to_session(session_id: str, text: str) -> bool:
     """Type *text* into the tab whose tty is *session_id* and submit it.
 
-    `do script` appends its own newline; with ``_SUBMIT_SUFFIX == "\r"`` an
-    explicit carriage return (AppleScript's `return`) is sent first.
+    Two `do script`s in one AppleScript: the text (Terminal appends a
+    newline, which Claude Code already takes as submit) and, after a short
+    delay, an empty one — the lone newline Codex needs to submit what is
+    sitting in its composer. See the module docstring for the measurement.
     """
     literal = f'"{_applescript_string(text)}"'
-    if _SUBMIT_SUFFIX == "\r":
-        literal += " & return"
     body = (
-        f'                    do script {literal} in t\n'
+        f'                    do script {literal} in tab i of w\n'
+        f'                    delay {_SUBMIT_DELAY_S}\n'
+        f'                    do script "" in tab i of w\n'
         f'                    return "ok"'
     )
     try:
@@ -424,7 +432,7 @@ def write_text_to_session(session_id: str, text: str) -> bool:
 
 def get_session_contents(session_id: str, last_n_lines: int = 5) -> str:
     """Visible text of the tab whose tty is *session_id* (last N lines)."""
-    body = '                    return contents of t'
+    body = '                    return contents of tab i of w'
     try:
         content = _osascript(_tab_script(session_id, body, not_found=""))
         if not content:
@@ -504,6 +512,20 @@ def get_session_id(role: str, project_dir: str) -> str | None:
     return tab.get("session_id")
 
 
+def _hangup_tty(session_id: str) -> None:
+    """SIGHUP every process on the tab's tty (agent + shell) — what closing
+    the window by hand does. Terminal.app will not close a tab whose
+    processes are still running (it would ask first), so this goes first."""
+    name = session_id.rsplit("/", 1)[-1]
+    if not name.startswith("tty"):
+        return
+    try:
+        subprocess.run(["pkill", "-HUP", "-t", name],
+                       capture_output=True, timeout=5, check=False)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
 def kill_session(project_dir: str) -> bool:
     """Close the recorded Terminal.app tabs (by tty) and delete the session file."""
     data = _read_session_file(project_dir)
@@ -515,7 +537,8 @@ def kill_session(project_dir: str) -> bool:
         sid = info.get("session_id") if isinstance(info, dict) else None
         if not sid:
             continue
-        body = '                    close t saving no\n                    return "ok"'
+        _hangup_tty(sid)
+        body = '                    close tab i of w saving no\n                    return "ok"'
         try:
             _osascript(_tab_script(sid, body))
         except Exception:
