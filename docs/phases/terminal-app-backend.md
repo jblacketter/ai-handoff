@@ -1,8 +1,8 @@
 # Phase 42: Terminal.app backend (3.6)
 
 ## Status
-- [ ] Planning
-- [ ] In Review
+- [x] Planning
+- [ ] In Review (round 1: cold-launch window accounting — targeted Lead reuse rule, id-diff identification, exact-three invariant + tests)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -63,14 +63,48 @@ and health check can treat both as a "tab driver" (§C):
 `make new tab`; creating tabs requires GUI scripting (System Events ⌘T), which
 needs the Accessibility permission and a focused window — a real onboarding
 hurdle and fragile under user interaction. So `create_session` opens **three
-windows** with three `do script "cd <abs_dir>"` calls (each `do script`
-without a target opens a new window), sets each tab's `custom title` to
-`Lead` / `Watcher` / `Reviewer`, and records each tab's `tty`. Windows are
-positioned side by side across the main screen (`bounds`), best-effort — a
-failure to position is ignored. Cold-launch quirk: Terminal.app opens a
-default window on launch; when we launched it, that window is reused as the
-Lead window (same rule iTerm2 uses); when Terminal was already running we
-never touch existing windows.
+windows** (Lead / Watcher / Reviewer), sets each tab's `custom title`, and
+records each tab's `tty` and its window `id`. Windows are positioned side by
+side across the main screen (`bounds`), best-effort — a failure to position is
+ignored.
+
+*Window accounting (deterministic, cold and warm launch alike).* Every role
+window is identified by **diffing `id of every window`** around its creating
+call — never by "front window" or by index:
+
+1. `was_running = terminal_is_running()`; `_ensure_terminal_ready()` (which
+   `open -b com.apple.Terminal`s if needed and polls `count windows` until the
+   dictionary answers).
+2. `before = id of every window` (one AppleScript call).
+3. **Lead.** *Reuse condition:* `not was_running` **and** `len(before) == 1`
+   **and** `busy of selected tab of window id <before[0]>` is `false` (an
+   idle login shell — Terminal's own launch window, not a restored session
+   running something). If it holds, Lead is created **targeted**:
+   `do script "cd <abs_dir>" in window id <before[0]>`; afterwards
+   `id of every window` must still equal `before` (no new window). If a new
+   window appeared anyway (Terminal ignored the target), that new window
+   becomes Lead and the launch window is left alone; a one-line note says so.
+   If the reuse condition does not hold (Terminal was already running; zero
+   or several windows were restored on launch; the launch tab is busy) Lead is
+   created **untargeted** like the other two roles and nothing pre-existing
+   is touched.
+4. **Watcher, then Reviewer.** Untargeted `do script "cd <abs_dir>"`; after
+   each call `after = id of every window`, `new = after − seen`; `new` must be
+   **exactly one** id — that window (its `tab 1`) is the role's; `seen` grows
+   by it. `new` of 0 or ≥2 (Terminal reused a window, or the user opened one
+   in the ~100 ms window) is an error: the windows we created so far are
+   closed (`close … saving no`), no session file is written, `create_session`
+   prints `Error creating Terminal.app session: <what was seen>` and returns
+   False (same shape as the iTerm2 error path).
+5. Titles / tty / bounds are set per recorded window id; the session file is
+   written; launch commands and priming follow (as iTerm2 — file first).
+
+*Invariant* (asserted by the mocked tests, §D): the session file always holds
+exactly three roles with three distinct ttys and three distinct window ids;
+in the cold-launch reuse case the launch window's id **is** the Lead's — no
+untracked fourth window; in every other case exactly three windows were
+created and every pre-existing window id is untouched (never targeted, never
+closed). `kill_session` closes only the recorded window ids' tabs (by tty).
 
 **A.2 Identity = tty.** Terminal.app has no persistent session UUID, but every
 tab has a `tty` (`/dev/ttys004`) that is unique among open tabs and stable for
@@ -163,9 +197,19 @@ from `session_backend()` instead of importing `tagteam.iterm` directly;
 - Roadmap: Phase 42 entry (this plan) — the backlog "Terminal.app backend"
   item becomes a pointer to it.
 - Tests (all with `_osascript` mocked — no AppleScript runs in CI):
-  - `tests/test_terminal.py`: create_session AppleScript shape (three
-    `do script`s, titles, tty parse, session-file payload with
-    `backend: terminal`), write_text escaping + `_SUBMIT_SUFFIX`,
+  - `tests/test_terminal.py`: create_session window accounting per §A.1 —
+    (a) cold launch, one idle launch window → Lead script is
+    `do script … in window id <launch>`, two untargeted creations, session
+    file = exactly three roles / three ttys / three window ids, launch id ==
+    Lead id, no fourth window; (b) warm launch (`was_running`) → three
+    untargeted creations, pre-existing ids never targeted or closed;
+    (c) cold launch with several restored windows / busy launch tab → same
+    as (b); (d) target ignored (new window appears on the Lead call) → the
+    new window is Lead, launch window untouched, note printed;
+    (e) `new` ≠ 1 on an untargeted call → created windows closed, no
+    session file, returns False. Plus: titles per role, tty parse,
+    session-file payload with `backend: terminal`, write_text escaping +
+    `_SUBMIT_SUFFIX`,
     get_session_contents tail, session_id_is_valid, `_any_session_alive`,
     kill_session, list_sessions parsing, cold-launch reuse vs. running
     branch, `_terminal_supported` platform gating.
