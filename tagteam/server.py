@@ -369,12 +369,9 @@ def _get_pane_logs(project_dir: str, n: int = 50) -> dict:
                 slots[role] = _available(capture_pane(target, last_n_lines=n))
         return {"backend": backend, **slots}
 
-    # iTerm2
-    from tagteam.iterm import (
-        _read_session_file,
-        get_session_contents,
-        session_id_is_valid,
-    )
+    # Tab backends (iTerm2 / Terminal.app): the session file says which
+    # driver wrote it; fall back to the detected default when it has none.
+    from tagteam.tabs import _read_session_file, driver_for, session_backend
     data = _read_session_file(project_dir)
     if not data:
         reason = "no-session"
@@ -384,6 +381,10 @@ def _get_pane_logs(project_dir: str, n: int = 50) -> dict:
             "watcher": _unavailable(reason),
             "reviewer": _unavailable(reason),
         }
+    file_backend = session_backend(project_dir)
+    if file_backend in ("iterm2", "terminal"):
+        backend = file_backend
+    driver = driver_for(backend)
 
     tabs = data.get("tabs", {})
     slots = {}
@@ -391,10 +392,10 @@ def _get_pane_logs(project_dir: str, n: int = 50) -> dict:
         sid = (tabs.get(role) or {}).get("session_id")
         if not sid:
             slots[role] = _unavailable("no-session")
-        elif not session_id_is_valid(sid):
+        elif not driver.session_id_is_valid(sid):
             slots[role] = _unavailable("dead-session")
         else:
-            slots[role] = _available(get_session_contents(sid, last_n_lines=n))
+            slots[role] = _available(driver.get_session_contents(sid, last_n_lines=n))
     return {"backend": backend, **slots}
 
 

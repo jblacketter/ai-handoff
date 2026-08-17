@@ -218,7 +218,7 @@ def start_watcher(project_dir: str | Path, *, mode: str = "headless",
     if ws.get("running"):
         return {"ok": False, "already": True, "pid": ws.get("pid"), "mode": ws.get("mode"),
                 "message": f"a watcher is already running (pid {ws.get('pid')}, {ws.get('mode') or '?'})"}
-    if mode not in ("headless", "notify", "iterm2", "tmux"):
+    if mode not in ("headless", "notify", "iterm2", "terminal", "tmux"):
         return {"ok": False, "message": f"invalid watcher mode {mode!r}"}
     log = root / ".tagteam" / f"watcher-{mode}.log"
     log.parent.mkdir(parents=True, exist_ok=True)

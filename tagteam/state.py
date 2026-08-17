@@ -432,26 +432,27 @@ def clear_diagnostics_log(project_dir: str | None = None) -> None:
 
 def _check_agent_health(lines: list[str], project_dir: str) -> None:
     """Check agent responsiveness via session discovery."""
-    # Try iTerm first
+    # Try the tab backends first (iTerm2 / Terminal.app — the session file
+    # names its driver)
     try:
-        from tagteam.iterm import (
-            _read_session_file, get_session_contents, session_id_is_valid,
-        )
+        from tagteam.tabs import _read_session_file, session_driver
         from tagteam.watcher import _check_idle_patterns
 
         session_data = _read_session_file(project_dir)
-        if session_data:
+        picked = session_driver(project_dir) if session_data else None
+        if session_data and picked is not None:
+            _backend, driver = picked
             tabs = session_data.get("tabs", {})
             for role in ("lead", "reviewer"):
                 sid = tabs.get(role, {}).get("session_id")
                 if not sid:
                     lines.append(f"  {role}: no session ID in session file")
                     continue
-                if not session_id_is_valid(sid):
+                if not driver.session_id_is_valid(sid):
                     lines.append(f"  {role}: session {sid} not found"
                                  " (tab may be closed)")
                     continue
-                content = get_session_contents(sid, last_n_lines=5)
+                content = driver.get_session_contents(sid, last_n_lines=5)
                 if not content:
                     lines.append(f"  {role}: no terminal output")
                 elif _check_idle_patterns(content):
