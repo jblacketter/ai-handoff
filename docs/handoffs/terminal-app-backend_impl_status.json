@@ -1,0 +1,24 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "terminal-app-backend",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-17",
+  "baseline": {
+    "sha": "fcac2f9c9fdff7348970c35952b5cf71ccf5b3ec",
+    "dirty_paths": [],
+    "captured_at": "2026-08-17T22:33:48.357462+00:00",
+    "source": "copied-from-plan"
+  },
+  "impl_boundary": {
+    "sha": "6c7d6eeae41a7b8946fb852858f9fb41d750116e",
+    "dirty": {
+      "docs/handoffs/terminal-app-backend_plan_rounds.jsonl": "04a59c15ebe723bdc5924114a0d7c79f63d6ce81dc5441013b7dabd6f9f3fba4"
+    },
+    "captured_at": "2026-08-17T22:36:14.706315+00:00",
+    "source": "copied-from-plan"
+  }
+}
