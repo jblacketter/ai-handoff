@@ -197,7 +197,7 @@ class TestEnsureSession:
     @patch("tagteam.session._iterm2_supported", return_value=True)
     @patch("tagteam.iterm._any_session_alive", return_value=True)
     @patch(
-        "tagteam.iterm._read_session_file",
+        "tagteam.tabs._read_session_file",
         return_value={"tabs": {"lead": {"session_id": "x"}}},
     )
     def test_existing_iterm_returns_exists(
