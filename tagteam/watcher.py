@@ -581,7 +581,7 @@ class _StateProcessor:
     what triggered the tick.
     """
 
-    RESEND_TIMEOUT = 300  # seconds — re-send command if still 'ready'
+    RESEND_TIMEOUT = 1800  # seconds — re-send command if still 'ready' (interim 30m; Phase 41 makes this configurable + idle-gated)
 
     def __init__(
         self,
@@ -760,7 +760,7 @@ class _StateProcessor:
                     and self.last_ready_send_time is not None
                     and (time.time() - self.last_ready_send_time
                          > self.RESEND_TIMEOUT)):
-                _log("Watchdog: state still 'ready' after 5m"
+                _log("Watchdog: state still 'ready' after 30m"
                      " — re-sending command")
                 self.last_ready_send_time = None  # avoid rapid re-sends
                 # fall through to re-process
