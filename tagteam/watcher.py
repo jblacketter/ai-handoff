@@ -350,54 +350,183 @@ def _try_roadmap_advance(state: dict, project_dir: str = ".") -> dict | None:
                 completed = completed_normalized
 
         seq = state.get("seq", 0)
-
-        if idx + 1 < len(queue):
-            next_idx = idx + 1
-            next_phase = queue[next_idx]
-            roadmap_update = {
-                "queue": queue,
-                "current_index": next_idx,
-                "completed": completed,
-                "pause_reason": None,
-            }
-            updates = {
-                "phase": next_phase,
-                "type": "plan",
-                "round": 1,
-                "turn": "lead",
-                "status": "ready",
-                "result": None,
-                "roadmap": roadmap_update,
-                "command": f"/handoff start {next_phase}",
-            }
-            new_state = update_state(updates, project_dir, expected_seq=seq)
-            if new_state is None:
-                _log("   SKIP: state changed since approval detected (seq mismatch)")
-                return None
-            _log(f"   AUTO-ADVANCE: impl approved → lead starts next phase"
-                 f" ({next_phase})")
-            return new_state
-        else:
-            # Last phase — roadmap complete
-            roadmap_update = {
-                "queue": queue,
-                "current_index": idx,
-                "completed": completed,
-                "pause_reason": None,
-            }
-            updates = {
-                "status": "done",
-                "result": "roadmap-complete",
-                "roadmap": roadmap_update,
-            }
-            new_state = update_state(updates, project_dir, expected_seq=seq)
-            if new_state is None:
-                _log("   SKIP: state changed since approval detected (seq mismatch)")
-                return None
-            _log("   ROADMAP COMPLETE: all phases finished!")
-            return new_state
+        return _select_next_phase(queue, idx, completed, seq, project_dir)
 
     return None
+
+
+def _select_next_phase(queue: list, idx: int, completed: list, seq: int,
+                       project_dir: str) -> dict | None:
+    """Phase 40: the dynamic five-step advance over the WHOLE selected queue.
+
+    1. re-parse docs/roadmap.md — identity/edge problems pause the run;
+    2. `remaining` = every queue entry that is not terminal in the roadmap
+       and not in `completed` (`current_index` only describes the current
+       selection, it never defines the remaining set — an entry that was
+       blocked and jumped over earlier is reconsidered every time);
+    3. select the first remaining entry (queue order = topological priority)
+       whose dependencies are all satisfied (`roadmap.dep_satisfied`) and
+       set `current_index` to ITS index (it may move backwards);
+    4. nothing remaining → roadmap-complete;
+    5. remaining but all blocked → pause (`pause_reason`), never start.
+    A missing roadmap file is not an error: the queue is then treated as
+    edge-free with nothing externally completed (pre-Phase-40 behaviour)."""
+    from tagteam import roadmap as _rm
+
+    roadmap_path = Path(project_dir) / "docs" / "roadmap.md"
+    phases: list = []
+    problems: list[str] = []
+    if roadmap_path.exists():
+        try:
+            phases, problems = _rm.graph_problems(roadmap_path)
+        except ValueError as e:  # e.g. no headings at all
+            problems = [str(e)]
+    by_slug = {p.slug: p for p in phases}
+    completed_norm = [normalize_phase_key(c) for c in completed]
+
+    def _pause(reason: str) -> dict | None:
+        roadmap_update = {
+            "queue": queue,
+            "current_index": idx,
+            "completed": completed,
+            "pause_reason": reason,
+        }
+        # The watcher's pause convention (see `_handle_escalated`): status
+        # `escalated` + `roadmap.pause_reason`. Nothing is dispatched; the
+        # arbiter unblocks (merge / roadmap edit) and runs
+        # `tagteam roadmap resume`. `turn: lead` because the lead is who
+        # continues afterwards; `command` documents the way out.
+        updates = {
+            "turn": "lead",
+            "status": "escalated",
+            "result": None,
+            "roadmap": roadmap_update,
+            "command": "tagteam roadmap resume",
+        }
+        new_state = update_state(updates, project_dir, expected_seq=seq)
+        if new_state is None:
+            _log("   SKIP: state changed since approval detected (seq mismatch)")
+            return None
+        _log(f"   ROADMAP PAUSED: {reason}")
+        _log("   Unblock (merge the dependency / fix docs/roadmap.md), then:"
+             " tagteam roadmap resume")
+        return new_state
+
+    if problems:
+        return _pause("roadmap invalid: " + "; ".join(problems))
+
+    remaining: list[tuple[int, str]] = []
+    for i, slug in enumerate(queue):
+        key = normalize_phase_key(slug)
+        if key in completed_norm:
+            continue
+        ph = by_slug.get(key)
+        if ph is not None and _rm.is_terminal_status(ph.status):
+            _log(f"   skip {slug}: terminal in docs/roadmap.md")
+            continue
+        remaining.append((i, slug))
+
+    if not remaining:
+        roadmap_update = {
+            "queue": queue,
+            "current_index": idx,
+            "completed": completed,
+            "pause_reason": None,
+        }
+        updates = {
+            "status": "done",
+            "result": "roadmap-complete",
+            "roadmap": roadmap_update,
+        }
+        new_state = update_state(updates, project_dir, expected_seq=seq)
+        if new_state is None:
+            _log("   SKIP: state changed since approval detected (seq mismatch)")
+            return None
+        _log("   ROADMAP COMPLETE: all phases finished!")
+        return new_state
+
+    blocked: list[str] = []
+    for i, slug in remaining:
+        ph = by_slug.get(normalize_phase_key(slug))
+        unmet = (_rm.unmet_dependencies(ph, by_slug, completed_norm)
+                 if ph is not None else [])
+        if unmet:
+            blocked.append(f"{slug} depends on {', '.join(unmet)}")
+            continue
+        roadmap_update = {
+            "queue": queue,
+            "current_index": i,
+            "completed": completed,
+            "pause_reason": None,
+        }
+        updates = {
+            "phase": slug,
+            "type": "plan",
+            "round": 1,
+            "turn": "lead",
+            "status": "ready",
+            "result": None,
+            "roadmap": roadmap_update,
+            "command": f"/handoff start {slug}",
+        }
+        new_state = update_state(updates, project_dir, expected_seq=seq)
+        if new_state is None:
+            _log("   SKIP: state changed since approval detected (seq mismatch)")
+            return None
+        _log(f"   AUTO-ADVANCE: impl approved → lead starts next phase"
+             f" ({slug})")
+        return new_state
+
+    return _pause("blocked: " + "; ".join(blocked))
+
+
+def roadmap_resume(project_dir: str = ".") -> int:
+    """`tagteam roadmap resume` (Phase 40): re-run the dynamic advance now —
+    after the arbiter merged a dependency's branch or fixed the roadmap.
+    Applies only to a full-roadmap run that is paused (`pause_reason` set)
+    or sitting on an approved impl (`status: done`, `result: approved`);
+    otherwise a no-op that says why. Goes through the same
+    `update_state(expected_seq=…)` as the watcher."""
+    state = read_state(project_dir)
+    if not state:
+        print("No handoff-state.json — nothing to resume.")
+        return 1
+    if state.get("run_mode") != "full-roadmap":
+        print("Not in full-roadmap mode — nothing to resume.")
+        return 1
+    roadmap = state.get("roadmap") or {}
+    queue = roadmap.get("queue") or []
+    completed = list(roadmap.get("completed") or [])
+    idx = roadmap.get("current_index", 0)
+    paused = bool(roadmap.get("pause_reason"))
+    approved_impl = (state.get("status") == "done"
+                     and state.get("result") == "approved"
+                     and state.get("type") == "impl")
+    if not paused and not approved_impl:
+        print("Roadmap run is not paused and no impl approval is pending "
+              f"(status={state.get('status')}, result={state.get('result')}).")
+        return 1
+    if approved_impl and state.get("phase"):
+        key = normalize_phase_key(state["phase"])
+        completed_norm = [normalize_phase_key(c) for c in completed]
+        if key not in completed_norm:
+            completed = completed_norm + [key]
+    new_state = _select_next_phase(queue, idx, completed, state.get("seq", 0),
+                                   project_dir)
+    if new_state is None:
+        print("resume: state changed underneath — re-run.")
+        return 1
+    rm = new_state.get("roadmap") or {}
+    if new_state.get("result") == "roadmap-complete":
+        print("Roadmap complete — all phases finished!")
+    elif rm.get("pause_reason"):
+        print(f"Still paused: {rm['pause_reason']}")
+        return 2
+    else:
+        print(f"Resumed: next phase {new_state.get('phase')} "
+              f"(index {rm.get('current_index')}) — lead runs "
+              f"`{new_state.get('command')}`.")
+    return 0
 
 
 def _log(msg: str) -> None:
@@ -781,8 +910,12 @@ class _StateProcessor:
         pause_reason = roadmap.get("pause_reason") or state.get("reason")
         if pause_reason:
             _log(f"!! Paused: {pause_reason}")
-            _log("   Resume with: python -m tagteam state set"
-                 " --status ready --turn <lead|reviewer>")
+            if str(pause_reason).startswith(("blocked:", "roadmap invalid:")):
+                _log("   Resume with: tagteam roadmap resume"
+                     " (after unblocking)")
+            else:
+                _log("   Resume with: python -m tagteam state set"
+                     " --status ready --turn <lead|reviewer>")
             notify_macos("Tagteam", f"Paused: {pause_reason}")
         else:
             _log("!! Escalated to human arbiter")

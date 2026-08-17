@@ -454,3 +454,422 @@ class TestRoadmapCommand:
         result = roadmap_command(["foobar"])
         assert result == 1
         assert "Unknown" in capsys.readouterr().out
+
+
+# ═══════════════════════════════════════════════════════════════
+# Phase 40: roadmap as a DAG
+# ═══════════════════════════════════════════════════════════════
+
+from tagteam.roadmap import (  # noqa: E402
+    RoadmapGraphError,
+    validate_identities,
+    validate_graph,
+    check_graph,
+    graph_problems,
+    dep_satisfied,
+    unmet_dependencies,
+    ready_phases,
+    blocked_phases,
+    topological_queue,
+    build_queue_with_notes,
+    graph_text,
+    has_edges,
+)
+from tagteam.watcher import roadmap_resume  # noqa: E402
+
+
+DAG_ROADMAP = """\
+# Roadmap
+
+### Phase 1: Alpha
+- **Status:** Complete
+
+### Phase 2: Beta
+- **Status:** Not Started
+- **Depends on:** Phase 1
+
+### Phase 3: Gamma
+- **Status:** Not Started
+- **Depends on:** beta
+
+### Phase 4: Delta
+- **Status:** Not Started
+- **Depends on:** `Beta`, Gamma
+
+### Phase 5: Epsilon
+- **Status:** Not Started
+"""
+
+DIAMOND_ROADMAP = """\
+### Phase 1: A
+- **Status:** Not Started
+### Phase 2: B
+- **Status:** Not Started
+- **Depends on:** a
+### Phase 3: C
+- **Status:** Not Started
+- **Depends on:** a
+### Phase 4: D
+- **Status:** Not Started
+- **Depends on:** b, c
+"""
+
+
+def _phases(tmp_path, text):
+    return parse_roadmap(_write_roadmap(tmp_path, text))
+
+
+class TestDependsOnParsing:
+    def test_no_line_means_no_edges_and_number_is_set(self, tmp_path):
+        phases = _phases(tmp_path, SAMPLE_ROADMAP)
+        assert all(p.depends_on == [] for p in phases)
+        assert [p.number for p in phases] == [1, 2, 3, 4]
+        assert not has_edges(phases)
+
+    def test_all_reference_forms_resolve_to_slugs(self, tmp_path):
+        phases = _phases(tmp_path, DAG_ROADMAP)
+        by = {p.slug: p for p in phases}
+        assert by["beta"].depends_on == ["alpha"]          # Phase N
+        assert by["gamma"].depends_on == ["beta"]          # slug
+        assert by["delta"].depends_on == ["beta", "gamma"]  # `Beta` (name in backticks), name
+        assert by["epsilon"].depends_on == []
+
+    def test_multiple_lines_and_separators_merge_and_dedupe(self, tmp_path):
+        text = DAG_ROADMAP + """
+### Phase 6: Zeta
+- **Status:** Not Started
+- **Depends on:** alpha; beta, alpha
+- **Depends on**: phase-3, Phase 3, phase-4-delta
+"""
+        by = {p.slug: p for p in _phases(tmp_path, text)}
+        assert by["zeta"].depends_on == ["alpha", "beta", "gamma", "delta"]
+
+    def test_none_words_ignored(self, tmp_path):
+        text = "### Phase 1: One\n- **Status:** Not Started\n- **Depends on:** none\n" \
+               "### Phase 2: Two\n- **Status:** Not Started\n- **Depends on:** —\n"
+        assert all(p.depends_on == [] for p in _phases(tmp_path, text))
+
+    def test_unknown_reference_kept_verbatim(self, tmp_path):
+        text = "### Phase 1: One\n- **Status:** Not Started\n- **Depends on:** nope\n"
+        (p,) = _phases(tmp_path, text)
+        assert p.depends_on == ["nope"]
+
+    def test_phases_column_only_with_edges(self, tmp_path, monkeypatch, capsys):
+        _write_roadmap(tmp_path, SAMPLE_ROADMAP)
+        monkeypatch.chdir(tmp_path)
+        assert roadmap_command(["phases"]) == 0
+        out = capsys.readouterr().out
+        assert out.splitlines()[0].count("\t") == 2
+        _write_roadmap(tmp_path, DAG_ROADMAP)
+        assert roadmap_command(["phases"]) == 0
+        out = capsys.readouterr().out
+        assert "beta\tNot Started\tBeta\talpha" in out
+        assert "delta\tNot Started\tDelta\tbeta,gamma" in out
+
+
+class TestIdentityValidation:
+    def test_clean(self):
+        assert validate_identities(DAG_ROADMAP) == []
+        assert validate_identities(SAMPLE_ROADMAP) == []
+
+    def test_duplicate_numbers_and_slugs_all_listed(self):
+        text = ("### Phase 1: One\n- **Status:** Not Started\n"
+                "### Phase 1: Two\n- **Status:** Not Started\n"
+                "### Phase 3: Foo Bar\n- **Status:** Not Started\n"
+                "### Phase 4: foo   bar!\n- **Status:** Not Started\n")
+        problems = validate_identities(text)
+        assert any("duplicate phase number 1" in p for p in problems)
+        assert any("duplicate slug 'foo-bar'" in p for p in problems)
+        assert len(problems) == 2
+
+    def test_empty_heading_both_spellings(self):
+        bare = "### Phase 1:\n- **Status:** Not Started\n### Phase 2: Real\n- **Status:** Not Started\n"
+        ws = "### Phase 1:    \n- **Status:** Not Started\n### Phase 2: Real\n- **Status:** Not Started\n"
+        for text in (bare, ws):
+            problems = validate_identities(text)
+            assert problems == ["Phase 1: empty name"], (text, problems)
+
+    def test_refused_by_check_queue_ready_graph(self, tmp_path, monkeypatch, capsys):
+        text = ("### Phase 1: Same\n- **Status:** Not Started\n"
+                "### Phase 2: Same\n- **Status:** Not Started\n")
+        _write_roadmap(tmp_path, text)
+        monkeypatch.chdir(tmp_path)
+        assert roadmap_command(["check"]) == 1
+        out = capsys.readouterr().out
+        assert "roadmap invalid" in out and "duplicate slug 'same'" in out
+        for sub in (["queue"], ["ready"], ["graph"]):
+            assert roadmap_command(sub) == 1
+            assert "duplicate slug" in capsys.readouterr().out
+        with pytest.raises(RoadmapGraphError):
+            build_queue(tmp_path / "docs" / "roadmap.md")
+
+    def test_this_repo_roadmap_is_well_formed(self):
+        repo_roadmap = Path(__file__).resolve().parents[1] / "docs" / "roadmap.md"
+        if not repo_roadmap.exists():
+            pytest.skip("repo roadmap not present")
+        phases, problems = graph_problems(repo_roadmap)
+        assert problems == []
+        assert len(phases) >= 40
+
+
+class TestGraphValidation:
+    def test_unknown_self_cycle_all_listed(self, tmp_path):
+        text = ("### Phase 1: A\n- **Status:** Not Started\n- **Depends on:** b, ghost, a\n"
+                "### Phase 2: B\n- **Status:** Not Started\n- **Depends on:** a\n")
+        phases = _phases(tmp_path, text)
+        problems = validate_graph(phases)
+        assert "a: unknown dependency 'ghost'" in problems
+        assert "a: depends on itself" in problems
+        assert any(p.startswith("cycle: ") and "a" in p and "b" in p for p in problems)
+        with pytest.raises(RoadmapGraphError) as ei:
+            check_graph(tmp_path / "docs" / "roadmap.md")
+        assert len(ei.value.problems) == 3
+
+    def test_check_ok(self, tmp_path, monkeypatch, capsys):
+        _write_roadmap(tmp_path, DAG_ROADMAP)
+        monkeypatch.chdir(tmp_path)
+        assert roadmap_command(["check"]) == 0
+        assert "roadmap ok: 5 phase(s), 4 dependency edge(s)" in capsys.readouterr().out
+
+
+class TestSatisfactionRule:
+    def test_terminal_on_disk_or_completed(self, tmp_path):
+        phases = _phases(tmp_path, DAG_ROADMAP)
+        by = {p.slug: p for p in phases}
+        assert dep_satisfied("alpha", by, None)                 # terminal on disk
+        assert not dep_satisfied("beta", by, None)
+        assert dep_satisfied("beta", by, ["beta"])              # active run
+        assert dep_satisfied("beta", by, ["phase-2-beta"])      # normalized
+        assert unmet_dependencies(by["delta"], by, ["beta"]) == ["gamma"]
+
+    def test_ready_and_blocked(self, tmp_path):
+        phases = _phases(tmp_path, DAG_ROADMAP)
+        assert [p.slug for p in ready_phases(phases)] == ["beta", "epsilon"]
+        assert [(p.slug, u) for p, u in blocked_phases(phases)] == [
+            ("gamma", ["beta"]), ("delta", ["beta", "gamma"])]
+        # same-run approval unblocks without a roadmap edit
+        assert [p.slug for p in ready_phases(phases, ["beta"])] == ["gamma", "epsilon"]
+        assert [p.slug for p in ready_phases(phases, ["beta", "gamma"])] == ["delta", "epsilon"]
+
+    def test_ready_cli_uses_active_run_unless_roadmap_only(self, tmp_path, monkeypatch, capsys):
+        _write_roadmap(tmp_path, DAG_ROADMAP)
+        (tmp_path / "tagteam.yaml").write_text("agents: {}\n")
+        monkeypatch.chdir(tmp_path)
+        import tagteam.state as st
+        monkeypatch.setattr(st, "_cached_project_root", None, raising=False)
+        write_state({"run_mode": "full-roadmap", "status": "ready", "turn": "lead",
+                     "roadmap": {"queue": ["beta", "gamma"], "current_index": 1,
+                                 "completed": ["beta"], "pause_reason": None}}, str(tmp_path))
+        assert roadmap_command(["ready"]) == 0
+        cap = capsys.readouterr()
+        assert cap.out.splitlines() == ["gamma\tNot Started\tGamma", "epsilon\tNot Started\tEpsilon"]
+        assert "(+ 1 phase(s) completed in the active run: beta)" in cap.err
+        assert roadmap_command(["ready", "--roadmap-only"]) == 0
+        cap = capsys.readouterr()
+        assert cap.out.splitlines()[0].startswith("beta\t")
+        assert roadmap_command(["ready", "--json"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert [r["slug"] for r in data["ready"]] == ["gamma", "epsilon"]
+        assert data["blocked"][0]["unmet"] == ["gamma"]
+        assert data["completed_in_run"] == ["beta"]
+
+
+class TestTopologicalQueue:
+    def test_edge_free_equals_flat_list_and_repo_roadmap(self, tmp_path):
+        phases = _phases(tmp_path, SAMPLE_ROADMAP)
+        assert topological_queue(phases) == (["api-gateway", "dashboard", "ci-integration"], [])
+        assert topological_queue(phases, start="dashboard") == (["dashboard", "ci-integration"], [])
+        repo_roadmap = Path(__file__).resolve().parents[1] / "docs" / "roadmap.md"
+        if repo_roadmap.exists():
+            all_phases = parse_roadmap(repo_roadmap)
+            flat = [p.slug for p in all_phases if not is_terminal(p.status)]
+            queue, _ = topological_queue(all_phases)
+            if not has_edges(all_phases):
+                assert queue == flat
+
+    def test_diamond_and_ties_are_roadmap_order(self, tmp_path):
+        phases = _phases(tmp_path, DIAMOND_ROADMAP)
+        assert topological_queue(phases)[0] == ["a", "b", "c", "d"]
+        # a dependency listed later in the file is emitted first
+        text = ("### Phase 1: Late\n- **Status:** Not Started\n- **Depends on:** early\n"
+                "### Phase 2: Early\n- **Status:** Not Started\n"
+                "### Phase 3: Other\n- **Status:** Not Started\n")
+        assert topological_queue(_phases(tmp_path, text))[0] == ["early", "late", "other"]
+
+    def test_start_pulls_in_unmet_ancestors_and_drops_unneeded(self, tmp_path):
+        phases = _phases(tmp_path, DAG_ROADMAP)
+        # start at delta: beta and gamma are unmet ancestors → pulled in first
+        queue, pulled = topological_queue(phases, start="delta")
+        assert queue == ["beta", "gamma", "delta", "epsilon"]
+        assert pulled == ["beta", "gamma"]
+        # start at epsilon: nothing after it needs beta/gamma/delta → dropped
+        assert topological_queue(phases, start="epsilon") == (["epsilon"], [])
+        # completed in the active run is not pulled in
+        queue, pulled = topological_queue(phases, start="delta", completed=["beta"])
+        assert queue == ["gamma", "delta", "epsilon"] and pulled == ["gamma"]
+
+    def test_queue_cli_note_on_stderr(self, tmp_path, monkeypatch, capsys):
+        _write_roadmap(tmp_path, DAG_ROADMAP)
+        monkeypatch.chdir(tmp_path)
+        assert roadmap_command(["queue", "delta"]) == 0
+        cap = capsys.readouterr()
+        assert cap.out.strip() == "beta,gamma,delta,epsilon"
+        assert "pulled in 2 dependency ancestor(s) ahead of 'delta': beta, gamma" in cap.err
+        assert roadmap_command(["queue"]) == 0
+        cap = capsys.readouterr()
+        assert cap.out.strip() == "beta,gamma,delta,epsilon" and cap.err == ""
+
+    def test_start_errors_keep_wording(self, tmp_path):
+        rp = _write_roadmap(tmp_path, DAG_ROADMAP)
+        with pytest.raises(ValueError, match="already complete"):
+            build_queue(rp, start_phase="alpha")
+        with pytest.raises(ValueError, match="not found in"):
+            build_queue(rp, start_phase="nope")
+        assert build_queue_with_notes(rp, "delta") == (["beta", "gamma", "delta", "epsilon"], ["beta", "gamma"])
+
+
+def is_terminal(status):
+    from tagteam.roadmap import is_terminal_status
+    return is_terminal_status(status)
+
+
+class TestGraphText:
+    def test_tree_marks(self, tmp_path):
+        phases = _phases(tmp_path, DAG_ROADMAP)
+        text = graph_text(phases, completed=["beta"])
+        assert "✓ alpha" in text and "✓* beta  ← alpha" in text
+        assert "▶ gamma  ← beta" in text and "⏸ delta  ← beta, gamma" in text and "▶ epsilon" in text
+
+    def test_mermaid(self, tmp_path, monkeypatch, capsys):
+        _write_roadmap(tmp_path, DAG_ROADMAP)
+        monkeypatch.chdir(tmp_path)
+        assert roadmap_command(["graph", "--mermaid"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("flowchart LR") and "p_beta --> p_gamma" in out and 'p_alpha["✓ Alpha"]' in out
+
+
+# ── dynamic advance ─────────────────────────────────────────────
+
+
+def _roadmap_state(tmp_path, *, phase, queue, index, completed, type_="impl",
+                   result="approved", status="done"):
+    write_state({
+        "turn": "reviewer", "status": status, "result": result, "type": type_,
+        "phase": phase, "run_mode": "full-roadmap",
+        "roadmap": {"queue": queue, "current_index": index,
+                    "completed": completed, "pause_reason": None},
+    }, str(tmp_path))
+    return read_state(str(tmp_path))
+
+
+class TestDynamicAdvance:
+    def test_same_run_approval_unblocks_dependent_without_roadmap_edit(self, tmp_path):
+        _write_roadmap(tmp_path, DAG_ROADMAP)
+        state = _roadmap_state(tmp_path, phase="beta", queue=["beta", "gamma", "delta", "epsilon"],
+                               index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["phase"] == "gamma" and new["roadmap"]["current_index"] == 1
+        assert new["command"] == "/handoff start gamma"
+        assert new["roadmap"]["completed"] == ["beta"]
+        assert new["roadmap"]["pause_reason"] is None
+
+    def test_diamond_middle_completed_externally(self, tmp_path):
+        text = DIAMOND_ROADMAP.replace("### Phase 2: B\n- **Status:** Not Started",
+                                       "### Phase 2: B\n- **Status:** ✅ Complete (merged from a worktree)")
+        _write_roadmap(tmp_path, text)
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "b", "c", "d"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["phase"] == "c" and new["roadmap"]["current_index"] == 2
+        assert new["roadmap"]["completed"] == ["a"]           # b is NOT recorded as completed-in-run
+        # after c: d is ready (b terminal on disk, c in completed)
+        state = _roadmap_state(tmp_path, phase="c", queue=["a", "b", "c", "d"], index=2, completed=["a"])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["phase"] == "d" and new["roadmap"]["current_index"] == 3
+        # after d: complete even though b never ran here
+        state = _roadmap_state(tmp_path, phase="d", queue=["a", "b", "c", "d"], index=3, completed=["a", "c"])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["result"] == "roadmap-complete"
+
+    def test_mixed_case_blocked_entry_is_reconsidered_and_index_moves_back(self, tmp_path):
+        # A approved, B blocked (dep X runs elsewhere), C ready → C; X done → B; then complete.
+        text = ("### Phase 1: X\n- **Status:** Not Started\n"
+                "### Phase 2: A\n- **Status:** Not Started\n"
+                "### Phase 3: B\n- **Status:** Not Started\n- **Depends on:** x\n"
+                "### Phase 4: C\n- **Status:** Not Started\n")
+        rp = _write_roadmap(tmp_path, text)
+        queue = ["a", "b", "c"]  # x is being run in another worktree
+        state = _roadmap_state(tmp_path, phase="a", queue=queue, index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["phase"] == "c" and new["roadmap"]["current_index"] == 2
+        # C approved while X still not merged → paused, B not started
+        state = _roadmap_state(tmp_path, phase="c", queue=queue, index=2, completed=["a"])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["status"] == "escalated"
+        assert new["roadmap"]["pause_reason"] == "blocked: b depends on x"
+        assert new["roadmap"]["current_index"] == 2
+        assert new["command"] == "tagteam roadmap resume"
+        assert new["roadmap"]["completed"] == ["a", "c"]
+        # X merged (terminal on disk) → resume selects B with a LOWER index
+        rp.write_text(rp.read_text().replace("### Phase 1: X\n- **Status:** Not Started",
+                                             "### Phase 1: X\n- **Status:** Complete"))
+        assert roadmap_resume(str(tmp_path)) == 0
+        st = read_state(str(tmp_path))
+        assert st["phase"] == "b" and st["roadmap"]["current_index"] == 1
+        assert st["status"] == "ready" and st["turn"] == "lead" and st["roadmap"]["pause_reason"] is None
+        # B approved → complete without re-running A or C
+        state = _roadmap_state(tmp_path, phase="b", queue=queue, index=1, completed=["a", "c"])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["result"] == "roadmap-complete"
+        assert sorted(new["roadmap"]["completed"]) == ["a", "b", "c"]
+
+    def test_all_blocked_pause_then_resume_still_paused_then_ok(self, tmp_path):
+        text = ("### Phase 1: X\n- **Status:** Not Started\n"
+                "### Phase 2: A\n- **Status:** Not Started\n"
+                "### Phase 3: B\n- **Status:** Not Started\n- **Depends on:** x\n")
+        rp = _write_roadmap(tmp_path, text)
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "b"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["status"] == "escalated" and new["roadmap"]["pause_reason"].startswith("blocked: b")
+        assert roadmap_resume(str(tmp_path)) == 2            # still paused
+        assert read_state(str(tmp_path))["roadmap"]["pause_reason"].startswith("blocked:")
+        rp.write_text(rp.read_text().replace("X\n- **Status:** Not Started", "X\n- **Status:** Done"))
+        assert roadmap_resume(str(tmp_path)) == 0
+        assert read_state(str(tmp_path))["phase"] == "b"
+
+    def test_externally_completed_tail_is_roadmap_complete(self, tmp_path):
+        text = ("### Phase 1: A\n- **Status:** Not Started\n"
+                "### Phase 2: B\n- **Status:** Complete\n")
+        _write_roadmap(tmp_path, text)
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "b"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["result"] == "roadmap-complete"
+
+    def test_invalid_roadmap_pauses(self, tmp_path):
+        text = ("### Phase 1: A\n- **Status:** Not Started\n"
+                "### Phase 2: B\n- **Status:** Not Started\n- **Depends on:** ghost\n")
+        _write_roadmap(tmp_path, text)
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "b"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["status"] == "escalated"
+        assert new["roadmap"]["pause_reason"] == "roadmap invalid: b: unknown dependency 'ghost'"
+
+    def test_missing_roadmap_file_behaves_like_before(self, tmp_path):
+        state = _roadmap_state(tmp_path, phase="a", queue=["a", "b"], index=0, completed=[])
+        new = _try_roadmap_advance(state, str(tmp_path))
+        assert new["phase"] == "b" and new["roadmap"]["current_index"] == 1
+
+    def test_resume_noops(self, tmp_path, capsys):
+        assert roadmap_resume(str(tmp_path)) == 1
+        write_state({"status": "ready", "turn": "lead", "run_mode": "single-phase"}, str(tmp_path))
+        assert roadmap_resume(str(tmp_path)) == 1
+        assert "Not in full-roadmap mode" in capsys.readouterr().out
+        _roadmap_state(tmp_path, phase="a", queue=["a", "b"], index=0, completed=[], status="ready", result=None)
+        assert roadmap_resume(str(tmp_path)) == 1
+        assert "not paused" in capsys.readouterr().out
+
+    def test_resume_on_approved_impl_advances(self, tmp_path):
+        _write_roadmap(tmp_path, SAMPLE_ROADMAP)
+        _roadmap_state(tmp_path, phase="api-gateway", queue=["api-gateway", "dashboard"], index=0, completed=[])
+        assert roadmap_resume(str(tmp_path)) == 0
+        st = read_state(str(tmp_path))
+        assert st["phase"] == "dashboard" and st["roadmap"]["completed"] == ["api-gateway"]
