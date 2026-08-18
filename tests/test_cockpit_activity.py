@@ -609,3 +609,115 @@ class TestSourceGuards:
                     ".act-row.s-cancelled", ".act-row.s-process_gone", ".act-lines"):
             assert sel in css, sel
         assert ".tail-drawer" not in css
+
+
+# ---------------------------------------------------------------------------
+# behavioural: the real Activity-log code under a minimal DOM stub (node)
+# ---------------------------------------------------------------------------
+
+_DOM_STUB = r"""
+// Minimal DOM: enough for the Cycle/Activity block (createElement/textContent,
+// classList, dataset, appendChild/insertBefore/children, addEventListener).
+function Node(tag) {
+  this.tagName = tag; this.children = []; this.parentNode = null; this.textContent = '';
+  this.dataset = {}; this._cls = []; this.style = {}; this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
+  var self = this;
+  this.classList = {
+    add: function (c) { if (self._cls.indexOf(c) < 0) self._cls.push(c); },
+    remove: function (c) { self._cls = self._cls.filter(function (x) { return x !== c; }); },
+    toggle: function (c, force) { var has = self._cls.indexOf(c) >= 0; var want = (force === undefined) ? !has : !!force; if (want && !has) self._cls.push(c); if (!want && has) self.classList.remove(c); return want; },
+    contains: function (c) { return self._cls.indexOf(c) >= 0; }
+  };
+}
+Object.defineProperty(Node.prototype, 'className', { get: function () { return this._cls.join(' '); }, set: function (v) { this._cls = String(v || '').split(/\s+/).filter(Boolean); } });
+Object.defineProperty(Node.prototype, 'firstChild', { get: function () { return this.children[0] || null; } });
+Node.prototype.appendChild = function (n) { if (n.parentNode) n.parentNode.removeChild(n); n.parentNode = this; this.children.push(n); return n; };
+Node.prototype.insertBefore = function (n, ref) { if (n.parentNode) n.parentNode.removeChild(n); n.parentNode = this; var i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(n); else this.children.splice(i, 0, n); return n; };
+Node.prototype.removeChild = function (n) { var i = this.children.indexOf(n); if (i >= 0) this.children.splice(i, 1); n.parentNode = null; return n; };
+Node.prototype.addEventListener = function () {};
+Node.prototype.querySelector = function () { return null; };
+Node.prototype.scrollIntoView = function () {};
+var BY_ID = {};
+function el(tag, cls, text) { var e = new Node(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function $(id) { if (!BY_ID[id]) { BY_ID[id] = new Node('div'); BY_ID[id].id = id; } return BY_ID[id]; }
+var document = { getElementById: $, createElement: function (t) { return new Node(t); }, querySelector: function () { return null; }, querySelectorAll: function () { return []; } };
+var window = { EventSource: undefined };
+var localStorage = { getItem: function () { return null; }, setItem: function () {} };
+var console = { error: function () {}, log: function () {} };
+function esc(s) { return String(s == null ? '' : s); }
+function fmtAge(s) { return String(s) + 's'; }
+function fmtTs(ts) { return String(ts || ''); }
+function url(p) { return p; }
+function getJSON() { return Promise.resolve({ ok: false }); }
+function act() {}
+function refreshAll() {}
+function showTab() {}
+function loadLead() { return Promise.resolve(); }
+function leadStreamPath(cid) { return '/api/lead/' + cid + '/events'; }
+var LEAD = { lines: {}, cursor: {} };
+var NOW = null;
+"""
+
+
+def _run_activity_harness(js_body: str) -> dict:
+    """Evaluate the real Phase 43 block from cockpit.js under the DOM stub and
+    run `js_body` after it (which must set `RESULT`). Returns RESULT as JSON."""
+    import shutil
+    import subprocess
+    import tempfile
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed — the behavioural activity-log test needs it")
+    js = (WEB / "cockpit.js").read_text(encoding="utf-8")
+    block = js[js.index("// ---------- Phase 43: Cycle region + Activity log"):js.index("// ---------- Phase 37: Lead panel")]
+    prog = _DOM_STUB + "\n" + block + "\n" + js_body + "\nprocess.stdout.write(JSON.stringify(RESULT));\n"
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "harness.js"
+        f.write_text(prog, encoding="utf-8")
+        r = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+class TestActivityLogBehaviour:
+    def test_running_to_terminal_reorders_without_rebuilding(self):
+        """A long-running turn that ends must move below newer terminal rows
+        (running first, then newest first) — moved, not rebuilt: same node,
+        its lines intact, the container never wiped."""
+        res = _run_activity_harness(r"""
+var list = $('activity');
+function item(id, status, started) { return { id: id, kind: 'cycle', role: 'lead', agent: 'A', status: status, started_at: started, ref: { log: id }, stem: id, age_s: 1, duration_ms: 1000 }; }
+// t=10 a running turn; t=20 a newer finished turn → running sits on top
+upsertActivity(item('turn:old', 'running', '2026-01-01T00:00:10+00:00'), list);
+upsertActivity(item('turn:new', 'finished', '2026-01-01T00:00:20+00:00'), list);
+var oldRow = ACT.rows['turn:old'].row;
+appendActLine(ACT.rows['turn:old'], 'line one'); appendActLine(ACT.rows['turn:old'], 'line two');
+var before = list.children.map(function (r) { return r.dataset.id; });
+// the old turn ends → its record says finished (same id, same started_at)
+upsertActivity(item('turn:old', 'finished', '2026-01-01T00:00:10+00:00'), list);
+var after = list.children.map(function (r) { return r.dataset.id; });
+// and a newer running turn appears → on top
+upsertActivity(item('turn:run2', 'running', '2026-01-01T00:00:05+00:00'), list);
+var after2 = list.children.map(function (r) { return r.dataset.id; });
+// a terminal → running flip (a lingering marker re-claims a stem) moves it back up
+upsertActivity(item('turn:new', 'running', '2026-01-01T00:00:20+00:00'), list);
+var after3 = list.children.map(function (r) { return r.dataset.id; });
+var RESULT = { before: before, after: after, after2: after2, after3: after3,
+               sameNode: ACT.rows['turn:old'].row === oldRow, lines: ACT.rows['turn:old'].lines,
+               boxKids: ACT.rows['turn:old'].box.children.length, oldStatus: ACT.rows['turn:old'].statusEl.textContent,
+               oldKey: oldRow.dataset.key, rowsInDom: list.children.length, count: Object.keys(ACT.rows).length };
+""")
+        assert res["before"] == ["turn:old", "turn:new"]
+        assert res["after"] == ["turn:new", "turn:old"], res            # running → terminal: moved below the newer terminal row
+        assert res["after2"] == ["turn:run2", "turn:new", "turn:old"]   # a running row always sits on top
+        assert res["after3"] == ["turn:new", "turn:run2", "turn:old"]   # terminal → running (newer started) moves up
+        assert res["sameNode"] is True and res["lines"] == ["line one", "line two"] and res["boxKids"] == 2
+        assert res["oldStatus"].startswith("finished") and res["oldKey"].startswith("0|")
+        assert res["rowsInDom"] == 3 and res["count"] == 3
+
+    def test_source_guard_reinserts_on_key_change(self):
+        js = (WEB / "cockpit.js").read_text(encoding="utf-8")
+        start = js.index("function upsertActivity("); end = js.index("function insertActRow(")
+        body = js[start:end]
+        assert "actSortKey(it)" in body and "insertActRow(list, rec)" in body, \
+            "an existing row must be re-inserted when its sort key changes"
