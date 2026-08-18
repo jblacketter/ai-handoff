@@ -118,6 +118,7 @@ DEFAULT_MAX_SSE = 8
 SSE_INTERVAL_S = 1.0
 SSE_HEARTBEAT_S = 15.0
 _TOKEN_META = b'<meta name="tagteam-token" content="%s">'
+_VERSION_META = b'<meta name="tagteam-version" content="%s">'
 
 
 _BASE_META = b'<meta name="tagteam-base" content="%s">'
@@ -144,6 +145,13 @@ def _get_dashboard_html(theme: str = "saloon", token: str | None = None,
     metas = b""
     if token:
         metas += _TOKEN_META % token.encode("ascii")
+        # the page shows its version (two installs on one machine is a real
+        # failure mode — the arbiter must be able to see which one this is)
+        try:
+            from tagteam import __version__ as _v
+        except Exception:
+            _v = "?"
+        metas += b"\n" + _VERSION_META % str(_v).encode("ascii", "replace")
     if base:
         html = _ROOT_URL_ATTR.sub(lambda m: m.group(1) + b'="' + base.encode("utf-8") + b"/", html)
         if metas:
@@ -1612,7 +1620,11 @@ def serve_command(args: list[str]) -> int:
     shown_host = opts["host"] or "0.0.0.0"
     url_host = "127.0.0.1" if shown_host in ("127.0.0.1", "localhost", "0.0.0.0", "") else shown_host
     if mode == "cockpit":
-        print(f"Tagteam cockpit — {project_name} — {_banner_state(project_dir)}")
+        try:
+            from tagteam import __version__ as _v
+        except Exception:
+            _v = "?"
+        print(f"Tagteam cockpit — {project_name} — {_banner_state(project_dir)}   (tagteam {_v})")
         print(f"  → http://{url_host}:{port}   (Saloon theme: /?theme=saloon)")
         print(f"  Project: {project_dir}")
         print(f"  Bind:    {shown_host}:{port}"

@@ -8,26 +8,26 @@
 </head>
 <body>
 
-<!-- NOW strip: what state am I in, what is running, am I connected -->
+<!-- NOW strip (UX pass 2026-08-17): the project first — you can serve the
+     wrong one — then four chips in the arbiter's words: the phase, who is
+     working / who we are waiting on, the watcher (on / off), the connection. -->
 <header class="now" id="now">
   <div class="now-row">
     <div class="brand">
-      <span class="brand-name">Tagteam</span>
-      <span class="brand-sub">Cockpit</span>
-      <span class="project" id="now-project" title="project directory">…</span>
+      <span class="brand-name" id="now-project" title="project directory">…</span>
+      <span class="brand-sub">Tagteam cockpit <span class="version" id="now-version"></span></span>
     </div>
     <div class="now-chips" id="now-chips">
-      <span class="chip" id="chip-cycle" title="phase / type / round">—</span>
-      <span class="chip" id="chip-owed" title="whose turn, and for how long">—</span>
-      <span class="chip chip-inflight hidden" id="chip-inflight" title="the agent process running now, and what kind of turn it is">—</span>
-      <span class="chip hidden" id="chip-last" title="the last agent turn and how it ended">—</span>
-      <span class="chip chip-hold hidden" id="chip-paused" title="dispatch is on hold">paused</span>
-      <span class="chip" id="chip-watcher" title="watcher liveness">—<button class="chip-btn hidden" id="btn-watcher" type="button">Start</button></span>
-      <span class="chip hidden" id="chip-gate" title="gatekeeper pre-checks">—</span>
-      <span class="chip hidden" id="chip-notes" title="queued interjections">—</span>
+      <span class="chip" id="chip-cycle" title="the phase in progress: name — plan or implementation, round — and its state">—</span>
+      <span class="chip" id="chip-owed" title="who we are waiting on, and for how long">—</span>
+      <span class="chip chip-inflight hidden" id="chip-inflight" title="who is working right now, on what">—</span>
+      <span class="chip chip-hold hidden" id="chip-paused" title="turns are paused">paused</span>
+      <span class="chip" id="chip-watcher" title="the watcher runs each turn by itself when it is on (tagteam watch)">—<button class="chip-btn hidden" id="btn-watcher" type="button">Start</button></span>
+      <span class="chip hidden" id="chip-gate" title="pre-checks (gatekeeper) before each review">—</span>
+      <span class="chip hidden" id="chip-notes" title="notes waiting for the next turn">—</span>
     </div>
     <div class="now-actions">
-      <button class="btn" id="btn-pause" title="tagteam pause / tagteam resume">Pause</button>
+      <button class="btn" id="btn-pause" title="pause / resume turns (tagteam pause / resume)">Pause</button>
       <span class="conn" id="conn" data-mode="connecting"><span class="conn-dot"></span><span id="conn-text">Connecting…</span></span>
       <a class="theme-link" href="/?theme=saloon" title="the Saloon theme">Saloon ↗</a>
     </div>
@@ -36,7 +36,10 @@
 
 <main class="grid">
 
-  <!-- NEEDS YOU: the one primary region -->
+  <!-- NEEDS YOU: a full-width banner. Loud (red) only when a human is
+       required — an escalation, a question, a hold, a lost process, a turn
+       waiting with the watcher off. The Start card is an invitation, not an
+       alarm. One line when nothing needs you. -->
   <section class="zone needs" id="needs-you" aria-label="Needs you">
     <h2 class="zone-title">Needs you <span class="count" id="needs-count"></span></h2>
     <div id="needs-cards"></div>
@@ -68,12 +71,12 @@
       <div class="cycle-line" id="cycle-line">—</div>
       <div class="activity-head"><span class="activity-title">Activity</span><span class="spacer"></span><span class="muted small" id="activity-meta"></span></div>
       <div class="activity" id="activity" aria-live="polite"></div>
-      <div class="empty small hidden" id="activity-empty">No agent turns recorded yet for this project.</div>
+      <div class="empty small hidden" id="activity-empty">No turns recorded yet for this project.</div>
       <div class="hint hidden" id="activity-more">Older turns: <code>tagteam tail</code> and <code>.tagteam/turns/</code>.</div>
     </div>
     <nav class="tabs" role="tablist">
-      <button class="tab" data-tab="lead" id="tab-lead" role="tab">Lead <span class="dot hidden" id="lead-dot"></span></button>
-      <button class="tab active" data-tab="feed" id="tab-feed" role="tab">Feed</button>
+      <button class="tab" data-tab="lead" id="tab-lead" role="tab"><span id="tab-lead-name">Lead</span> <span class="dot hidden" id="lead-dot"></span></button>
+      <button class="tab active" data-tab="feed" id="tab-feed" role="tab">Rounds</button>
       <button class="tab" data-tab="diff" id="tab-diff" role="tab">Diff</button>
       <button class="tab" data-tab="usage" id="tab-usage" role="tab">Usage</button>
       <button class="tab" data-tab="notes" id="tab-notes" role="tab">Notes <span class="count" id="notes-count"></span></button>
@@ -81,7 +84,7 @@
 
     <div class="panel" id="panel-lead" role="tabpanel">
       <div class="panel-head">
-        <span id="lead-title">Talk to the lead</span>
+        <span id="lead-title">Chat with the lead</span>
         <span class="muted small" id="lead-continuity"></span>
         <span class="spacer"></span>
         <select id="lead-select" title="conversation"></select>
@@ -89,11 +92,11 @@
       </div>
       <div class="lead-status muted small" id="lead-status">Loading…</div>
       <div class="lead-transcript" id="lead-transcript" aria-live="polite"></div>
-      <div class="empty small hidden" id="lead-empty">No messages yet. Say something to the lead — brainstorm, plan, or <code>/handoff start &lt;phase&gt;</code>.</div>
+      <div class="empty small hidden" id="lead-empty">No messages yet. Brainstorm, plan, or say <code>/handoff start &lt;phase&gt;</code> to begin a phase.</div>
       <form class="lead-form" id="lead-form">
         <textarea id="lead-text" rows="3" placeholder="Message the lead… (Cmd/Ctrl-Enter to send)"></textarea>
         <div class="row">
-          <span class="muted small" id="lead-hint">Each message runs one lead turn through its own CLI (same permissions as headless turns).</span>
+          <span class="muted small" id="lead-hint">Each message is one turn of the lead's own CLI, with the same permissions as its handoff turns.</span>
           <span class="spacer"></span>
           <button class="btn btn-danger btn-small hidden" type="button" id="btn-lead-cancel" title="cancel the running turn (tagteam cancel-turn)">Cancel</button>
           <button class="btn btn-primary" type="submit" id="btn-lead-send">Send</button>
@@ -101,9 +104,9 @@
       </form>
     </div>
     <div class="panel active" id="panel-feed" role="tabpanel">
-      <div class="panel-head"><span id="feed-title">Round stream</span><span class="spacer"></span><span class="muted" id="feed-meta"></span></div>
+      <div class="panel-head"><span id="feed-title">Rounds — what each side said, newest first</span><span class="spacer"></span><span class="muted" id="feed-meta"></span></div>
       <div id="feed-list"></div>
-      <div class="empty small hidden" id="feed-empty">No rounds yet for this cycle.</div>
+      <div class="empty small hidden" id="feed-empty">No rounds yet for this phase.</div>
     </div>
 
     <div class="panel" id="panel-diff" role="tabpanel">
@@ -129,21 +132,21 @@
       <details open><summary>By role</summary><div id="usage-role"></div></details>
       <details><summary>By cycle</summary><div id="usage-cycle"></div></details>
       <details><summary>By process</summary><div id="usage-agent"></div></details>
-      <div class="empty small hidden" id="usage-empty">No headless turns recorded yet — <code>tagteam watch --mode headless</code> writes usage rows.</div>
+      <div class="empty small hidden" id="usage-empty">No turns recorded yet — turns run by the watcher (or from this page) write usage rows.</div>
     </div>
 
     <div class="panel" id="panel-notes" role="tabpanel">
-      <div class="panel-head"><span>Interjections — a note the next eligible turn receives in its prompt</span></div>
+      <div class="panel-head"><span>Notes — a note the next turn receives in its prompt (tagteam interject)</span></div>
       <form class="note-form" id="note-form">
-        <textarea id="note-text" rows="2" placeholder="Note for the next turn (tagteam interject)…"></textarea>
+        <textarea id="note-text" rows="2" placeholder="Note for the next turn…"></textarea>
         <div class="row">
           <label>to <select id="note-to"><option value="">next turn</option><option value="lead">lead</option><option value="reviewer">reviewer</option></select></label>
           <span class="spacer"></span>
-          <button class="btn btn-primary" type="submit" id="btn-interject">Interject</button>
+          <button class="btn btn-primary" type="submit" id="btn-interject">Leave note</button>
         </div>
       </form>
       <div id="notes-list"></div>
-      <div class="empty small hidden" id="notes-empty">No interjections for this cycle.</div>
+      <div class="empty small hidden" id="notes-empty">No notes for this phase.</div>
     </div>
   </section>
 </main>

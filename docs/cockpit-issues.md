@@ -39,7 +39,21 @@ from "start" to "running".
 
 Also parked for the same phase: `docs/saloon-rethink.md` (archetype cast & theme packs).
 
-## 2026-08-17 — first real session on 3.7.0: convoluted screen, unclear labels (arbiter walk-through)
+## 2026-08-17 — first real session on 3.7.0: convoluted screen, unclear labels (arbiter walk-through) — ADDRESSED on `cockpit-ux-pass` (3.7.1)
+
+*Resolution (2026-08-17, arbiter + Claude with the ux-design-guide, no handoff cycle):* one column in
+attention order (strip → Needs-you banner → Cycle → tabs); the project first in the strip and the tab
+title, with the version; four chips in the arbiter's words (phase · who is working / who we wait on ·
+`watcher: on/off` with one action · connection); **one Start** on the card that says what it does
+(terminals left the page — `tagteam session start` stays in the CLI); the red badge only for what
+truly needs a human, the Start card an invitation, a quiet one-liner otherwise; "waiting on X but the
+watcher is off" card immediately, with **Turn the watcher on**; the glossary — turn · review · chat ·
+pre-check · review lens · decision brief; working · done · cancelled · failed · timed out · process
+disappeared · no result recorded; leave a note; Rounds — everywhere; the lead's tab named after the
+lead agent; engine errors translated (`slot busy` → "the lead was already working on something else").
+Kept for later consideration: **"Auto-run"** as the on-screen name for the watcher (Jack: keep
+"watcher" for now). Original report kept below as evidence.
+
 
 Reported by Jack starting a new handoff on `github-profile` from the cockpit, with Claude at his side:
 
