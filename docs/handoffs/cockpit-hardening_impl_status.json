@@ -1,0 +1,24 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "cockpit-hardening",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-18",
+  "baseline": {
+    "sha": "e90eab3d0fdbcff7877b3c1200f038352b101805",
+    "dirty_paths": [],
+    "captured_at": "2026-08-18T00:07:41.472865+00:00",
+    "source": "copied-from-plan"
+  },
+  "impl_boundary": {
+    "sha": "ba1e6e0cdf016ee08a43e3d6fd29d8ccf8a32ea6",
+    "dirty": {
+      "docs/handoffs/cockpit-hardening_plan_rounds.jsonl": "fe1becbadff209a46a005419ba2d064379550c929984c7488425c7a3f0963ab1"
+    },
+    "captured_at": "2026-08-18T00:08:32.657546+00:00",
+    "source": "copied-from-plan"
+  }
+}
