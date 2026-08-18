@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review
+- [x] In Review (round 1: Codex — three implementation-contract gaps: the `#tab-lead-name` write, the all-activity support elements, the refresh path for the always-visible lead lane; all specified in round 2)
 - [ ] Approved
 - [ ] Implementation
 - [ ] Implementation Review
@@ -52,7 +52,14 @@ entries is *not* needed — verdicts are read from what `/api/rounds` already
 returns); no schema change; no CLI change; the saloon and the hub untouched;
 `/api/activity` unchanged (the Rounds-tab disclosure and tests still use it).
 Existing ids the tests pin (`now`, `needs-you`, `watch`, `conn`,
-`data-tab="feed"`, `chip-gate`, `.feed-item.gate`) stay.
+`data-tab="feed"`, `chip-gate`, `.feed-item.gate`) stay. Ids that **move or
+go** (and every JS write to them is retargeted or removed in scope C — no
+write to a removed id survives; the guards in §F check the id set):
+`#tab-lead` / `#tab-lead-name` / `#lead-dot` / `#panel-lead` (the tab) →
+gone; the lead's name is written to `#lane-lead-name` (`renderNow` retargets
+its `$('tab-lead-name')` write there); `#lead-title` → gone (the lane header
+is the title); `#cycle-line` / `#activity-head` → gone; the all-activity
+support elements move *with* the list into the disclosure (§B).
 
 ## UX design (flow first — `ux-design-guide`)
 
@@ -154,10 +161,22 @@ unchanged.
   `#btn-lead-send`), `#lane-token`, `#lane-reviewer` (`.lane-head` with
   `#lane-reviewer-name`, `#lane-reviewer-state`; `#reviewer-timeline`).
 - Tabs: `data-tab="feed"` (label **Rounds**), diff, usage, notes; the Rounds
-  panel gains `<details id="all-activity"><summary>all activity</summary>
-  <div id="activity">…</div></details>` (the flat list, same ids so the
-  Phase 43 code and guards keep working).
-- Remove `#tab-lead`, `#panel-lead`, `#cycle-line`, `#activity-head`.
+  panel gains the disclosure with **all** the elements `loadActivity()`
+  writes, so that function is reused unchanged:
+  ```html
+  <details id="all-activity"><summary>all activity <span class="muted small" id="activity-meta"></span></summary>
+    <div class="activity" id="activity"></div>
+    <div class="empty small hidden" id="activity-empty">No turns recorded yet for this project.</div>
+    <div class="hint hidden" id="activity-more">Older turns: <code>tagteam tail</code> and <code>.tagteam/turns/</code>.</div>
+  </details>
+  ```
+  (`#activity-meta` moves from the removed `#activity-head` into the summary;
+  the guards in §F assert all four ids are present inside `#all-activity`.)
+- Remove `#tab-lead` (+ `#tab-lead-name`, `#lead-dot`), `#panel-lead`,
+  `#lead-title`, `#cycle-line`, `#activity-head`; every JS reference to them
+  is retargeted (`tab-lead-name` → `lane-lead-name`; `lead-dot` → the lane
+  header's pulse class) or removed (`lead-title`, `showTab('lead')`,
+  `activeTab() === 'lead'`).
 
 **C. JS** (`cockpit.js`)
 - **Lane state**: `renderLanes(n)` — headers, state text, pulse classes,
@@ -187,8 +206,27 @@ unchanged.
 - **Gate line / composer**: "claude is working on its turn (round N) —
   streaming above · Stop turn" when the lead's cycle turn holds the slot;
   the UX-pass working banner while a chat message runs.
+- **Refresh path** (`refreshAll`): the lead lane is always visible, so the
+  tab condition goes: every refresh runs `renderNow(n)`, `loadFeed()`,
+  `loadActivity()` **and `loadLead(false)`** (which loads the conversation
+  list + the current conversation and (re)subscribes its stream via the
+  registry — cheap: two GETs; the SSE `end` handler already calls
+  `loadConversation` + `refreshAll`). `loadActivity()`'s payload feeds both
+  lanes and the disclosure (one fetch); `renderLeadTimeline()` runs after
+  *either* `loadConversation` or `loadActivity` resolves (it merges whatever
+  both have so far — keyed upsert makes the order of arrival irrelevant).
+  The 30 s live-mode safety tick and the polling fallback call the same
+  `refreshAll`. **Empty state (no conversation yet):** the lead timeline
+  shows the lead's cycle-turn cards if any and, at the foot above the
+  composer, "No messages yet. Brainstorm, plan, or say `/handoff start
+  <phase>` to begin a phase." (today's `#lead-empty` text); the composer is
+  enabled when the lead validates for headless turns (`LEAD.cfg.ok`) —
+  sending creates the conversation as today; when it does not validate, the
+  composer is disabled with the reason ("This page cannot run the lead
+  yet: … — set agents.lead.headless in tagteam.yaml").
 - Remove: `showTab('lead')` paths (Start's `onDone` now focuses the composer
-  in the lead lane), `focusRunningActivity` → `focusWorkingLane`.
+  in the lead lane), `focusRunningActivity` → `focusWorkingLane`; the
+  `activeTab() === 'lead'` branch in `refreshAll` and `showTab`.
 
 **D. CSS** (`cockpit.css`) — `.lanes` grid `1fr 44px 1fr` (stack under
 1000 px, lead first), `.lane-head` (name — role, state, pulse), `.timeline`
@@ -205,8 +243,13 @@ note for the 2026-08-17 (later) entry.
 
 **F. Tests** (`tests/test_cockpit_activity.py` — extend; `tests/test_docs_story.py`)
 - Source guards: `#lane-lead`, `#lane-reviewer`, `#lead-timeline`,
-  `#reviewer-timeline`, `#all-activity` present; `#tab-lead` / `#panel-lead`
-  gone; the lane block builds DOM with text nodes only (no `innerHTML`); the
+  `#reviewer-timeline`, `#all-activity` (containing `#activity`,
+  `#activity-empty`, `#activity-more`, `#activity-meta`) present; `#tab-lead`,
+  `#tab-lead-name`, `#lead-dot`, `#panel-lead`, `#lead-title`, `#cycle-line`,
+  `#activity-head` absent from the HTML **and no `$('<that id>')` in the
+  JS** (a guard iterates the removed ids); `refreshAll` calls `loadLead(`
+  unconditionally (source guard) and no `activeTab() === 'lead'` remains;
+  the lane block builds DOM with text nodes only (no `innerHTML`); the
   verdict map lists exactly `APPROVE / REQUEST_CHANGES / ESCALATE /
   NEED_HUMAN / GATE_PASS / GATE_BOUNCE`; the lead-lane block keeps the
   Phase 37 XSS guard (block boundaries kept: `Phase 37: Lead panel` …
@@ -249,3 +292,18 @@ note for the 2026-08-17 (later) entry.
 
 - PR from `phase-45-cockpit-lanes`; `scripts/release.py 3.8.0` after merge;
   roadmap status; screenshots; cockpit-issues note.
+
+## Round-2 changes (reviewer r1)
+
+1. **`#tab-lead-name` write.** The tab (and `#tab-lead-name`, `#lead-dot`,
+   `#panel-lead`, `#lead-title`) goes; `renderNow` retargets the lead's
+   name to `#lane-lead-name`; a guard asserts no `$()` of a removed id
+   remains in the JS. Compatibility rule rewritten to list what moves/goes.
+2. **All-activity support elements.** The disclosure carries `#activity`,
+   `#activity-empty`, `#activity-more` and `#activity-meta` (moved into the
+   summary), so `loadActivity()` is reused unchanged; markup + guard added.
+3. **Refresh path.** `refreshAll` calls `loadLead(false)` on every refresh
+   (the lane is always visible); one activity fetch feeds both lanes and the
+   disclosure; `renderLeadTimeline()` is a keyed merge that runs after
+   either source resolves; the no-conversation empty state and the disabled
+   composer case are specified.
