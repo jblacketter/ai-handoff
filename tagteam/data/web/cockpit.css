@@ -213,6 +213,11 @@ table.u th { color: var(--text-dim); font-weight: 500; }
 
 /* ---- Phase 37: launchpad + lead panel ---- */
 .card.start .card-kind { background: rgba(90,169,255,0.16); color: var(--accent); }
+.card.start.compact { padding: 8px 12px 10px; }
+.card.start.compact .card-head { margin-bottom: 2px; }
+.card.start.compact .card-body { margin: 4px 0; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.card.start.compact .card-body .cmd { margin: 0; }
+.card.start.compact .row { margin-top: 4px; }
 .card.start .cmd { display: inline-block; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; background: var(--bg-3); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; margin: 4px 0; }
 .chip .chip-btn { margin-left: 6px; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg-2); color: var(--text); cursor: pointer; }
 .chip .chip-btn:hover { border-color: var(--accent); }
@@ -241,7 +246,8 @@ table.u th { color: var(--text-dim); font-weight: 500; }
    role, state; pulses while its agent works), a timeline in time order with
    the newest at the foot (keyed rows, never rebuilt); the lead lane carries
    the chat's composer at its foot. Below 1000px the lanes stack, lead first. */
-.lanes { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; align-items: stretch; padding: 10px 12px 8px; border-bottom: 1px solid var(--line); background: var(--bg-2); }
+.lanes { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; align-items: stretch; padding: 10px 12px 8px; border-bottom: 1px solid var(--line); background: var(--bg-2); box-sizing: border-box; }
+.lanes .lane { min-height: 0; overflow: hidden; }          /* a fixed-height lanes block: the timelines scroll, the composer stays */
 @media (max-width: 1000px) { .lanes { grid-template-columns: 1fr; } .lanes .token { display: none; } }
 .lane { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); min-height: 52px; display: flex; flex-direction: column; min-width: 0; }
 .lane.lead { border-left: 3px solid var(--lead); }
@@ -266,10 +272,11 @@ table.u th { color: var(--text-dim); font-weight: 500; }
 .token.reviewer .token-dot { background: var(--reviewer); transform: translateX(16px); }
 .token.you .token-dot { background: var(--danger); animation: pulse 1.2s ease-in-out infinite; }
 .token.none .token-dot { background: var(--muted); }
-.timeline { flex: 0 1 auto; min-height: 0; max-height: 46vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; }
-.timeline:empty { padding: 0; }
-.lane > .empty { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 120px; }
-.lane.lead > .empty { min-height: 60px; }
+.timeline { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; }
+@media (max-width: 1000px) { .timeline { flex: 0 1 auto; max-height: 46vh; } }
+.timeline:empty { padding: 0; flex: 0 0 0; }
+.lane > .empty { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; padding: 18px 12px; }
+.lane.reviewer > .empty { flex: 1; }
 .timeline .act-row { border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); }
 .timeline .act-head .tag.role, .timeline .act-head .agent { display: none; }   /* the lane header says who */
 .timeline .act-head { padding: 5px 8px; gap: 6px; }
