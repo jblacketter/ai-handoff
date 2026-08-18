@@ -38,3 +38,18 @@ Feed tab, `tagteam tail` equivalence in the browser, and the Needs-you/Start car
 from "start" to "running".
 
 Also parked for the same phase: `docs/saloon-rethink.md` (archetype cast & theme packs).
+
+## 2026-08-17 — first real session on 3.7.0: convoluted screen, unclear labels (arbiter walk-through)
+
+Reported by Jack starting a new handoff on `github-profile` from the cockpit, with Claude at his side:
+
+1. **Three things say "Start".** The Start card offers *Start headless* and *Launch terminals*; the watcher chip offers *Start*. "Why would I want headless? The purpose here is to have a UI. Keep headless as an option, but that would be launched from the start — I'm not sure why we offer that choice here." Headless is the cockpit's *engine*, not a user choice; terminals is the terminal user's path, not the cockpit's.
+2. **Nothing said which project the page was for** — a `tagteam serve` run from the wrong directory served the wrong project and nothing on screen made that obvious (small mono path in the strip; the banner in the terminal is easy to miss).
+3. **The red "Needs you" badge lit for the Start card** — "what needs me?" Nothing did; the card is an invitation.
+4. **Jargon on the primary path**: *in flight*, *owed*, *no watcher*, *watcher headless pid 43052*, *slot busy* (a failed launch's reason), *headless*, *interject*, *dispatch*, *process gone*, *orphaned*, *cycle turn* vs *conversation*. The arbiter's words are "who is working", "waiting on Codex", "auto-run", "chat".
+5. **"Isn't there a place to see the reviewer activity?"** — on 3.5.1 there was not (that is Phase 43); on 3.7.0 the Cycle region answers it, but the question shows the region needs to be the first thing the eye lands on when a cycle runs — it is not, when *Needs you* (often an empty box) takes the left column.
+6. **"Will it restart the watcher when it needs it?"** — the model of *watcher* vs *cycle* is not on screen; the user expects the thing that runs turns to be one switch, on or off, that the page tells you about when it is off and a turn is waiting.
+7. Two installs on one machine (`uv tool` vs pip) → an old cockpit served for a while; the page/banner should show its version.
+8. Stopping the watcher from the chip while a turn was about to be handed over left the cycle waiting with no runner; the *nothing is dispatching* card appears only after 2 minutes.
+
+Design pass opened on branch `cockpit-ux-pass` (no handoff cycle; arbiter + Claude), evidence above.
