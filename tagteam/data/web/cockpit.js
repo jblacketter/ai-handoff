@@ -1310,8 +1310,11 @@
     renderLeadEmpty();
   }
   function renderLeadEmpty() {
-    var list = $('lead-timeline');
-    $('lead-empty').classList.toggle('hidden', !!list.firstChild);
+    // the prompt speaks to the CHAT: it shows while the current conversation
+    // has no messages — even when the lead's cycle-turn cards are already in
+    // the timeline (the watcher worked before you said anything)
+    var hasMessages = !!(LEAD.conv && LEAD.conv.turns && LEAD.conv.turns.length);
+    $('lead-empty').classList.toggle('hidden', hasMessages);
   }
 
   function loadConversation(cid, force) {
