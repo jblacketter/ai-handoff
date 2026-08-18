@@ -381,6 +381,18 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/terminal-app-backend.md`
 - **Source:** backlog item "Terminal.app backend (macOS, optional)"; promoted 2026-08-17.
 
+### Phase 43: Cockpit hardening — a legible cycle (3.7)
+- **Depends on:** Phase 42
+- **Status:** In progress — plan cycle opened 2026-08-17.
+- **Description:** make a running handoff unmistakable in the cockpit: a **Cycle** region at the top of Watch (Lead and Reviewer lanes, the turn token on the owed side, the running process named by kind — cycle turn rN · lead conversation · gate · panel · briefer) over a persistent **Activity** log of every agent turn (both roles' cycle turns, gates, panel lenses, briefer, lead-conversation turns) that streams the running one and keeps finished ones on screen with a named outcome (`finished · cancelled · failed · timed out · process gone · orphaned`) and a log link; **Start** acknowledges within one refresh from the pending `launches` row; the Lead panel keeps a finished turn's streamed lines under a disclosure instead of discarding them; the Now strip names the in-flight kind and the last outcome; `events_signature` covers conversation turns, launches and log growth. Read-only over existing records — no schema bump, no CLI change; the tail drawer is folded into the activity rows.
+- **Plan:** `docs/phases/cockpit-hardening.md`
+- **Source:** `docs/cockpit-issues.md` (2026-08-16: a running handoff is not legible as a handoff); backlog item "Cockpit hardening & UX"; promoted 2026-08-17. The saloon rethink is **not** folded in — it is Phase 44 (see the plan's scoping call).
+
+### Phase 44: Saloon rethink — archetype cast & theme packs (3.8)
+- **Depends on:** Phase 43
+- **Status:** Not started — promoted 2026-08-17 from the backlog; brainstorm in `docs/saloon-rethink.md`. Plan to be written when Phase 43 ships (it consumes Phase 43's per-role turn state and outcome vocabulary for the state → picture table).
+- **Description:** recast the fun theme around the loop's real roles (Host, Lead, Reviewer, Turn-keeper, Round clock, You-as-Arbiter) instead of feature mascots; three-beat first-run flow (init agents → start watcher → hand the user the kickoff message); every element bound to real state. Make the engine theme-driven so up to five settings can be trialed (saloon revised, alien spaceship, pirate ship, mission control, restaurant kitchen). Cockpit remains the serious surface; theme is a skin.
+
 ## Backlog
 
 ### 3.0 candidate later phases (unscheduled)
@@ -401,12 +413,11 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Status:** Done 2026-08-16 — `.github/workflows/tests.yml` now runs only `pytest (ubuntu-latest)` on push/PR; the Windows job is a separate `pytest-windows` job that runs only via **Run workflow → `windows` = true** (`workflow_dispatch` input). No branch protection existed, so nothing else to unrequire. **We still want Windows back in the gate later** — when Windows becomes a priority, drop the `if:` on `pytest-windows` (or fold it back into a matrix) and run it before any release that touches procs / headless / watcher pidfile / port-lease code.
 - **Motivation:** `pytest (windows-latest)` takes ~7–9 min per PR vs ~2 min for Ubuntu and Windows is not a current priority. Options: run it on `workflow_dispatch` / nightly / on `v*` tags only, or keep it non-required. Verify Windows separately once macOS/Ubuntu are green. Keep the Windows code paths (procs, headless, watcher pidfile, port-lease fallback) — this is about per-PR cost, not support.
 
-### Cockpit hardening & UX (deferred; evidence in `docs/cockpit-issues.md`)
-- **Status:** Not started — the cockpit is parked for day-to-day use until this phase; issues are being collected in `docs/cockpit-issues.md` (first entry 2026-08-16: a running handoff is not legible as a handoff — collapsing lead activity window, no visible reviewer activity, unclear running-vs-cancelled). Fold the saloon rethink below into the same phase.
+### ~~Cockpit hardening & UX~~ → promoted to Phase 43 (2026-08-17)
+- Evidence stays in `docs/cockpit-issues.md` (running list). The saloon rethink was promoted separately as Phase 44 rather than folded in — see `docs/phases/cockpit-hardening.md` (scoping call).
 
-### Saloon rethink — archetype cast & theme packs
-- **Status:** Not started — brainstorm in `docs/saloon-rethink.md` (2026-08-16)
-- **Description:** Recast the fun theme around the loop's real roles (Host, Lead, Reviewer, Turn-keeper, Round clock, You-as-Arbiter) instead of feature mascots; three-beat first-run flow (init agents → start watcher → hand the user the kickoff message); every element bound to real state. Make the engine theme-driven so up to five settings can be trialed (saloon revised, alien spaceship, pirate ship, mission control, restaurant kitchen). Cockpit remains the serious surface; theme is a skin.
+### ~~Saloon rethink — archetype cast & theme packs~~ → promoted to Phase 44 (2026-08-17)
+- Brainstorm in `docs/saloon-rethink.md`; depends on Phase 43.
 
 ### ~~Terminal.app backend (macOS, optional)~~ → promoted to Phase 42 (2026-08-17)
 - See `docs/phases/terminal-app-backend.md`.
