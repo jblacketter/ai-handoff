@@ -5,7 +5,7 @@
 - [x] In Review (round 1)
 - [x] Approved (round 1 — Codex: scope + Phase 44 split endorsed)
 - [x] Implementation (branch `phase-43-cockpit-hardening`)
-- [ ] Implementation Review
+- [ ] Implementation Review (round 1: Codex — a row that goes running → terminal kept its "running" sort key and stayed on top; fixed: any row is re-inserted when its sort key changes, moved not rebuilt; behavioural node-driven regression test + source guard)
 - [ ] Complete
 
 ## Roles
@@ -401,3 +401,18 @@ either forced by a fact found while building or a manual-walk finding:
   Start card back, Lead panel keeps `activity (4 lines)`, region stays with
   history; reload → outcomes persist, conversation lines replay from the
   retained events.
+
+### Impl round 2 (reviewer r1)
+
+- **Ordering after running → terminal.** `upsertActivity` re-inserts an
+  existing row whenever its sort key (`running?|started_at|id`) changes —
+  running → terminal, terminal → running, a corrected timestamp — by
+  moving the same node (`insertBefore`), so its lines and stream stay with
+  it and the container is never wiped.
+- **Regression test** (`TestActivityLogBehaviour`): the real Phase 43 block
+  is evaluated in `node` under a ~40-line DOM stub and driven through
+  running → newer finished → the running one ends → a newer running one →
+  a terminal → running flip; asserts the DOM order at each step, same node,
+  lines intact, container size. Skipped when `node` is not installed (no JS
+  harness in the repo; this is the one node-executed test). Verified to fail
+  on the pre-fix JS. Plus a source guard on the re-insert.

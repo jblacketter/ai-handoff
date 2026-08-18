@@ -896,17 +896,15 @@
       buildActRow(rec);
       insertActRow(list, rec);
     } else {
-      var wasRunning = isRunning(rec.item);
       rec.item = it;
       patchActRow(rec);
-      if (wasRunning && !isRunning(it)) {
-        // finished: keep the lines on screen and keep the stream OPEN — the
-        // record can land before the log's last lines are drained; the
-        // stream closes itself on its `end` (marker gone + file drained).
-        // Nothing here is rebuilt.
-      } else if (!wasRunning && isRunning(it)) {
-        insertActRow(list, rec);   // re-sort: running rows sit on top
-      }
+      // Ordering is "running first, then newest first": whenever the
+      // ordering-relevant part of the item changed (running → terminal,
+      // terminal → running, a corrected timestamp) the row moves to its
+      // place — moved, not rebuilt: its lines and its stream stay with it.
+      // A finished row keeps its stream OPEN (the record can land before the
+      // log's last lines are drained); the stream closes on its own `end`.
+      if (rec.row.dataset.key !== actSortKey(it)) insertActRow(list, rec);
     }
     if (isRunning(it)) { openActLines(rec, true); attachActStream(rec); }
   }
