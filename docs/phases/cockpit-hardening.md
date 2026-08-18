@@ -5,8 +5,8 @@
 - [x] In Review (round 1)
 - [x] Approved (round 1 — Codex: scope + Phase 44 split endorsed)
 - [x] Implementation (branch `phase-43-cockpit-hardening`)
-- [ ] Implementation Review (round 1: Codex — a row that goes running → terminal kept its "running" sort key and stayed on top; fixed: any row is re-inserted when its sort key changes, moved not rebuilt; behavioural node-driven regression test + source guard)
-- [ ] Complete
+- [x] Implementation Review (approved round 2, 2026-08-17; round 1: Codex — a row that goes running → terminal kept its "running" sort key and stayed on top; fixed: any row is re-inserted when its sort key changes, moved not rebuilt; behavioural node-driven regression test + source guard)
+- [ ] Complete (release **3.7.0** via PR #21 after merge)
 
 ## Roles
 - Lead: Claude
