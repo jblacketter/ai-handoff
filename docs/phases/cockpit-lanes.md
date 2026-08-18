@@ -5,8 +5,8 @@
 - [x] In Review (round 1: Codex — three implementation-contract gaps: the `#tab-lead-name` write, the all-activity support elements, the refresh path for the always-visible lead lane; all specified in round 2)
 - [x] Approved (round 2)
 - [x] Implementation (branch `phase-45-cockpit-lanes`)
-- [ ] Implementation Review (round 1: Codex — the no-conversation prompt hid whenever the timeline had a lead cycle card; fixed: the prompt follows the conversation's messages, not the merged timeline; regression added)
-- [ ] Complete
+- [x] Implementation Review (approved round 2, 2026-08-17; round 1: Codex — the no-conversation prompt hid whenever the timeline had a lead cycle card; fixed: the prompt follows the conversation's messages, not the merged timeline; regression added)
+- [ ] Complete (release **3.8.0** via PR #24 after merge)
 
 ## Roles
 - Lead: Claude
