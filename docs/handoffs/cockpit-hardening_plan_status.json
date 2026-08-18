@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "cockpit-hardening",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-18",
+  "baseline": {
+    "sha": "e90eab3d0fdbcff7877b3c1200f038352b101805",
+    "dirty_paths": [],
+    "captured_at": "2026-08-18T00:07:41.472865+00:00",
+    "source": "plan-init"
+  }
+}
