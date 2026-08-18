@@ -1,0 +1,16 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "cockpit-lanes",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-18",
+  "baseline": {
+    "sha": "fd8b204b08e1f00186e01ad066205d806d274c20",
+    "dirty_paths": [],
+    "captured_at": "2026-08-18T03:02:05.707512+00:00",
+    "source": "plan-init"
+  }
+}
