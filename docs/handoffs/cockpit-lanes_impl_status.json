@@ -1,0 +1,24 @@
+{
+  "state": "in-progress",
+  "ready_for": "reviewer",
+  "round": 1,
+  "phase": "cockpit-lanes",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-18",
+  "baseline": {
+    "sha": "fd8b204b08e1f00186e01ad066205d806d274c20",
+    "dirty_paths": [],
+    "captured_at": "2026-08-18T03:02:05.707512+00:00",
+    "source": "copied-from-plan"
+  },
+  "impl_boundary": {
+    "sha": "08f1104bae80410c528e5966fed2666f6b174911",
+    "dirty": {
+      "docs/handoffs/cockpit-lanes_plan_rounds.jsonl": "a13b90d72f8e543cef32fce48032328c34eec8d4024d71fb10195e579303b86b"
+    },
+    "captured_at": "2026-08-18T03:04:35.487316+00:00",
+    "source": "copied-from-plan"
+  }
+}
