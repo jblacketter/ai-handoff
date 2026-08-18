@@ -5,7 +5,7 @@
 - [x] In Review (round 1: Codex — three implementation-contract gaps: the `#tab-lead-name` write, the all-activity support elements, the refresh path for the always-visible lead lane; all specified in round 2)
 - [x] Approved (round 2)
 - [x] Implementation (branch `phase-45-cockpit-lanes`)
-- [ ] Implementation Review
+- [ ] Implementation Review (round 1: Codex — the no-conversation prompt hid whenever the timeline had a lead cycle card; fixed: the prompt follows the conversation's messages, not the merged timeline; regression added)
 - [ ] Complete
 
 ## Roles
@@ -349,3 +349,14 @@ Shipped as planned (branch `phase-45-cockpit-lanes`), with these precisions:
   removed id, `loadLead(false)` on every refresh, verdict map, text-nodes
   only). Four screenshots recaptured. Manual Playwright walk on the seed:
   running review (demo-web), idle chat (demo-idle), escalated (demo-api).
+
+### Impl round 2 (reviewer r1)
+
+- `renderLeadEmpty()` now toggles the "No messages yet …" prompt on whether
+  the *current conversation has messages*, not on whether the merged
+  timeline has children — so the lead's cycle-turn cards and the prompt
+  show together when the watcher worked before the arbiter said anything
+  (the plan's first-use state). Regression
+  `test_lead_lane_prompt_stays_with_cards_but_no_messages`: no conversation
+  → prompt; + a lead card → prompt and card; empty conversation → prompt;
+  first message → prompt gone, two rows.

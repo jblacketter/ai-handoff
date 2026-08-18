@@ -864,3 +864,29 @@ var RESULT = { order: order, sameRow: sameRow, hasDetails: hasDetails, order2: o
         assert res["sameRow"] is True and res["hasDetails"] is True         # patched, not rebuilt; kept lines under a disclosure
         assert res["order2"] == ["msg:c-1:1", "turn:lead-r1", "msg:c-1:2"]
         assert res["order3"] == ["turn:lead-r1", "msg:c-2:1"] and res["kids"] == 2
+
+    def test_lead_lane_prompt_stays_with_cards_but_no_messages(self):
+        """No conversation yet + the lead's cycle cards → the cards show AND the
+        "No messages yet …" prompt stays (it speaks to the chat, not the lane)."""
+        res = _run_activity_harness(r"""
+NOW = { agents: { lead: 'Claude', reviewer: 'Codex' } };
+LEAD.cfg = { ok: true, agent: 'Claude' };
+LEAD.conv = null;
+renderLeadTimeline();
+var promptNoConv = !$('lead-empty').classList.contains('hidden');
+upsertRow(LLANE, { id: 'turn:lead-r1', kind: 'cycle', role: 'lead', agent: 'Claude', status: 'finished', started_at: '2026-01-01T00:10:00+00:00', ref: { log: 'turn:lead-r1' }, stem: 'turn:lead-r1', age_s: 1, duration_ms: 1000, round: 1, type: 'plan' });
+renderLeadEmpty();
+var promptWithCard = !$('lead-empty').classList.contains('hidden');
+var cards = $('lead-timeline').children.length;
+// an empty conversation (created, nothing said yet) → still the prompt
+LEAD.conv = { id: 'c-1', turns: [] }; renderLeadTimeline();
+var promptEmptyConv = !$('lead-empty').classList.contains('hidden');
+// the first message → the prompt goes
+LEAD.conv = { id: 'c-1', turns: [ { n: 1, ts: '2026-01-01T00:20:00+00:00', user_text: 'hi', status: 'ok', reply: 'hello', finished_at: '2026-01-01T00:21:00+00:00' } ] }; renderLeadTimeline();
+var promptAfterMsg = !$('lead-empty').classList.contains('hidden');
+var RESULT = { promptNoConv: promptNoConv, promptWithCard: promptWithCard, cards: cards, promptEmptyConv: promptEmptyConv, promptAfterMsg: promptAfterMsg, kids: $('lead-timeline').children.length };
+""")
+        assert res["promptNoConv"] is True
+        assert res["promptWithCard"] is True and res["cards"] == 1
+        assert res["promptEmptyConv"] is True
+        assert res["promptAfterMsg"] is False and res["kids"] == 2
