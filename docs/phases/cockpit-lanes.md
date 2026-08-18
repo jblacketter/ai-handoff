@@ -307,3 +307,45 @@ note for the 2026-08-17 (later) entry.
    disclosure; `renderLeadTimeline()` is a keyed merge that runs after
    either source resolves; the no-conversation empty state and the disabled
    composer case are specified.
+
+## Implementation notes (impl round 1)
+
+Shipped as planned (branch `phase-45-cockpit-lanes`), with these precisions:
+
+- **One row store, three instances.** The Phase 43 row code became
+  `makeStore(name, containerId, ascending)` → `ACT` (the flat list, running
+  first / newest first), `RLANE` (reviewer lane, ascending), `LLANE` (the
+  lead lane's cycle-turn cards, ascending). `upsertRow(store, item)` keys,
+  patches, and re-inserts on a sort-key change (`insertKeyed` sticks a
+  timeline to its foot when the reader was at the foot). One `/api/activity`
+  fetch feeds all three; a stream is shared across stores through the
+  registry (`<store>:<id>` handler names). `upsertActivity` / `insertActRow`
+  remain as thin wrappers for the Phase 43 harness.
+- **Verdicts.** `loadFeed()` fills `ROUNDS_BY_N` (`{round: {reviewer:
+  {action, text}, gate: {…}}}` from `/api/rounds` entries; falls back to
+  the round's `action` / `reviewer_text`) and calls `refreshVerdicts()`;
+  `verdictFor(item)` maps `VERDICT_WORD` (`APPROVE / REQUEST_CHANGES /
+  ESCALATE / NEED_HUMAN / GATE_PASS / GATE_BOUNCE`), gates from their own
+  `raw_status`; a `what it said` link opens the round text under the card.
+- **Lead lane messages** are keyed rows (`msg:<cid>:<n>`, one row = the
+  *you* bubble + the lead's bubble), refilled only when their signature
+  (status, reply, finish, error, continuity, kept-line count) changes;
+  switching conversations removes the other conversation's rows and keeps
+  the lead's cards. `renderConversation` and its wipe are gone.
+- **Inside a lane** the card hides the role/agent columns and shows the
+  time only (the header says who); the full date is the tooltip.
+- **Composer gate line** names where the work streams: "… — streaming above ·
+  watch it" for the lead's turn, "… — streaming in the reviewer lane · watch
+  it" for the reviewer's / a pre-check / a lens (`focusWorkingLane`).
+- Removed ids and every write to them: `tab-lead`, `tab-lead-name`,
+  `lead-dot`, `panel-lead`, `lead-title`, `lead-continuity`,
+  `lead-transcript`, `cycle-line`, `activity-head`, `cycle` (guarded).
+- Tests: `TestLanesBehaviour` (node harness now evaluates the lanes block
+  *and* the chat block): reviewer lane ascending with the pre-check before
+  its review, running review streams, patched in place with the verdict
+  word, `what it said`; role split counts; lead lane merges messages and
+  cards in time, patches without wiping, keeps lines under a disclosure,
+  conversation switch. Guards updated (ids present/absent, no `$()` of a
+  removed id, `loadLead(false)` on every refresh, verdict map, text-nodes
+  only). Four screenshots recaptured. Manual Playwright walk on the seed:
+  running review (demo-web), idle chat (demo-idle), escalated (demo-api).
