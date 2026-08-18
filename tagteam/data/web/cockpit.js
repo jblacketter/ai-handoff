@@ -193,7 +193,7 @@
     } else {
       wlabel.textContent = wr.stale_pidfile ? 'watcher: off (it died)' : 'watcher: off';
       w.title = (wr.stale_pidfile ? 'the recorded watcher process is gone. ' : '') + 'Turns only run when the watcher is on (or when you chat with the lead here).';
-      wbtn.textContent = 'Turn on'; wbtn.title = 'tagteam watch --mode ' + ((START && START.headless && START.headless.ok) ? 'headless' : 'notify') + ' --pidfile';
+      wbtn.textContent = 'Start'; wbtn.title = 'start the watcher: tagteam watch --mode ' + ((START && START.headless && START.headless.ok) ? 'headless' : 'notify') + ' --pidfile';
       wbtn.classList.remove('hidden');
     }
 
@@ -248,7 +248,7 @@
       act($('btn-watcher'), '/api/watch/stop', {}, { confirm: { title: 'Stop the watcher?', body: 'Sends SIGTERM to the pidfile\'d watcher only if its identity verifies.' } });
     } else {
       var mode = (START && START.headless && START.headless.ok) ? 'headless' : 'notify';
-      act($('btn-watcher'), '/api/watch/start', { mode: mode }, { confirm: { title: 'Start the watcher (' + mode + ')?', body: mode === 'headless' ? 'Runs each owed turn as a fresh agent process, detached from this server.' : 'Notifies you on each turn flip (headless is not configured for both roles).' } });
+      act($('btn-watcher'), '/api/watch/start', { mode: mode }, { confirm: { title: 'Start the watcher?', body: mode === 'headless' ? 'From then on each waiting turn runs by itself as a fresh agent process, detached from this server.' : 'Notifies you on each turn flip (this page cannot run turns for both agents).' } });
     }
   });
 
@@ -451,12 +451,12 @@
       // immediately, not after two minutes: with the watcher off nobody will run this turn
       var who = n.owed.agent || n.owed.role;
       var wc = cardShell('stale', 'Waiting on ' + who + ', but the watcher is off', 'waiting ' + fmtAge(n.owed.age_s));
-      wc.appendChild(el('div', 'card-body', 'Nothing runs ' + who + '\'s turn until the watcher is on. Turn it on here, or run /handoff in ' + who + '\'s own terminal.'));
+      wc.appendChild(el('div', 'card-body', 'Nothing runs ' + who + '\'s turn until the watcher is on. Start it here, or run /handoff in ' + who + '\'s own terminal.'));
       var wr2 = el('div', 'row'); var wfin = el('div', 'actions-final');
-      var wstart = el('button', 'btn btn-primary', 'Turn the watcher on');
+      var wstart = el('button', 'btn btn-primary', 'Start the watcher');
       var wmode = (START && START.headless && START.headless.ok) ? 'headless' : 'notify';
       wstart.title = 'tagteam watch --mode ' + wmode + ' --pidfile';
-      wstart.addEventListener('click', function () { act(wstart, '/api/watch/start', { mode: wmode }, { confirm: { title: 'Turn the watcher on?', body: wmode === 'headless' ? 'Runs each waiting turn as a fresh agent process, detached from this server.' : 'Notifies you on each turn flip (this page cannot run turns for both agents).' } }); });
+      wstart.addEventListener('click', function () { act(wstart, '/api/watch/start', { mode: wmode }, { confirm: { title: 'Start the watcher?', body: wmode === 'headless' ? 'From then on each waiting turn runs by itself as a fresh agent process, detached from this server.' : 'Notifies you on each turn flip (this page cannot run turns for both agents).' } }); });
       wfin.appendChild(wstart); wr2.appendChild(wfin); wc.appendChild(wr2);
       wrap.appendChild(wc); cards++;
     }
@@ -802,6 +802,7 @@
   // engine error strings that reach the page → what happened, in plain words
   function plainError(e) {
     var s = String(e || 'unknown');
+    s = s.replace(/\bby web:([\w.@-]+)/, 'by you (web:$1)');
     if (/slot busy/i.test(s)) return 'the lead was already working on something else at that moment — try again now';
     if (/orphaned/i.test(s)) return 'the process that started it went away before it finished';
     if (/spawn|not found|No such file/i.test(s)) return 'the agent\'s command could not be started (' + s + ')';
@@ -1182,7 +1183,8 @@
       wrap.appendChild(msgNode('you', 'you', t.ts, t.user_text));
       var m = el('div', 'lead-msg lead'); m.dataset.turn = String(t.n);
       var head = el('div', 'who'); head.appendChild(el('span', null, agent)); head.appendChild(el('span', 'spacer'));
-      head.appendChild(el('span', null, t.status === 'running' ? 'replying…' : (t.continuity || '') + (t.finished_at ? ' · ' + fmtTs(t.finished_at) : '')));
+      var cont = t.continuity === 'resumed session' ? 'same session' : (t.continuity || '');
+      head.appendChild(el('span', null, t.status === 'running' ? 'replying…' : cont + (t.finished_at ? (cont ? ' · ' : '') + fmtTs(t.finished_at) : '')));
       m.appendChild(head);
       // Phase 43: the streamed activity lines are KEPT — a re-render mid-turn
       // refills the live box, and a finished turn keeps them under a
@@ -1191,7 +1193,18 @@
       if (t.status === 'running') { var live = linesBox(kept); m.appendChild(live); live.scrollTop = live.scrollHeight; }
       else {
         if (t.status === 'ok') { var b = el('div', 'body'); b.textContent = t.reply || '(no text reply)'; m.appendChild(b); }
-        else { var f = el('div', 'fail'); f.textContent = outcomeLabel(t.status) + (t.error ? ' — ' + t.error : '') + (t.log_path ? '\nlog: ' + t.log_path : ''); m.appendChild(f); }
+        else {
+          // what happened, in plain words, and what stands: the reply never
+          // came, but whatever the lead did before that (files, a cycle it
+          // opened) is real — the activity below shows it.
+          var f = el('div', 'fail');
+          var when = t.finished_at ? ' at ' + fmtTs(t.finished_at) : '';
+          var why = t.error ? plainError(t.error).replace(/^cancelled /, '') : '';
+          var lead = why.indexOf('by you') === 0 ? 'Cancelled ' + why + when : (outcomeLabel(t.status).charAt(0).toUpperCase() + outcomeLabel(t.status).slice(1) + (why ? ' — ' + why : '') + when);
+          f.textContent = lead + '. No reply came' + (kept.length ? ' — the activity below shows what ' + agent + ' did before that.' : '.');
+          if (t.log_path) { f.title = 'log: ' + t.log_path; }
+          m.appendChild(f);
+        }
         if (kept.length) {
           var det = el('details', 'activity'); det.appendChild(el('summary', null, 'activity (' + kept.length + ' line' + (kept.length === 1 ? '' : 's') + ')'));
           det.appendChild(linesBox(kept)); m.appendChild(det);
