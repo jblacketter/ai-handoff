@@ -76,3 +76,10 @@ showed `cancelled — cancelled by web:jackblacketter log: /…/2.log` and `resu
 what stood. Fixed on `cockpit-ux-2`: "Cancelled by you (web:…) at <time>. No reply came — the activity
 below shows what Claude did before that." (log path in the tooltip); "same session"; the watcher's
 button reads **Start the watcher** (card) / **Start** (chip), as Jack asked.
+- *Same session, later:* the turn was not stopped on purpose — the row's red `cancel` link sat beside
+  `hide`, and the confirm's buttons read **Cancel / Run** (two readings for a cancel). Fixed on
+  `cockpit-ux-2`: a separated red **stop turn** button, confirm buttons **Stop the turn / Keep going**;
+  the chat's button is **Stop turn**. Also "it wasn't clear to me that it was running something" after
+  sending a chat message → a working banner with spinner + elapsed under the composer, the reply bubble
+  pulses. Wanted: "when it goes to the reviewer, so I can see it" — the Cycle region does that (the
+  reviewer lane pulses; the review row streams).

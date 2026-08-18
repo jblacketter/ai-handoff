@@ -106,15 +106,22 @@
     // dry-run to get the exact CLI line the server would run
     return postJSON(url, Object.assign({}, data, { dry_run: true })).then(function (r) {
       if (!r.ok) { toast('err', (r.body && (r.body.message || r.body.error)) || 'Cannot prepare action'); return; }
-      confirmModal(opts.confirm.title, opts.confirm.body, r.body.cli, run);
+      confirmModal(opts.confirm.title, opts.confirm.body, r.body.cli, run, opts.confirm.labels);
     });
   }
 
   var confirmCb = null;
-  function confirmModal(title, body, cli, onOk) {
+  function confirmModal(title, body, cli, onOk, labels) {
+    // Error prevention: a destructive confirm names the action on its
+    // button ("Stop the turn" / "Keep going"), never a generic Run/Cancel
+    // pair that reads two ways for a cancel action.
+    labels = labels || {};
     $('confirm-title').textContent = title;
     $('confirm-body').textContent = body || '';
     $('confirm-cli').textContent = cli || '';
+    $('confirm-ok').textContent = labels.ok || 'Run';
+    $('confirm-ok').className = 'btn ' + (labels.danger ? 'btn-danger-solid' : 'btn-primary');
+    $('confirm-cancel').textContent = labels.cancel || 'Cancel';
     confirmCb = onOk;
     $('confirm').classList.remove('hidden');
     $('confirm-ok').focus();
@@ -444,7 +451,7 @@
       var sc = cardShell('stale', (n.inflight.agent || n.inflight.provider || 'The agent') + '\'s process disappeared mid-turn', fmtTs(n.inflight.started_at));
       sc.appendChild(el('div', 'card-body', inflightKind(n) + ' · ' + n.inflight.stem + '\nThe engine normally records this itself within a moment; if it stays, Cancel turn clears the record (nothing is killed).'));
       var sr = el('div', 'row'); var cb = el('button', 'btn btn-danger', 'Cancel turn'); cb.title = 'tagteam cancel-turn';
-      cb.addEventListener('click', function () { act(cb, '/api/cancel-turn', {}, { confirm: { title: 'Cancel turn?', body: 'Binds the recorded pid first; a stale record is removed without signalling.' } }); });
+      cb.addEventListener('click', function () { act(cb, '/api/cancel-turn', {}, { confirm: { title: 'Clear the lost turn?', body: 'Binds the recorded pid first; a stale record is removed without signalling.', labels: { ok: 'Clear it', cancel: 'Leave it', danger: true } } }); });
       var sf = el('div', 'actions-final'); sf.appendChild(cb); sr.appendChild(sf); sc.appendChild(sr);
       wrap.appendChild(sc); cards++;
     } else if (n.owed && !n.inflight && !n.paused && !(n.watcher && n.watcher.running)) {
@@ -965,9 +972,9 @@
   function actCancel(rec) {
     var it = rec.item;
     if (it.kind === 'conversation' && it.ref && it.ref.conversation) {
-      act(rec.cancelBtn, '/api/lead/' + encodeURIComponent(it.ref.conversation) + '/cancel', {}, { confirm: { title: 'Cancel the lead\'s turn?', body: 'Kills the running agent process (identity-checked); the turn is recorded as cancelled.' } });
+      act(rec.cancelBtn, '/api/lead/' + encodeURIComponent(it.ref.conversation) + '/cancel', {}, { confirm: { title: 'Stop ' + (agentName(it) || 'the lead') + '\'s turn?', body: 'Stops the running agent process (identity-checked); the turn is recorded as cancelled — whatever it already did stays done.', labels: { ok: 'Stop the turn', cancel: 'Keep going', danger: true } } });
     } else {
-      act(rec.cancelBtn, '/api/cancel-turn', {}, { confirm: { title: 'Cancel this turn?', body: 'Stops ' + (it.agent || it.role || 'the agent') + ' (' + kindLabel(it) + '); the turn is recorded as cancelled and turns are paused until you resume.' } });
+      act(rec.cancelBtn, '/api/cancel-turn', {}, { confirm: { title: 'Stop ' + (agentName(it) || it.role || 'this') + '\'s turn?', body: 'Stops ' + (agentName(it) || it.role || 'the agent') + ' (' + kindLabel(it) + '); the turn is recorded as cancelled and turns are paused until you resume.', labels: { ok: 'Stop the turn', cancel: 'Keep going', danger: true } } });
     }
   }
   function buildActRow(rec) {
@@ -981,12 +988,13 @@
     rec.kindEl = el('span', 'kind'); head.appendChild(rec.kindEl);
     rec.statusEl = el('span', 'status'); head.appendChild(rec.statusEl);
     head.appendChild(el('span', 'spacer'));
-    rec.cancelBtn = el('button', 'link-btn danger hidden', 'cancel'); rec.cancelBtn.type = 'button'; rec.cancelBtn.title = 'cancel this turn';
-    rec.cancelBtn.addEventListener('click', function () { actCancel(rec); });
-    head.appendChild(rec.cancelBtn);
     rec.openBtn = el('button', 'link-btn', 'log'); rec.openBtn.type = 'button';
     rec.openBtn.addEventListener('click', function () { toggleActLines(rec); });
     head.appendChild(rec.openBtn);
+    // destructive, small, and apart from the safe links (Fitts + error prevention)
+    rec.cancelBtn = el('button', 'btn btn-danger btn-small act-stop hidden', 'stop turn'); rec.cancelBtn.type = 'button'; rec.cancelBtn.title = 'stop this turn (tagteam cancel-turn)';
+    rec.cancelBtn.addEventListener('click', function () { actCancel(rec); });
+    head.appendChild(rec.cancelBtn);
     row.appendChild(head);
     rec.detailEl = el('div', 'act-detail muted hidden'); row.appendChild(rec.detailEl);
     rec.box = el('div', 'act-lines hidden'); row.appendChild(rec.box);
@@ -1152,9 +1160,13 @@
       return;
     }
     if (LEAD.sending || (slot.held && slot.kind === 'conversation')) {
+      // Visibility of status: an unmistakable "working" state while your
+      // message runs — spinner, who, elapsed — not a faint line.
       send.disabled = true; ta.disabled = false;
       $('btn-lead-cancel').classList.remove('hidden');
-      leadStatus((cfg.agent || 'The lead') + ' is replying… ' + (LEAD.sentAt ? fmtAge(Math.round((Date.now() - LEAD.sentAt) / 1000)) : ''), 'busy');
+      var st2 = $('lead-status'); st2.textContent = ''; st2.className = 'lead-status busy working';
+      st2.appendChild(el('span', 'spin'));
+      st2.appendChild(document.createTextNode((cfg.agent || 'The lead') + ' is working on your message' + (LEAD.sentAt ? ' · ' + fmtAge(Math.round((Date.now() - LEAD.sentAt) / 1000)) : '') + ' — its steps stream below and in the Activity log above.'));
       return;
     }
     send.disabled = false; ta.disabled = false; $('btn-lead-cancel').classList.add('hidden');
@@ -1190,7 +1202,7 @@
       // refills the live box, and a finished turn keeps them under a
       // collapsed disclosure beneath the reply (nothing collapses away).
       var kept = leadLines(conv.id, t.n);
-      if (t.status === 'running') { var live = linesBox(kept); m.appendChild(live); live.scrollTop = live.scrollHeight; }
+      if (t.status === 'running') { m.classList.add('working'); var live = linesBox(kept); m.appendChild(live); live.scrollTop = live.scrollHeight; }
       else {
         if (t.status === 'ok') { var b = el('div', 'body'); b.textContent = t.reply || '(no text reply)'; m.appendChild(b); }
         else {
@@ -1288,7 +1300,7 @@
   $('lead-text').addEventListener('keydown', function (e) { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendLead(); } });
   $('btn-lead-cancel').addEventListener('click', function () {
     if (!LEAD.current) return;
-    act($('btn-lead-cancel'), '/api/lead/' + encodeURIComponent(LEAD.current) + '/cancel', {}, { confirm: { title: 'Cancel the lead\'s turn?', body: 'Kills the running agent process (identity-checked); the turn is recorded as cancelled.' } });
+    act($('btn-lead-cancel'), '/api/lead/' + encodeURIComponent(LEAD.current) + '/cancel', {}, { confirm: { title: 'Stop ' + ((LEAD.cfg && LEAD.cfg.agent) || 'the lead') + '\'s turn?', body: 'Stops the running agent process (identity-checked); the turn is recorded as cancelled — whatever it already did stays done.', labels: { ok: 'Stop the turn', cancel: 'Keep going', danger: true } } });
   });
   setInterval(function () { if (LEAD.sending) renderLeadGate(); }, 1000);
 
