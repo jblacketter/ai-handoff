@@ -610,7 +610,18 @@ class CockpitRouter:
                     n = int(q.get("lines") or capi.DEFAULT_TAIL_LINES)
                 except ValueError:
                     n = capi.DEFAULT_TAIL_LINES
-                h._send_json(capi.tail_payload(self.project_dir, n, events=q.get("events") == "1"))
+                h._send_json(capi.tail_payload(self.project_dir, n, events=q.get("events") == "1",
+                                               stem=q.get("stem") or None))
+            elif path == "/api/activity":
+                # Phase 43: every recorded agent turn, one outcome vocabulary.
+                try:
+                    lim = int(q.get("limit") or capi.ACTIVITY_DEFAULT_LIMIT)
+                except ValueError:
+                    lim = capi.ACTIVITY_DEFAULT_LIMIT
+                h._send_json(capi.activity_payload(self.project_dir, lim))
+            elif path.startswith("/api/activity/log/") and path.endswith("/events"):
+                stem = path[len("/api/activity/log/"):-len("/events")]
+                self.log_sse(h, stem, q)
             elif path == "/api/events":
                 self.sse(h)
             elif path == "/api/start":
@@ -1013,14 +1024,14 @@ class CockpitRouter:
             h._send_json({"ok": False, "message": f"{type(exc).__name__}: {exc}"}, 500)
             return True
 
-    def lead_sse(self, h, cid: str, q: dict) -> None:
-        """Per-conversation SSE: replay retained events after the cursor
-        (`Last-Event-ID` header or ?after=), then follow live output."""
-        from tagteam import lead_chat as _lc
-        if not _lc.CONVERSATION_ID_RE.match(cid) or _lc.get_conversation(self.project_dir, cid) is None:
-            h._send_404("Conversation not found")
-            return
-        after = h.headers.get("Last-Event-ID") or q.get("after") or None
+    def _stream_sse(self, h, produce, *, poll_s: float = 0.4) -> None:
+        """Shared per-resource SSE loop (Phase 43: one poller for the lead
+        conversation stream and the turn-log stream, so ids / replay /
+        heartbeat / end / the --max-sse cap behave identically).
+        `produce() -> (events, done)`; each event is a dict with `id` and
+        `type` (its JSON is the frame data); the producer keeps its own
+        cursor. When `done` is true the events are written and the stream
+        closes."""
         with self.sse_lock:
             if self.sse_state["active"] >= self.max_sse:
                 h._send_json({"error": f"Too many live connections (max {self.max_sse})"}, 503)
@@ -1033,13 +1044,11 @@ class CockpitRouter:
             h.send_header("Cache-Control", "no-cache")
             h.send_header("X-Accel-Buffering", "no")
             h.end_headers()
-            cursor = after
             last_beat = time.monotonic()
             while True:
-                evs = _lc.turn_events(self.project_dir, cid, after=cursor)
+                evs, done = produce()
                 for ev in evs:
                     h.wfile.write(f"id: {ev['id']}\nevent: {ev['type']}\ndata: {json.dumps(ev, default=str)}\n\n".encode())
-                    cursor = ev["id"]
                 if evs:
                     h.wfile.flush()
                     last_beat = time.monotonic()
@@ -1047,11 +1056,13 @@ class CockpitRouter:
                     h.wfile.write(b": heartbeat\n\n")
                     h.wfile.flush()
                     last_beat = time.monotonic()
+                if done:
+                    break
                 if stop is not None:
-                    if stop.wait(0.4):
+                    if stop.wait(poll_s):
                         break
                 else:
-                    time.sleep(0.4)
+                    time.sleep(poll_s)
                 if self._client_gone(h):
                     break
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -1059,6 +1070,95 @@ class CockpitRouter:
         finally:
             with self.sse_lock:
                 self.sse_state["active"] -= 1
+
+    def lead_sse(self, h, cid: str, q: dict) -> None:
+        """Per-conversation SSE: replay retained events after the cursor
+        (`Last-Event-ID` header or ?after=), then follow live output."""
+        from tagteam import lead_chat as _lc
+        if not _lc.CONVERSATION_ID_RE.match(cid) or _lc.get_conversation(self.project_dir, cid) is None:
+            h._send_404("Conversation not found")
+            return
+        after = h.headers.get("Last-Event-ID") or q.get("after") or None
+        state = {"cursor": after}
+
+        def produce():
+            evs = _lc.turn_events(self.project_dir, cid, after=state["cursor"])
+            for ev in evs:
+                state["cursor"] = ev["id"]
+            return evs, False
+
+        self._stream_sse(h, produce)
+
+    def log_sse(self, h, stem: str, q: dict) -> None:
+        """Phase 43: SSE over `.tagteam/turns/<stem>.log` — `event: line`
+        per complete line, `id` = byte offset after that line (so
+        `Last-Event-ID` / ?after= replays exactly from there); `event: end`
+        once no in-flight marker names this stem AND the file is drained.
+        The stem is validated and resolved strictly under the turns dir."""
+        from tagteam import cockpit_api as capi
+        from tagteam import headless as _h
+        path = capi.turn_log_path(self.project_dir, stem)
+        if path is None:
+            h._send_json({"error": "Bad turn stem"}, 400)
+            return
+        if not path.exists():
+            h._send_404(f"No turn log for {stem}")
+            return
+        raw_after = h.headers.get("Last-Event-ID") or q.get("after") or None
+        try:
+            offset = max(0, int(str(raw_after).split(":")[0])) if raw_after not in (None, "") else 0
+        except (TypeError, ValueError):
+            offset = 0
+        state = {"offset": offset, "ended": False}
+
+        def produce():
+            if state["ended"]:
+                return [], True
+            evs = []
+            # Liveness is sampled BEFORE reading so a marker released
+            # between the read and the check cannot hide a final flush:
+            # if it was gone before we read, everything we read is final.
+            inflight = _h.read_inflight(self.project_dir)
+            running = bool(inflight and inflight.get("stem") == stem)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if state["offset"] > size:      # truncated / rotated: start over
+                state["offset"] = 0
+            chunk = b""
+            if size > state["offset"]:
+                try:
+                    with open(path, "rb") as f:
+                        f.seek(state["offset"])
+                        chunk = f.read(size - state["offset"])
+                except OSError:
+                    chunk = b""
+            pos = state["offset"]
+            while True:
+                nl = chunk.find(b"\n")
+                if nl < 0:
+                    break                    # keep the partial tail for next poll
+                line = chunk[:nl].decode("utf-8", "replace").rstrip("\r")
+                pos += nl + 1
+                chunk = chunk[nl + 1:]
+                evs.append({"id": pos, "type": "line", "text": line, "stem": stem})
+            if not running and chunk:
+                # the writer is gone: a last line without its newline is final
+                pos += len(chunk)
+                evs.append({"id": pos, "type": "line",
+                            "text": chunk.decode("utf-8", "replace").rstrip("\r"), "stem": stem})
+                chunk = b""
+            state["offset"] = pos
+            done = False
+            if not running and not evs:
+                state["ended"] = True
+                evs.append({"id": f"{state['offset']}:end", "type": "end", "stem": stem,
+                            "offset": state["offset"]})
+                done = True
+            return evs, done
+
+        self._stream_sse(h, produce)
 
     def handle_post(self, h, parsed, path):
         """Route a POST for this project (path relative to the mount)."""
