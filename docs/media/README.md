@@ -36,6 +36,7 @@ edge labels are plain `<text>`.
 | `screenshots/cockpit-usage.png` | 1280×800 | the cockpit's **Usage** tab: round-over-round token churn, burn by role, the subscription-window signal |
 | `screenshots/hub.png` | 1280×800 | the hub over the seed registry: **Needs you** (demo-api, escalated · brief ready · Open), **Waiting** (demo-web, reviewer owed · stale · CLI hint), **Quiet** (demo-docs), burn + window in the strip |
 | `screenshots/cockpit-lead.png` | 1280×800 | (3.1) the cockpit on the idle `demo-idle`: the **Start** card rendering the launch intent (`/handoff start csv-export`, Copy command / Launch terminals / **Start headless**), the watcher chip's **Start**, and the **Lead** panel with a two-turn conversation (continuity: resumed session) and the composer |
+| `screenshots/cockpit-cycle.png` | 1280×800 | (3.7) the cockpit on `demo-web` during a running handoff: the Now strip's in-flight chip naming the kind (`Codex · reviewer · cycle turn r2`) and the last-outcome chip; the **Cycle** region — Lead lane waiting, Reviewer lane on turn and running (pulsing), token on the reviewer, status line — and the **Activity** log with the reviewer's cycle turn streaming its log, a passed gate and three finished turns |
 
 They are captured from **seeded temporary projects, never from a real
 project or the live registry**:
@@ -44,6 +45,7 @@ project or the live registry**:
 python scripts/showcase_seed.py ~/tagteam-demo          # any dir outside /tmp, /private/tmp, /var/folders (the hub hides those as scratch)
 tagteam serve --dir ~/tagteam-demo/demo/demo-api --port 8080     # cockpit-needs-you.png / cockpit-usage.png (bare serve = cockpit since 3.1)
 tagteam serve --dir ~/tagteam-demo/demo/demo-idle --port 8081    # cockpit-lead.png (Lead tab; the seed installs the skill contract so Start headless is offered)
+tagteam serve --dir ~/tagteam-demo/demo/demo-web --port 8082     # cockpit-cycle.png (3.7: the seed leaves a RUNNING reviewer turn here — a detached `sleep` as the live pid, its log growing for a minute; kill the printed pid when done)
 tagteam hub --registry ~/tagteam-demo/registry.json --port 8090
 # open http://127.0.0.1:8080/ and http://127.0.0.1:8090/ in a 1280×800 viewport, wait for the first
 # render (connection chip = Live), capture the viewport as PNG (no metadata chunks — the test checks

@@ -4,7 +4,7 @@
 - [x] Planning
 - [x] In Review (round 1)
 - [x] Approved (round 1 — Codex: scope + Phase 44 split endorsed)
-- [ ] Implementation
+- [x] Implementation (branch `phase-43-cockpit-hardening`)
 - [ ] Implementation Review
 - [ ] Complete
 
@@ -335,3 +335,69 @@ launch ∨ inflight).
 
 - Branch `phase-43-cockpit-hardening`; PR; `scripts/release.py 3.7.0` after
   merge; roadmap status line; `docs/cockpit-issues.md` resolution note.
+
+## Implementation notes (impl round 1)
+
+What shipped is the plan, with these deviations / precisions — each
+either forced by a fact found while building or a manual-walk finding:
+
+- **Activity ids are stem-based.** A turn with a log stem is `turn:<stem>`
+  whatever recorded it (in-flight marker, `usage` row, `gates` / `panels`
+  row) so the running row and its later record are ONE row the client
+  patches — the plan's `<source>:<rowid>` would have left a stale
+  "running" row next to a new "finished" one. Non-stem items keep
+  `<source>:<rowid>` (`conversation:<id>`, `launch:<id>`, `inflight:slot`).
+  Duplicates are resolved server-side (a terminal record wins over a
+  running marker). A launch that reached its lead turn is shown as that
+  conversation row only (the turn carries the outcome and log); launch rows
+  stay only for launches that never got a turn.
+- **Log growth in the SSE signature is coarse:** `LOG_SIGNAL_STEP` = 8 KiB
+  steps (`inflight.log_step`), not per byte — the running row streams its
+  own lines; the global signal must move while the engine does without a
+  full-page refresh per log line. Tested both ways (< one step → same id;
+  ≥ one step → change).
+- **A running row keeps its log stream open after its record lands** and
+  closes on the stream's own `end` (marker gone + file drained): the record
+  can arrive before the poller drains the last lines (seen in the walk —
+  three lines lost when the stream was closed on the refresh). The server's
+  `end` also flushes a final line that lacks its newline.
+- **A running row whose record vanishes** (marker gone, nothing recorded —
+  not something the engine does, but possible) is marked `orphaned · no
+  outcome recorded` on the next refresh, never left "running".
+- **Shared streams buffer and replay to late joiners** — the Lead panel and
+  the Activity row for the same conversation read one EventSource; the
+  registry keeps what a stream delivered (cap 5000) so whichever consumer
+  registers second still gets the replay (seen in the walk: an empty row box
+  next to a full Lead-panel box).
+- **The Cycle region is also shown when there is any recorded activity**
+  (not only phase ∨ pending launch ∨ in-flight) so "what happened last"
+  never disappears — e.g. after a launch's lead turn finished but before a
+  cycle exists.
+- **`now.launch` derives the effective status** (the persisted row is
+  finalised lazily by the launcher): pending → its lead turn (running →
+  pending, ok → gone, failed/cancelled → failed with the turn's error, no
+  turn + owner gone → failed "orphaned"); failed → only within 24 h and for
+  the CURRENT intent; succeeded → null.
+- Tests live in a new sibling module `tests/test_cockpit_activity.py`
+  (46 tests: vocabulary table, every source + normalisation, marker merge /
+  dedupe / same-id record, cap, `last_turn`, `now` keys, `launch_view`
+  paths, signature sources + bounded cost, `tail?stem=` + `turn_log_path`
+  traversal, `/api/activity`, log SSE stream / replay / partial-line drain /
+  `end` / 400 / 404 / cap, the lead SSE on the shared poller, and the source
+  guards) rather than spread over four existing files; the existing Lead-
+  panel `innerHTML` guard in `tests/test_launchpad.py` still applies
+  unchanged (the Phase 43 block sits *before* the Lead block and has its own
+  guard). `tests/test_docs_story.py` gains the new screenshot.
+- Seed: `scripts/showcase_seed.py` leaves a RUNNING reviewer turn on
+  `demo-web` (a detached `sleep 3600` as the live pid — printed, kill when
+  done — a log that keeps growing for ~1 min, a passed gate and three
+  finished turns); `docs/media/screenshots/cockpit-cycle.png` captured from
+  it (1280×800, no text chunks).
+- Manual walk (Playwright, 1280×800, recorded here, not a gate): running
+  reviewer turn → lanes/token/strip/streaming row; turn ended as `cancelled`
+  and as `finished` → same row patched, lines kept incl. the final partial
+  line; Start → *starting* (pending launch + running conversation: Start card
+  gone, lead lane running, row + Lead panel share the stream) → turn `ok` →
+  Start card back, Lead panel keeps `activity (4 lines)`, region stays with
+  history; reload → outcomes persist, conversation lines replay from the
+  retained events.

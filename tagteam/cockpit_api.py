@@ -26,6 +26,7 @@ SCOPE_DIFF_MAX_BYTES = 200_000
 SCOPE_DIFF_MAX_FILES = 400
 DEFAULT_TAIL_LINES = 40
 MAX_TAIL_LINES = 2000
+LOG_SIGNAL_STEP = 8192          # Phase 43: in-flight log growth granularity in the SSE signature
 
 
 def _now() -> datetime:
@@ -239,12 +240,28 @@ def now_payload(project_dir: str | Path) -> dict:
     except Exception:
         pass
 
+    # Phase 43: what KIND of process holds the slot, the launch the Start
+    # card must acknowledge, and the newest terminal turn — the strip and
+    # the Cycle region name them; nothing here is inferred from absence.
+    turn_kind = (inflight or {}).get("kind") or ("cycle" if inflight else None)
+    try:
+        launch = launch_view(root)
+    except Exception:
+        launch = None
+    try:
+        last = last_turn(activity_payload(root, limit=ACTIVITY_DEFAULT_LIMIT)["items"])
+    except Exception:
+        last = None
+
     return {
         "ts": _now_iso(),
         "state": state,
         "cycle": cycle_status,
         "owed": owed,
         "inflight": inflight,
+        "turn_kind": turn_kind,
+        "launch": launch,
+        "last_turn": last,
         "paused": paused,
         "watcher": watcher,
         "briefer_enabled": briefer_enabled,
@@ -610,16 +627,396 @@ def scope_diff_payload(project_dir: str | Path, phase: str, ctype: str, *,
 
 
 # ---------------------------------------------------------------------------
+# Phase 43: activity read model — every agent turn, one outcome vocabulary
+# ---------------------------------------------------------------------------
+#
+# Read-only merge of what the engine already records: the in-flight marker
+# (running), `usage` rows (finished cycle turns, panel lenses, briefer),
+# `conversation_turns`, `gates`, `panels`, and pending / failed `launches`.
+# Nothing here writes; no schema is touched. Every raw status is normalised
+# to ONE vocabulary so the strip, the lanes, the activity rows and the
+# Needs-you cards say the same word for the same thing.
+
+OUTCOME_RUNNING = "running"
+OUTCOME_FINISHED = "finished"
+OUTCOME_CANCELLED = "cancelled"
+OUTCOME_FAILED = "failed"
+OUTCOME_TIMED_OUT = "timed_out"
+OUTCOME_PROCESS_GONE = "process_gone"
+OUTCOME_ORPHANED = "orphaned"
+OUTCOMES = (OUTCOME_RUNNING, OUTCOME_FINISHED, OUTCOME_CANCELLED, OUTCOME_FAILED,
+            OUTCOME_TIMED_OUT, OUTCOME_PROCESS_GONE, OUTCOME_ORPHANED)
+
+# raw status (per source) → vocabulary. Anything unknown → failed (never
+# "finished" by accident: an outcome we cannot name is not a success).
+_RAW_OUTCOME = {
+    # headless / usage / conversation turns
+    "running": OUTCOME_RUNNING, "ok": OUTCOME_FINISHED, "cancelled": OUTCOME_CANCELLED,
+    "timeout": OUTCOME_TIMED_OUT, "nonzero_exit": OUTCOME_FAILED, "no_round": OUTCOME_FAILED,
+    "spawn_failed": OUTCOME_FAILED, "failed": OUTCOME_FAILED, "error": OUTCOME_FAILED,
+    "partial": OUTCOME_FINISHED,
+    # gates (pass / bounce are decisions of a finished run) and panels
+    "pass": OUTCOME_FINISHED, "bounce": OUTCOME_FINISHED, "merged": OUTCOME_FINISHED,
+    "fallback": OUTCOME_FINISHED, "superseded": OUTCOME_FINISHED,
+    "abandoned": OUTCOME_ORPHANED,
+    # launches
+    "pending": OUTCOME_RUNNING, "succeeded": OUTCOME_FINISHED,
+}
+ACTIVITY_DEFAULT_LIMIT = 50
+ACTIVITY_MAX_LIMIT = 200
+_STEM_RE_TEXT = r"^[A-Za-z0-9._-]+$"
+
+
+def normalize_outcome(raw: str | None, *, error: str | None = None,
+                      pid_alive: bool | None = None) -> str:
+    """Map a recorded status (+ error text / marker liveness) to OUTCOMES."""
+    if raw == "running" and pid_alive is False:
+        return OUTCOME_PROCESS_GONE
+    err = (error or "").lower()
+    if err.startswith("orphaned"):
+        return OUTCOME_ORPHANED
+    return _RAW_OUTCOME.get(str(raw or "").lower(), OUTCOME_FAILED)
+
+
+def _stem_of(log_path: str | None) -> str | None:
+    if not log_path:
+        return None
+    name = Path(str(log_path)).name
+    for suf in (".events.jsonl", ".log"):
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return name or None
+
+
+def _iso_minus_ms(ts: str | None, ms) -> str | None:
+    if not ts:
+        return None
+    try:
+        t = datetime.fromisoformat(str(ts))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        from datetime import timedelta
+        return (t - timedelta(milliseconds=float(ms or 0))).isoformat()
+    except (TypeError, ValueError):
+        return ts
+
+
+def _item(**kw) -> dict:
+    base = {"id": None, "source": None, "kind": None, "role": None, "agent": None,
+            "phase": None, "type": None, "round": None, "status": None,
+            "raw_status": None, "started_at": None, "ended_at": None,
+            "duration_ms": None, "log_path": None, "stem": None, "detail": None,
+            "ref": None, "pid_alive": None}
+    base.update(kw)
+    return base
+
+
+def _rows(conn, sql: str, args=()) -> list[dict]:
+    try:
+        cur = conn.execute(sql, args)
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def _activity_from_db(conn, limit: int) -> list[dict]:
+    items: list[dict] = []
+    # usage rows: cycle turns (kind NULL/'cycle'), panel lenses ('panel:<lens>'),
+    # briefer (role 'briefer'). Conversation rows come from conversation_turns.
+    for r in _rows(conn, "SELECT id, ts, phase, type, round, role, agent, status, duration_ms,"
+                         " log_path, kind FROM usage ORDER BY id DESC LIMIT ?", (limit,)):
+        kind = r.get("kind") or ""
+        if kind == "conversation":
+            continue
+        if kind.startswith("panel:"):
+            akind, detail = "panel_lens", kind.split(":", 1)[1]
+        elif r.get("role") == "briefer" or kind == "briefer":
+            akind, detail = "briefer", "decision brief"
+        else:
+            akind, detail = "cycle", None
+        stem = _stem_of(r.get("log_path"))
+        items.append(_item(
+            id=(f"turn:{stem}" if stem else f"usage:{r['id']}"), source="usage", kind=akind, role=r.get("role"),
+            agent=r.get("agent"), phase=r.get("phase"), type=r.get("type"), round=r.get("round"),
+            status=normalize_outcome(r.get("status")), raw_status=r.get("status"),
+            started_at=_iso_minus_ms(r.get("ts"), r.get("duration_ms")), ended_at=r.get("ts"),
+            duration_ms=r.get("duration_ms"), log_path=r.get("log_path"), stem=stem,
+            detail=detail, ref=({"log": stem} if stem else None)))
+    for r in _rows(conn, "SELECT id, conversation_id, n, ts, user_text, status, log_path,"
+                         " finished_at, error FROM conversation_turns ORDER BY id DESC LIMIT ?", (limit,)):
+        stem = _stem_of(r.get("log_path"))
+        dur = None
+        if r.get("ts") and r.get("finished_at"):
+            a, b = _age_s(r["ts"]), _age_s(r["finished_at"])
+            if a is not None and b is not None:
+                dur = int(max(0.0, a - b) * 1000)
+        text = str(r.get("user_text") or "").strip().split("\n")[0]
+        items.append(_item(
+            id=f"conversation:{r['id']}", source="conversation", kind="conversation", role="lead",
+            agent=None, status=normalize_outcome(r.get("status"), error=r.get("error")),
+            raw_status=r.get("status"), started_at=r.get("ts"), ended_at=r.get("finished_at"),
+            duration_ms=dur, log_path=r.get("log_path"), stem=stem,
+            detail=(text[:160] + ("…" if len(text) > 160 else "")) or None,
+            ref={"conversation": r.get("conversation_id"), "turn": r.get("n")}))
+    for r in _rows(conn, "SELECT id, phase, type, round, kind, status, started_at, finished_at,"
+                         " duration_s, stem, reason FROM gates ORDER BY id DESC LIMIT ?", (limit,)):
+        st = r.get("status")
+        items.append(_item(
+            id=(f"turn:{r['stem']}" if r.get("stem") else f"gate:{r['id']}"), source="gate", kind="gate", role="gatekeeper", agent="gate",
+            phase=r.get("phase"), type=r.get("type"), round=r.get("round"),
+            status=normalize_outcome(st), raw_status=st, started_at=r.get("started_at"),
+            ended_at=r.get("finished_at"),
+            duration_ms=(int(float(r["duration_s"]) * 1000) if r.get("duration_s") is not None else None),
+            log_path=None, stem=r.get("stem"),
+            detail=(f"{st}" + (f" — {r['reason']}" if r.get("reason") else "")) if st else None,
+            ref=({"log": r["stem"]} if r.get("stem") else None)))
+    for r in _rows(conn, "SELECT id, phase, type, round, kind, status, started_at, finished_at,"
+                         " duration_s, stem, decision, reason FROM panels ORDER BY id DESC LIMIT ?", (limit,)):
+        st = r.get("status")
+        items.append(_item(
+            id=(f"turn:{r['stem']}" if r.get("stem") else f"panel:{r['id']}"), source="panel", kind="panel", role="reviewer", agent="panel",
+            phase=r.get("phase"), type=r.get("type"), round=r.get("round"),
+            status=normalize_outcome(st), raw_status=st, started_at=r.get("started_at"),
+            ended_at=r.get("finished_at"),
+            duration_ms=(int(float(r["duration_s"]) * 1000) if r.get("duration_s") is not None else None),
+            log_path=None, stem=r.get("stem"),
+            detail=(f"{st}" + (f" — {r['decision']}" if r.get("decision") else "")
+                    + (f" ({r['reason']})" if r.get("reason") else "")) if st else None,
+            ref=({"log": r["stem"]} if r.get("stem") else None)))
+    for r in _rows(conn, "SELECT id, status, intent_json, conversation_id, turn_n, created_at,"
+                         " finished_at, error FROM launches WHERE status != 'succeeded'"
+                         " ORDER BY id DESC LIMIT ?", (limit,)):
+        try:
+            intent = json.loads(r.get("intent_json") or "{}")
+        except ValueError:
+            intent = {}
+        st = r.get("status")
+        items.append(_item(
+            id=f"launch:{r['id']}", source="launch", kind="launch", role="lead", agent=None,
+            phase=intent.get("phase"), type=intent.get("type"), round=None,
+            status=normalize_outcome(st, error=r.get("error")), raw_status=st,
+            started_at=r.get("created_at"), ended_at=r.get("finished_at"), duration_ms=None,
+            detail=(intent.get("command") or "launch") + (f" — {r['error']}" if r.get("error") else ""),
+            ref=({"conversation": r["conversation_id"], "turn": r.get("turn_n")}
+                 if r.get("conversation_id") else None)))
+    return items
+
+
+def _merge_inflight(items: list[dict], inflight: dict | None) -> None:
+    """Fold the in-flight marker into the list: a running row it matches
+    (by stem, or by conversation ref) is marked running with liveness;
+    otherwise a new running item is prepended."""
+    if not inflight:
+        return
+    pid = inflight.get("pid")
+    alive = None
+    try:
+        from tagteam import procs
+        alive = bool(isinstance(pid, int) and pid > 0 and procs.pid_alive(pid))
+    except Exception:
+        alive = None
+    if pid is None:
+        alive = None            # claimed, not yet spawned — not "gone"
+    status = OUTCOME_PROCESS_GONE if alive is False else OUTCOME_RUNNING
+    stem = inflight.get("stem")
+    kind = inflight.get("kind") or "cycle"
+    cid, tn = inflight.get("conversation_id"), inflight.get("turn_n")
+    for it in items:
+        same_stem = stem and it.get("stem") == stem
+        same_conv = (kind == "conversation" and cid and it.get("ref")
+                     and it["ref"].get("conversation") == cid and it["ref"].get("turn") == tn)
+        if same_stem or same_conv:
+            if it["status"] == OUTCOME_RUNNING or it["raw_status"] in ("running", "pending"):
+                it["status"] = status
+                it["pid_alive"] = alive
+                it["log_path"] = it.get("log_path") or inflight.get("log_path")
+                it["agent"] = it.get("agent") or inflight.get("agent")
+                it["stem"] = it.get("stem") or stem
+                if it["ref"] is None and stem:
+                    it["ref"] = {"log": stem}
+            return
+    akind = {"cycle": "cycle", "conversation": "conversation", "briefer": "briefer",
+             "gate": "gate", "panel": "panel"}.get(kind, kind)
+    items.insert(0, _item(
+        id=(f"turn:{stem}" if stem else "inflight:slot"), source="inflight", kind=akind, role=inflight.get("role"),
+        agent=inflight.get("agent") or inflight.get("provider"), phase=inflight.get("phase"),
+        type=inflight.get("type"), round=inflight.get("round"), status=status,
+        raw_status="running", started_at=inflight.get("started_at"), ended_at=None,
+        duration_ms=None, log_path=inflight.get("log_path"), stem=stem, pid_alive=alive,
+        detail=None,
+        ref=({"conversation": cid, "turn": tn} if (kind == "conversation" and cid)
+             else ({"log": stem} if stem else None))))
+
+
+def activity_payload(project_dir: str | Path, limit: int = ACTIVITY_DEFAULT_LIMIT) -> dict:
+    """{items: [...], truncated} — every recorded agent turn for the project,
+    newest first (running first among equals), each with a normalised
+    `status` from OUTCOMES, a stable `id` (`turn:<stem>` for any turn with a
+    log stem — so the in-flight row and its later record are ONE row —
+    else `<source>:<rowid>`), and a `ref` the UI can open (`{"log": stem}`
+    or `{"conversation": cid, "turn": n}`)."""
+    root = Path(project_dir)
+    try:
+        limit = max(1, min(int(limit or ACTIVITY_DEFAULT_LIMIT), ACTIVITY_MAX_LIMIT))
+    except (TypeError, ValueError):
+        limit = ACTIVITY_DEFAULT_LIMIT
+    items: list[dict] = []
+    try:
+        from tagteam import db
+        conn = db.connect(project_dir=str(root))
+        try:
+            items = _activity_from_db(conn, limit + 1)
+        finally:
+            conn.close()
+    except Exception:
+        items = []
+    _merge_inflight(items, h.read_inflight(root))
+    # one row per id: a stem-bearing turn appears once whatever recorded it
+    # (a terminal record wins over a running one; otherwise first wins)
+    by_id: dict = {}
+    for it in items:
+        cur = by_id.get(it["id"])
+        if cur is None:
+            by_id[it["id"]] = it
+        elif cur["status"] in (OUTCOME_RUNNING, OUTCOME_PROCESS_GONE) and it["status"] not in (OUTCOME_RUNNING, OUTCOME_PROCESS_GONE):
+            by_id[it["id"]] = it
+    items = list(by_id.values())
+    # a launch that reached its lead turn IS that conversation turn (the
+    # turn row carries the outcome and the log); keep launch rows only for
+    # launches that never got a turn (still claiming, or failed before one)
+    conv_refs = {(it["ref"].get("conversation"), it["ref"].get("turn")) for it in items
+                 if it["kind"] == "conversation" and it.get("ref") and it["ref"].get("conversation")}
+    items = [it for it in items if not (it["kind"] == "launch" and it.get("ref")
+                                        and (it["ref"].get("conversation"), it["ref"].get("turn")) in conv_refs)]
+    for it in items:
+        it["age_s"] = _age_s(it.get("started_at"))
+    def _key(it):
+        running = it["status"] in (OUTCOME_RUNNING, OUTCOME_PROCESS_GONE)
+        return (1 if running else 0, str(it.get("started_at") or ""), str(it.get("id")))
+    items.sort(key=_key, reverse=True)
+    truncated = len(items) > limit
+    return {"items": items[:limit], "truncated": truncated, "limit": limit}
+
+
+def last_turn(items: list[dict]) -> dict | None:
+    """The newest terminal agent turn (launch rows are not turns)."""
+    for it in items:
+        if it.get("kind") == "launch":
+            continue
+        if it.get("status") in (OUTCOME_RUNNING, OUTCOME_PROCESS_GONE):
+            continue
+        return it
+    return None
+
+
+def launch_view(project_dir: str | Path) -> dict | None:
+    """The launch the Start card must acknowledge, or None. The persisted
+    row's status is finalised lazily by the launcher, so the *effective*
+    status is derived here: pending → its lead turn (running → pending,
+    ok → gone, failed/cancelled → failed, no turn + owner gone → failed);
+    failed → shown only while it is recent (24 h) and for the CURRENT
+    intent; succeeded → None."""
+    root = Path(project_dir)
+    try:
+        from tagteam import db
+        conn = db.connect(project_dir=str(root))
+        try:
+            rows = _rows(conn, "SELECT id, key, status, intent_json, conversation_id, turn_n,"
+                               " created_at, updated_at, finished_at, error, owner_pid, owner_ident"
+                               " FROM launches ORDER BY id DESC LIMIT 1")
+            row = rows[0] if rows else None
+            turn = None
+            if row and row.get("conversation_id") and row.get("turn_n") is not None:
+                t = _rows(conn, "SELECT status, error, log_path, finished_at FROM conversation_turns"
+                                " WHERE conversation_id = ? AND n = ?",
+                          (row["conversation_id"], int(row["turn_n"])))
+                turn = t[0] if t else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        intent = json.loads(row.get("intent_json") or "{}")
+    except ValueError:
+        intent = {}
+    status, error, finished = row.get("status"), row.get("error"), row.get("finished_at")
+    if status == "pending":
+        if turn is not None:
+            ts = turn.get("status")
+            if ts == "running":
+                status = "pending"
+            elif ts == "ok":
+                status = "succeeded"
+            else:
+                status, error = "failed", f"lead turn {ts}: {turn.get('error') or 'no reply'}"
+                finished = turn.get("finished_at")
+        else:
+            gone = False
+            try:
+                from tagteam import launch as _launch
+                gone = _launch._owner_gone(row.get("owner_pid"), row.get("owner_ident"))
+            except Exception:
+                gone = False
+            if gone:
+                status, error = "failed", "orphaned: the launching process died"
+    if status == "succeeded":
+        return None
+    if status == "failed":
+        age = _age_s(finished or row.get("updated_at") or row.get("created_at"))
+        if age is None or age > 86400:
+            return None
+        try:
+            from tagteam import launch as _launch
+            if _launch.launch_key(_launch.launch_intent(root)) != row.get("key"):
+                return None
+        except Exception:
+            return None
+    return {"status": status, "command": intent.get("command"), "phase": intent.get("phase"),
+            "type": intent.get("type"), "conversation_id": row.get("conversation_id"),
+            "turn_n": row.get("turn_n"), "created_at": row.get("created_at"),
+            "age_s": _age_s(row.get("created_at")), "finished_at": finished, "error": error,
+            "log_path": (turn or {}).get("log_path")}
+
+
+# ---------------------------------------------------------------------------
 # /api/tail
 # ---------------------------------------------------------------------------
 
+def turn_log_path(project_dir: str | Path, stem: str | None, events: bool = False) -> Path | None:
+    """`.tagteam/turns/<stem>.log` for a validated stem (strictly under the
+    turns dir; no separators, no traversal), or None."""
+    import re as _re
+    if not stem or not _re.match(_STEM_RE_TEXT, str(stem)) or ".." in str(stem):
+        return None
+    d = h.turns_dir(project_dir).resolve()
+    p = (d / f"{stem}{'.events.jsonl' if events else '.log'}")
+    try:
+        if p.resolve().parent != d:
+            return None
+    except OSError:
+        return None
+    return p
+
+
 def tail_payload(project_dir: str | Path, lines: int = DEFAULT_TAIL_LINES,
-                 events: bool = False) -> dict:
+                 events: bool = False, stem: str | None = None) -> dict:
     """Last N lines of the in-flight turn log (or the most recent) — the
-    same resolution as `tagteam tail --no-follow`."""
+    same resolution as `tagteam tail --no-follow`. Phase 43: `stem=` reads
+    that turn's log only (a finished activity row's [log])."""
     root = Path(project_dir)
     lines = max(1, min(int(lines or DEFAULT_TAIL_LINES), MAX_TAIL_LINES))
     inflight = h.read_inflight(root)
+    if stem is not None:
+        target = turn_log_path(root, stem, events)
+        if target is None or not target.exists():
+            return {"path": None, "lines": [], "inflight": bool(inflight and inflight.get("stem") == stem),
+                    "stem": stem, "message": f"no turn log for {stem!r}"}
+        text = h._tail_lines(target, lines)
+        return {"path": str(target), "lines": text.splitlines() if text else [],
+                "inflight": bool(inflight and inflight.get("stem") == stem), "stem": stem, "message": None}
     target = None
     if inflight is not None:
         try:
@@ -702,6 +1099,20 @@ def events_signature(project_dir: str | Path) -> dict:
                 sig["rate_limits_ts"] = conn.execute("SELECT MAX(ts) FROM rate_limits").fetchone()[0]
             except Exception:
                 sig["rate_limits_ts"] = None
+            # Phase 43: a lead-conversation turn starting / ending and a
+            # launch appearing / finalising are changes the page must see.
+            try:
+                sig["conversation_turns"] = list(conn.execute(
+                    "SELECT MAX(id), COALESCE(SUM(status = 'running'),0), MAX(finished_at)"
+                    " FROM conversation_turns").fetchone())
+            except Exception:
+                sig["conversation_turns"] = None
+            try:
+                sig["launches"] = list(conn.execute(
+                    "SELECT MAX(id), COALESCE(SUM(status = 'pending'),0), MAX(updated_at)"
+                    " FROM launches").fetchone())
+            except Exception:
+                sig["launches"] = None
         finally:
             conn.close()
     except Exception:
@@ -716,7 +1127,18 @@ def events_signature(project_dir: str | Path) -> dict:
             alive = bool(isinstance(pid, int) and pid > 0 and procs.pid_alive(pid))
         except Exception:
             alive = None
+        # Phase 43: log growth in LOG_SIGNAL_STEP-byte steps — coarse on
+        # purpose (the running row streams its own lines; the global signal
+        # only has to move while the engine does, not per line).
+        log_step = None
+        try:
+            lp = inflight.get("log_path")
+            if lp:
+                log_step = int(Path(str(lp)).stat().st_size // LOG_SIGNAL_STEP)
+        except (OSError, TypeError, ValueError):
+            log_step = None
         sig["inflight"] = {"stem": inflight.get("stem"), "pid": pid, "alive": alive,
+                           "kind": inflight.get("kind"), "log_step": log_step,
                            "age_s": int(_age_s(inflight.get("started_at")) or 0)}
     # watcher liveness (pidfile pid alive?) — a watcher dying is a change too
     try:

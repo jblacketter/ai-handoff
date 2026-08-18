@@ -1,8 +1,10 @@
 /* Tagteam Cockpit (Phase 34) — plain JS, no framework, no build step.
  *
- * Zones: Now strip (state / owed / in-flight / hold / watcher / connection),
- * Needs you (typed cards, one primary action each), Watch (Feed | Diff |
- * Usage | Notes). Live via EventSource(/api/events); polling fallback.
+ * Zones: Now strip (state / owed / in-flight / last outcome / hold / watcher /
+ * connection), Needs you (typed cards, one primary action each), Watch —
+ * the Cycle region (Phase 43: Lead | Reviewer lanes + the Activity log of
+ * every agent turn) over the tabs (Lead | Feed | Diff | Usage | Notes).
+ * Live via EventSource(/api/events); polling fallback.
  * Every control: pending → server {ok, message} as a toast; final actions
  * confirm with the exact CLI line the server will run (dry_run).
  */
@@ -160,16 +162,23 @@
       owed.textContent = 'no turn owed';
     }
 
+    // Phase 43: the in-flight chip names the KIND of turn (a lead
+    // conversation is not a cycle turn); the last chip names how the
+    // previous turn ended — one vocabulary (OUTCOME_LABEL) everywhere.
     var inf = $('chip-inflight');
     if (n.inflight) {
       inf.classList.remove('hidden');
-      inf.innerHTML = '<span class="pulse"></span> in flight: <b>' + esc(n.inflight.agent || n.inflight.provider) + '</b> (' + esc(n.inflight.role) + ') · ' + esc(fmtAge(n.inflight.age_s)) +
-        (n.inflight.pid_alive === false ? ' · <span class="muted">process gone</span>' : '');
-      $('btn-cancel-turn').classList.toggle('hidden', !n.inflight);
+      inf.innerHTML = inflightChipHTML(n);
     } else {
       inf.classList.add('hidden');
-      $('btn-cancel-turn').classList.add('hidden');
     }
+    var lastc = $('chip-last');
+    if (n.last_turn) {
+      lastc.classList.remove('hidden');
+      lastc.className = 'chip' + (OUTCOME_BAD[n.last_turn.status] ? ' warn' : ' ok');
+      lastc.textContent = lastTurnText(n.last_turn);
+      lastc.title = 'last agent turn: ' + kindLabel(n.last_turn) + ' · ' + outcomeLabel(n.last_turn.status) + (n.last_turn.ended_at ? ' · ' + fmtTs(n.last_turn.ended_at) : '');
+    } else lastc.classList.add('hidden');
 
     var pz = $('chip-paused');
     if (n.paused) {
@@ -222,7 +231,7 @@
     else notes.classList.add('hidden');
     var nc = $('notes-count'); nc.textContent = n.pending_notes ? String(n.pending_notes) : '';
 
-    if (!$('tail-drawer').classList.contains('hidden')) loadTail();
+    renderCycle(n);
     renderNeeds();
   }
 
@@ -242,26 +251,8 @@
     if (NOW && NOW.paused) act(btn, '/api/resume', {});
     else act(btn, '/api/pause', { reason: 'paused from the cockpit' });
   });
-  $('btn-tail').addEventListener('click', function () {
-    var d = $('tail-drawer'); var open = d.classList.toggle('hidden');
-    this.classList.toggle('on', !open);
-    if (!open) loadTail();
-  });
-  function loadTail() {
-    getJSON('/api/tail?lines=60').then(function (r) {
-      var b = r.body || {};
-      $('tail-title').textContent = b.path ? (b.inflight ? 'tagteam tail  ·  ' : 'tagteam tail --no-follow  ·  ') + b.path.split('/').slice(-1)[0] : 'tagteam tail';
-      $('tail-body').textContent = b.lines && b.lines.length ? b.lines.join('\n') : (b.message || '(empty)');
-      var pre = $('tail-body'); pre.scrollTop = pre.scrollHeight;
-    });
-  }
-  $('btn-cancel-turn').addEventListener('click', function () {
-    var inf = NOW && NOW.inflight;
-    act(this, '/api/cancel-turn', {}, { confirm: {
-      title: 'Cancel the in-flight turn?',
-      body: inf ? ('Kills ' + (inf.agent || inf.provider) + ' (' + inf.role + ', pid ' + inf.pid + '); the engine records outcome "cancelled" and pauses dispatch.') : ''
-    } });
-  });
+  // (Phase 43: the tail drawer is gone — the running Activity row streams
+  // the same log, and Cancel lives on that row.)
 
   // ---------- Needs you ----------
   function briefSections(md) {
@@ -377,7 +368,8 @@
 
     // Phase 37: the Start card — renders the exact launch intent, only when
     // there is one. Headless is offered only when the two-role config validates.
-    if (START && START.intent) {
+    var launchPending = n.launch && n.launch.status === 'pending';
+    if (START && START.intent && !launchPending) {
       var it = START.intent;
       if (it.command) {
         var kindLabel = it.type === 'impl' ? 'implementation' : 'plan';
@@ -388,6 +380,13 @@
         if (!(START.headless && START.headless.ok)) {
           var why = el('div', 'muted small', 'Start headless is unavailable: ' + ((START.headless && START.headless.errors) || []).join('; '));
           sbody.appendChild(why);
+        }
+        // Phase 43: a launch that failed for THIS intent says so under the card
+        // (the Start card is back because nothing started; the row in the
+        // Activity log carries the log path).
+        if (n.launch && n.launch.status === 'failed') {
+          var lf = el('div', 'inline-error', 'Last launch failed' + (n.launch.finished_at ? ' ' + fmtTs(n.launch.finished_at) : '') + ': ' + (n.launch.error || 'unknown') + (n.launch.log_path ? '\nlog: ' + n.launch.log_path : ''));
+          sbody.appendChild(lf);
         }
         scard.appendChild(sbody);
         var srow = el('div', 'row');
@@ -460,8 +459,9 @@
     $('needs-empty').classList.toggle('hidden', cards > 0);
     if (!cards) {
       var eb = $('needs-empty-body');
-      if (!st.phase) eb.textContent = (START && START.intent && START.intent.reason) ? START.intent.reason : 'No active cycle.';
-      else if (n.owed) eb.innerHTML = esc(n.owed.agent || n.owed.role) + ' is on ' + esc(st.phase) + ' ' + esc(st.type) + ' r' + esc(st.round) + ' (' + esc(fmtAge(n.owed.age_s)) + ')' + (n.inflight ? ' — in flight now' : '') + '. Watch the <button class="link-btn" data-tab-link="feed">Feed</button>.';
+      if (launchPending) eb.textContent = 'Starting ' + (n.launch.phase || '') + ' ' + (n.launch.type || '') + ' — the lead is running ' + (n.launch.command || 'the first command') + ' (' + fmtAge(n.launch.age_s) + '). Watch the Cycle region.';
+      else if (!st.phase) eb.textContent = (START && START.intent && START.intent.reason) ? START.intent.reason : 'No active cycle.';
+      else if (n.owed) eb.innerHTML = esc(n.owed.agent || n.owed.role) + ' is on ' + esc(st.phase) + ' ' + esc(st.type) + ' r' + esc(st.round) + ' (' + esc(fmtAge(n.owed.age_s)) + ')' + (n.inflight ? ' — ' + esc(inflightKind(n)) + ' running now' : '') + '. Watch the Cycle region and the <button class="link-btn" data-tab-link="feed">Feed</button>.';
       else if (st.status === 'done') eb.textContent = st.phase + ' ' + st.type + ' is ' + (st.result || 'done') + '. ' + ((START && START.intent && START.intent.reason) ? START.intent.reason : '');
       else eb.textContent = 'Nothing is owed right now.';
       var lb = eb.querySelector('[data-tab-link]'); if (lb) lb.addEventListener('click', function () { showTab('feed'); });
@@ -707,7 +707,7 @@
       return p.then(function () { return getJSON('/api/start').then(function (sr) { START = sr.ok ? sr.body : null; }).catch(function () { START = null; }); }).then(function () {
         renderNow(n);
         var t = activeTab();
-        var ps = [loadFeed()];
+        var ps = [loadFeed(), loadActivity()];
         if (t === 'lead') ps.push(loadLead(false));
         if (t === 'notes' || notesLoaded) ps.push(loadNotes());
         if (t === 'usage' && usageLoaded) ps.push(loadUsage());
@@ -723,8 +723,342 @@
     });
   }
 
+  // ---------- Phase 43: Cycle region + Activity log (text nodes only — the page holds the POST token) ----------
+  // One outcome vocabulary for the strip, the lanes, the rows and the cards.
+  var OUTCOME_LABEL = { running: 'running', finished: 'finished', cancelled: 'cancelled', failed: 'failed', timed_out: 'timed out', process_gone: 'process gone', orphaned: 'orphaned' };
+  var OUTCOME_BAD = { cancelled: true, failed: true, timed_out: true, process_gone: true, orphaned: true };
+  function outcomeLabel(s) { return OUTCOME_LABEL[s] || String(s || '?'); }
+  function isRunning(it) { return it && (it.status === 'running' || it.status === 'process_gone'); }
+  function kindLabel(it) {
+    if (!it) return '';
+    var r = (it.round != null) ? ' r' + it.round : '';
+    switch (it.kind) {
+      case 'cycle': return 'cycle turn' + r;
+      case 'conversation': return 'conversation' + (it.ref && it.ref.turn != null ? ' #' + it.ref.turn : '');
+      case 'gate': return 'gate' + r;
+      case 'panel': return 'panel' + r;
+      case 'panel_lens': return 'panel lens' + (it.detail ? ' ' + it.detail : '') + r;
+      case 'briefer': return 'brief' + r;
+      case 'launch': return 'launch';
+      default: return (it.kind || 'turn') + r;
+    }
+  }
+  function inflightKind(n) {
+    var k = (n && n.turn_kind) || 'cycle'; var inf = (n && n.inflight) || {};
+    if (k === 'cycle') return 'cycle turn' + (inf.round != null ? ' r' + inf.round : '');
+    if (k === 'conversation') return 'lead conversation';
+    if (k === 'panel') return 'panel lens';
+    if (k === 'briefer') return 'brief';
+    return k;
+  }
+  function inflightChipHTML(n) {
+    var inf = n.inflight;
+    return '<span class="pulse"></span> in flight: <b>' + esc(inf.agent || inf.provider || '?') + '</b> · ' + esc(inf.role || '') + ' · ' + esc(inflightKind(n)) + ' · ' + esc(fmtAge(inf.age_s)) +
+      (inf.pid_alive === false ? ' · <span class="muted">' + esc(OUTCOME_LABEL.process_gone) + '</span>' : '');
+  }
+  function agoText(ts) {
+    if (!ts) return '';
+    var d = new Date(ts); if (isNaN(d.getTime())) return '';
+    return fmtAge(Math.round((Date.now() - d.getTime()) / 1000)) + ' ago';
+  }
+  function lastTurnText(lt) {
+    return 'last: ' + (lt.role || '') + ' ' + kindLabel(lt) + ' ' + outcomeLabel(lt.status) + (lt.ended_at ? ' ' + agoText(lt.ended_at) : '');
+  }
+
+  // Shared EventSource registry: one connection per resource, any number
+  // of named consumers (the Lead panel and an Activity row both read a
+  // conversation stream; the running Activity row reads a turn-log stream).
+  var STREAMS = {};   // key -> {es, path, handlers: {type: {name: fn}}, buffer: [{type, data}]}
+  var STREAM_BUFFER_MAX = 5000;
+  function stream(key, path) {
+    var s = STREAMS[key];
+    if (s) return s;
+    if (!window.EventSource) return null;
+    var es; try { es = new EventSource(url(path)); } catch (e) { return null; }
+    s = STREAMS[key] = { es: es, path: path, handlers: {}, buffer: [] };
+    ['line', 'end'].forEach(function (t) {
+      es.addEventListener(t, function (ev) {
+        var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+        // buffered so a consumer that joins after the replay still gets it
+        s.buffer.push({ type: t, data: d }); if (s.buffer.length > STREAM_BUFFER_MAX) s.buffer.shift();
+        var hs = s.handlers[t] || {};
+        Object.keys(hs).forEach(function (name) { try { hs[name](d); } catch (e2) { console.error('[cockpit] stream handler', name, e2); } });
+      });
+    });
+    es.addEventListener('error', function () { /* EventSource reconnects with Last-Event-ID */ });
+    return s;
+  }
+  function onStream(key, path, name, handlers) {
+    var s = stream(key, path); if (!s) return null;
+    var fresh = Object.keys(handlers).filter(function (t) { return !(s.handlers[t] && s.handlers[t][name]); });
+    Object.keys(handlers).forEach(function (t) { (s.handlers[t] = s.handlers[t] || {})[name] = handlers[t]; });
+    // late joiner: replay what this stream already delivered
+    s.buffer.forEach(function (b) { if (fresh.indexOf(b.type) >= 0) { try { handlers[b.type](b.data); } catch (e) { /* ignore */ } } });
+    return s;
+  }
+  function offStream(key, name) {
+    var s = STREAMS[key]; if (!s) return;
+    var left = 0;
+    Object.keys(s.handlers).forEach(function (t) { delete s.handlers[t][name]; left += Object.keys(s.handlers[t]).length; });
+    if (!left) { try { s.es.close(); } catch (e) { /* ignore */ } delete STREAMS[key]; }
+  }
+  function closeStream(key) { var s = STREAMS[key]; if (!s) return; try { s.es.close(); } catch (e) { /* ignore */ } delete STREAMS[key]; }
+
+  // ---- Cycle region: two lanes + the token + the status line ----
+  function renderCycle(n) {
+    var st = n.state || {}; var reg = $('cycle');
+    var launch = n.launch || null; var pending = !!(launch && launch.status === 'pending');
+    // present while a cycle exists, a launch is pending, a turn is in flight,
+    // or there is any recorded activity (what happened last never disappears)
+    var show = !!(st.phase || pending || n.inflight || ACT.count > 0);
+    reg.classList.toggle('hidden', !show);
+    if (!show) return;
+    var lead = (n.agents && n.agents.lead) || 'lead', rev = (n.agents && n.agents.reviewer) || 'reviewer';
+    $('lane-lead-name').textContent = 'Lead · ' + lead;
+    $('lane-reviewer-name').textContent = 'Reviewer · ' + rev;
+    var owedRole = n.owed && n.owed.role; var inf = n.inflight || null; var infRole = inf && inf.role;
+    var cs = n.cycle && n.cycle.state;
+    function laneText(role) {
+      var running = inf && infRole === role;
+      var onTurn = owedRole === role;
+      if (running) return (onTurn ? 'on turn · ' : '') + (inf.pid_alive === false ? OUTCOME_LABEL.process_gone : 'running ' + inflightKind(n)) + ' · ' + fmtAge(inf.age_s);
+      if (onTurn) return 'on turn · ' + ((n.watcher && n.watcher.running) ? 'waiting for dispatch' : 'no process yet') + ' · owed ' + fmtAge(n.owed.age_s);
+      if (pending && role === 'lead') return 'starting · ' + fmtAge(launch.age_s);
+      if (cs === 'escalated' || cs === 'needs-human') return 'waiting for you';
+      if (st.status === 'done') return 'done';
+      return 'waiting';
+    }
+    ['lead', 'reviewer'].forEach(function (role) {
+      var lane = $('lane-' + role);
+      var running = inf && infRole === role;
+      lane.classList.toggle('on-turn', owedRole === role || (pending && role === 'lead'));
+      lane.classList.toggle('running', !!running && inf.pid_alive !== false);
+      lane.classList.toggle('gone', !!running && inf.pid_alive === false);
+      $('lane-' + role + '-state').textContent = laneText(role);
+    });
+    var tok = $('lane-token');
+    var side = owedRole || (pending ? 'lead' : ((cs === 'escalated' || cs === 'needs-human') ? 'you' : 'none'));
+    tok.className = 'token ' + side;
+    tok.title = side === 'you' ? 'your turn (arbiter)' : side === 'none' ? 'no turn owed' : 'turn: ' + side;
+    // status line
+    var parts = [];
+    if (pending) parts.push('starting: ' + (launch.phase || st.phase || '?') + ' · ' + (launch.type || '') + ' — ' + lead + ' is running ' + (launch.command || '/handoff start') + ' (' + fmtAge(launch.age_s) + ')');
+    if (st.phase) parts.push(st.phase + ' · ' + (st.type || '') + ' · round ' + (st.round != null ? st.round : '?') + (cs && cs !== 'in-progress' ? ' · ' + cs : ''));
+    if (n.owed) parts.push('owed to ' + n.owed.role + ' for ' + fmtAge(n.owed.age_s));
+    if (inf && infRole !== 'lead' && infRole !== 'reviewer') parts.push('running: ' + inflightKind(n) + ' (' + (inf.agent || inf.role || '') + ') · ' + fmtAge(inf.age_s));
+    if (n.paused) parts.push('dispatch on hold');
+    if (n.last_turn) parts.push(lastTurnText(n.last_turn));
+    var line = $('cycle-line'); line.textContent = '';
+    if (!parts.length) line.textContent = '—';
+    parts.forEach(function (t) { line.appendChild(el('span', 'seg', t)); });
+    line.classList.toggle('starting', pending);
+  }
+  function renderCycleAges() {
+    if (!NOW || $('cycle').classList.contains('hidden')) return;
+    renderCycle(NOW);
+    Object.keys(ACT.rows).forEach(function (id) {
+      var rec = ACT.rows[id];
+      if (isRunning(rec.item) && rec.item.age_s != null) { rec.item.age_s += 1; setActStatus(rec); }
+    });
+  }
+
+  // ---- Activity log: rows keyed by item id, patched in place, never wiped ----
+  var ACT = { rows: {}, count: 0 };   // id -> {item, row, lines: [], box, cursor, streamKey, opened}
+  function actSortKey(it) { return (isRunning(it) ? '1' : '0') + '|' + String(it.started_at || '') + '|' + String(it.id || ''); }
+  function loadActivity() {
+    return getJSON('/api/activity').then(function (r) {
+      if (!r.ok) return;
+      var b = r.body || {}; var items = b.items || [];
+      var list = $('activity');
+      var seen = {};
+      var hadNone = ACT.count === 0;
+      ACT.count = items.length;
+      items.forEach(function (it) { seen[it.id] = true; upsertActivity(it, list); });
+      if (hadNone && items.length && NOW) renderCycle(NOW);
+      // A running row whose record vanished (marker gone, nothing recorded)
+      // is not "running" any more and not "finished" either — say so.
+      Object.keys(ACT.rows).forEach(function (id) {
+        var rec = ACT.rows[id];
+        if (!seen[id] && isRunning(rec.item) && !rec.lost) {
+          rec.lost = true; rec.item.status = 'orphaned'; rec.item.detail = (rec.item.detail ? rec.item.detail + ' · ' : '') + 'no outcome recorded';
+          patchActRow(rec);          // its stream ends by itself once the log is drained
+        }
+      });
+      $('activity-empty').classList.toggle('hidden', !!list.firstChild);
+      $('activity-more').classList.toggle('hidden', !b.truncated);
+      $('activity-meta').textContent = items.length ? (items.length + ' turn' + (items.length === 1 ? '' : 's') + (b.truncated ? ' (newest ' + b.limit + ')' : '')) : '';
+    }).catch(function (e) { console.error('[cockpit] activity failed', e); });
+  }
+  function upsertActivity(it, list) {
+    var rec = ACT.rows[it.id];
+    if (!rec) {
+      rec = ACT.rows[it.id] = { item: it, lines: [], cursor: null, streamKey: null, opened: false };
+      buildActRow(rec);
+      insertActRow(list, rec);
+    } else {
+      var wasRunning = isRunning(rec.item);
+      rec.item = it;
+      patchActRow(rec);
+      if (wasRunning && !isRunning(it)) {
+        // finished: keep the lines on screen and keep the stream OPEN — the
+        // record can land before the log's last lines are drained; the
+        // stream closes itself on its `end` (marker gone + file drained).
+        // Nothing here is rebuilt.
+      } else if (!wasRunning && isRunning(it)) {
+        insertActRow(list, rec);   // re-sort: running rows sit on top
+      }
+    }
+    if (isRunning(it)) { openActLines(rec, true); attachActStream(rec); }
+  }
+  function insertActRow(list, rec) {
+    var key = actSortKey(rec.item); rec.row.dataset.key = key;
+    var kids = list.children, before = null;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k === rec.row) continue;
+      if ((k.dataset.key || '') < key) { before = k; break; }
+    }
+    if (before) list.insertBefore(rec.row, before); else list.appendChild(rec.row);
+  }
+  function actCancel(rec) {
+    var it = rec.item;
+    if (it.kind === 'conversation' && it.ref && it.ref.conversation) {
+      act(rec.cancelBtn, '/api/lead/' + encodeURIComponent(it.ref.conversation) + '/cancel', {}, { confirm: { title: 'Cancel the lead\'s turn?', body: 'Kills the running agent process (identity-checked); the turn is recorded as cancelled.' } });
+    } else {
+      act(rec.cancelBtn, '/api/cancel-turn', {}, { confirm: { title: 'Cancel the in-flight turn?', body: 'Kills ' + (it.agent || it.role || 'the agent') + ' (' + kindLabel(it) + '); the engine records the outcome "cancelled" and pauses dispatch.' } });
+    }
+  }
+  function buildActRow(rec) {
+    var it = rec.item;
+    var row = el('div', 'act-row'); row.dataset.id = it.id;
+    var head = el('div', 'act-head');
+    rec.dot = el('span', 'dot'); head.appendChild(rec.dot);
+    rec.tsEl = el('span', 'ts'); head.appendChild(rec.tsEl);
+    rec.roleEl = el('span', 'tag role'); head.appendChild(rec.roleEl);
+    rec.agentEl = el('span', 'agent'); head.appendChild(rec.agentEl);
+    rec.kindEl = el('span', 'kind'); head.appendChild(rec.kindEl);
+    rec.statusEl = el('span', 'status'); head.appendChild(rec.statusEl);
+    head.appendChild(el('span', 'spacer'));
+    rec.cancelBtn = el('button', 'link-btn danger hidden', 'cancel'); rec.cancelBtn.type = 'button'; rec.cancelBtn.title = 'cancel this turn';
+    rec.cancelBtn.addEventListener('click', function () { actCancel(rec); });
+    head.appendChild(rec.cancelBtn);
+    rec.openBtn = el('button', 'link-btn', 'log'); rec.openBtn.type = 'button';
+    rec.openBtn.addEventListener('click', function () { toggleActLines(rec); });
+    head.appendChild(rec.openBtn);
+    row.appendChild(head);
+    rec.detailEl = el('div', 'act-detail muted hidden'); row.appendChild(rec.detailEl);
+    rec.box = el('div', 'act-lines hidden'); row.appendChild(rec.box);
+    rec.row = row;
+    patchActRow(rec);
+  }
+  function setActStatus(rec) {
+    var it = rec.item;
+    var txt = outcomeLabel(it.status);
+    if (isRunning(it)) txt += ' · ' + fmtAge(it.age_s);
+    else if (it.duration_ms != null) txt += ' · ' + fmtAge(Math.round(it.duration_ms / 1000));
+    rec.statusEl.textContent = txt;
+  }
+  function patchActRow(rec) {
+    var it = rec.item;
+    rec.row.className = 'act-row k-' + (it.kind || 'turn') + ' s-' + (it.status || 'unknown') + ' r-' + (it.role || 'none');
+    rec.tsEl.textContent = fmtTs(it.started_at || it.ended_at);
+    rec.roleEl.textContent = it.role || '';
+    rec.agentEl.textContent = it.agent || '';
+    rec.kindEl.textContent = kindLabel(it);
+    setActStatus(rec);
+    rec.detailEl.textContent = (it.kind === 'panel_lens' ? '' : (it.detail || ''));
+    rec.detailEl.classList.toggle('hidden', !rec.detailEl.textContent);
+    rec.cancelBtn.classList.toggle('hidden', !(it.status === 'running'));
+    var isConv = it.kind === 'conversation' || (it.kind === 'launch' && it.ref && it.ref.conversation);
+    rec.openBtn.textContent = rec.box.classList.contains('hidden') ? (isConv ? 'transcript' : 'log') : 'hide';
+    rec.openBtn.classList.toggle('hidden', !(it.ref || rec.lines.length));
+    if (!isRunning(it) && rec.lines.length && !rec.box.classList.contains('hidden')) rec.openBtn.textContent = 'hide';
+  }
+  function appendActLine(rec, text) {
+    rec.lines.push(text);
+    if (rec.lines.length > 2000) { rec.lines.shift(); if (rec.box.firstChild) rec.box.removeChild(rec.box.firstChild); }
+    var line = el('div', /\[tool|tool_use|Bash|Read|Edit|Write|\[tagteam\]/.test(text) ? 'tool' : null, text);
+    var stick = rec.box.scrollTop + rec.box.clientHeight >= rec.box.scrollHeight - 24;
+    rec.box.appendChild(line);
+    if (stick && !rec.hover) rec.box.scrollTop = rec.box.scrollHeight;
+  }
+  function openActLines(rec, auto) {
+    if (auto && rec.userClosed) return;
+    rec.box.classList.remove('hidden'); rec.opened = true;
+    rec.openBtn.textContent = 'hide';
+    if (!rec.hoverBound) {
+      rec.hoverBound = true;
+      rec.box.addEventListener('mouseenter', function () { rec.hover = true; });
+      rec.box.addEventListener('mouseleave', function () { rec.hover = false; });
+    }
+    if (!rec.lines.length && !isRunning(rec.item)) fillActLinesFromRecord(rec);
+  }
+  function toggleActLines(rec) {
+    var it = rec.item;
+    var isConv = it.kind === 'conversation' || (it.kind === 'launch' && it.ref && it.ref.conversation);
+    if (isConv && !rec.lines.length && !isRunning(it)) {
+      // a finished conversation turn: its transcript lives in the Lead panel
+      if (it.ref && it.ref.conversation) { LEAD.current = it.ref.conversation; try { localStorage.setItem('tagteam.cockpit.lead', LEAD.current); } catch (e) { /* ignore */ } }
+      showTab('lead'); loadLead(true).then(function () { focusLeadTurn(it.ref && it.ref.turn); });
+      return;
+    }
+    if (rec.box.classList.contains('hidden')) { rec.userClosed = false; openActLines(rec, false); }
+    else { rec.box.classList.add('hidden'); rec.userClosed = true; rec.openBtn.textContent = isConv ? 'transcript' : 'log'; }
+  }
+  function fillActLinesFromRecord(rec) {
+    var it = rec.item;
+    if (!it.stem) { appendActLine(rec, '(no log recorded for this turn)'); return; }
+    getJSON('/api/tail?stem=' + encodeURIComponent(it.stem) + '&lines=200').then(function (r) {
+      var b = r.body || {};
+      if (rec.lines.length) return;
+      if (b.lines && b.lines.length) b.lines.forEach(function (l) { appendActLine(rec, l); });
+      else appendActLine(rec, b.message || '(empty log)');
+      rec.box.scrollTop = rec.box.scrollHeight;
+    });
+  }
+  function attachActStream(rec) {
+    var it = rec.item;
+    if (rec.streamKey) return;
+    if (it.kind === 'conversation' && it.ref && it.ref.conversation) {
+      var cid = it.ref.conversation, n = it.ref.turn;
+      rec.streamKey = 'lead:' + cid;
+      onStream(rec.streamKey, leadStreamPath(cid), 'act:' + it.id, {
+        line: function (d) { if (d.turn === n) appendActLine(rec, d.text); },
+        end: function (d) { if (d.turn === n) { detachActStream(rec); refreshAll('activity-end'); } }
+      });
+      return;
+    }
+    if (!it.stem) return;
+    rec.streamKey = 'log:' + it.stem;
+    var after = rec.cursor != null ? '?after=' + encodeURIComponent(rec.cursor) : '';
+    onStream(rec.streamKey, '/api/activity/log/' + encodeURIComponent(it.stem) + '/events' + after, 'act:' + it.id, {
+      line: function (d) { rec.cursor = d.id; appendActLine(rec, d.text); },
+      end: function () { detachActStream(rec); closeStream('log:' + it.stem); refreshAll('activity-end'); }
+    });
+  }
+  function detachActStream(rec) {
+    if (!rec.streamKey) return;
+    offStream(rec.streamKey, 'act:' + rec.item.id);
+    rec.streamKey = null;
+    patchActRow(rec);
+  }
+  function focusRunningActivity() {
+    var ids = Object.keys(ACT.rows).filter(function (id) { return isRunning(ACT.rows[id].item); });
+    var rec = ids.length ? ACT.rows[ids[0]] : null;
+    var target = rec ? rec.row : $('cycle');
+    try { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { target.scrollIntoView(); }
+    if (rec) { rec.row.classList.add('flash'); setTimeout(function () { rec.row.classList.remove('flash'); }, 1600); }
+  }
+  function focusLeadTurn(n) {
+    if (n == null) return;
+    var m = $('lead-transcript').querySelector('.lead-msg[data-turn="' + String(n) + '"]');
+    if (m) { try { m.scrollIntoView({ block: 'center' }); } catch (e) { /* ignore */ } m.classList.add('flash'); setTimeout(function () { m.classList.remove('flash'); }, 1600); }
+  }
+
   // ---------- Phase 37: Lead panel (text nodes only — the page holds the POST token) ----------
-  var LEAD = { list: [], current: null, conv: null, es: null, cursor: {}, sending: false, sentAt: null, timer: null };
+  var LEAD = { list: [], current: null, conv: null, streamKey: null, cursor: {}, lines: {}, sending: false, sentAt: null, timer: null };
+  function leadStreamPath(cid) { return '/api/lead/' + encodeURIComponent(cid) + '/events' + (LEAD.cursor[cid] ? '?after=' + encodeURIComponent(LEAD.cursor[cid]) : ''); }
+  function leadLines(cid, n) { var c = LEAD.lines[cid] = LEAD.lines[cid] || {}; return (c[n] = c[n] || []); }
   try { LEAD.current = localStorage.getItem('tagteam.cockpit.lead') || null; } catch (e) { /* ignore */ }
 
   function leadStatus(text, cls) { var st = $('lead-status'); st.textContent = text || ''; st.className = 'lead-status muted small' + (cls ? ' ' + cls : ''); }
@@ -746,7 +1080,9 @@
       renderLeadGate();
       if (LEAD.current) return loadConversation(LEAD.current, force);
       $('lead-transcript').innerHTML = ''; $('lead-empty').classList.remove('hidden');
-      leadStatus(LEAD.cfg.ok ? 'New conversation with ' + (LEAD.cfg.agent || 'the lead') + ' (' + (LEAD.cfg.provider || '?') + ') — your first message starts it.' : '');
+      var busyElsewhere = LEAD.slot && LEAD.slot.held && LEAD.slot.kind !== 'conversation';   // keep the gate line (Phase 43)
+      if (LEAD.cfg.ok && !busyElsewhere) leadStatus('New conversation with ' + (LEAD.cfg.agent || 'the lead') + ' (' + (LEAD.cfg.provider || '?') + ') — your first message starts it.');
+      else if (!LEAD.cfg.ok) leadStatus('');
     }).catch(function (e) { leadStatus('Lead panel unavailable: ' + e, 'error'); });
   }
 
@@ -759,9 +1095,16 @@
       return;
     }
     if (slot.held && slot.kind !== 'conversation') {
+      // Phase 43: a cycle turn is a different thing from this conversation —
+      // name it, and point at where its activity is (the Cycle region).
       send.disabled = true; ta.disabled = false;
       var st = $('lead-status'); st.textContent = ''; st.className = 'lead-status muted small busy';
-      st.appendChild(document.createTextNode('The lead is busy on its cycle turn' + (slot.round ? ' (round ' + slot.round + ')' : '') + ' — wait, or '));
+      var agents = (NOW && NOW.agents) || {};
+      var who = slot.role === 'reviewer' ? 'The reviewer (' + (agents.reviewer || 'reviewer') + ')' : (cfg.agent || agents.lead || 'The lead');
+      var sentence = (slot.kind === 'gate') ? 'The gate is running' : (slot.kind === 'panel') ? 'A panel lens is running' : (slot.kind === 'briefer') ? 'The briefer is running' : who + ' is on its cycle turn';
+      st.appendChild(document.createTextNode(sentence + (slot.round ? ' (round ' + slot.round + ')' : '') + ' — '));
+      var see = el('button', 'link-btn', 'see Cycle activity'); see.type = 'button'; see.addEventListener('click', focusRunningActivity);
+      st.appendChild(see); st.appendChild(document.createTextNode(', wait, or '));
       var lnk = el('button', 'link-btn', 'interject instead'); lnk.type = 'button'; lnk.addEventListener('click', function () { showTab('notes'); });
       st.appendChild(lnk); st.appendChild(document.createTextNode('. Talking is allowed while dispatch is paused.'));
       return;
@@ -784,6 +1127,11 @@
     return m;
   }
 
+  function linesBox(lines) {
+    var live = el('div', 'live'); live.dataset.live = '1';
+    lines.forEach(function (text) { live.appendChild(el('div', /\[tool|tool_use|Bash|Read|Edit|Write|\[tagteam\]/.test(text) ? 'tool' : null, text)); });
+    return live;
+  }
   function renderConversation(conv) {
     var wrap = $('lead-transcript'); wrap.innerHTML = '';
     var turns = conv.turns || [];
@@ -795,9 +1143,19 @@
       var head = el('div', 'who'); head.appendChild(el('span', null, agent)); head.appendChild(el('span', 'spacer'));
       head.appendChild(el('span', null, t.status === 'running' ? 'replying…' : (t.continuity || '') + (t.finished_at ? ' · ' + fmtTs(t.finished_at) : '')));
       m.appendChild(head);
-      if (t.status === 'running') { var live = el('div', 'live'); live.dataset.live = '1'; m.appendChild(live); }
-      else if (t.status === 'ok') { var b = el('div', 'body'); b.textContent = t.reply || '(no text reply)'; m.appendChild(b); }
-      else { var f = el('div', 'fail'); f.textContent = t.status + (t.error ? ' — ' + t.error : '') + (t.log_path ? '\nlog: ' + t.log_path : ''); m.appendChild(f); }
+      // Phase 43: the streamed activity lines are KEPT — a re-render mid-turn
+      // refills the live box, and a finished turn keeps them under a
+      // collapsed disclosure beneath the reply (nothing collapses away).
+      var kept = leadLines(conv.id, t.n);
+      if (t.status === 'running') { var live = linesBox(kept); m.appendChild(live); live.scrollTop = live.scrollHeight; }
+      else {
+        if (t.status === 'ok') { var b = el('div', 'body'); b.textContent = t.reply || '(no text reply)'; m.appendChild(b); }
+        else { var f = el('div', 'fail'); f.textContent = outcomeLabel(t.status) + (t.error ? ' — ' + t.error : '') + (t.log_path ? '\nlog: ' + t.log_path : ''); m.appendChild(f); }
+        if (kept.length) {
+          var det = el('details', 'activity'); det.appendChild(el('summary', null, 'activity (' + kept.length + ' line' + (kept.length === 1 ? '' : 's') + ')'));
+          det.appendChild(linesBox(kept)); m.appendChild(det);
+        }
+      }
       wrap.appendChild(m);
     });
     wrap.scrollTop = wrap.scrollHeight;
@@ -819,29 +1177,27 @@
   }
 
   function subscribeLead(cid) {
-    if (LEAD.es && LEAD.es._cid === cid) return;
-    if (LEAD.es) { try { LEAD.es.close(); } catch (e) { /* ignore */ } LEAD.es = null; }
-    if (!window.EventSource) return;
-    var after = LEAD.cursor[cid] ? '?after=' + encodeURIComponent(LEAD.cursor[cid]) : '';
-    var es;
-    try { es = new EventSource(url('/api/lead/' + encodeURIComponent(cid) + '/events' + after)); } catch (e) { return; }
-    es._cid = cid; LEAD.es = es;
-    es.addEventListener('line', function (ev) {
-      var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
-      LEAD.cursor[cid] = d.id;
-      var box = $('lead-transcript').querySelector('.lead-msg[data-turn="' + String(d.turn) + '"] .live');
-      if (!box) return;
-      var line = el('div', /\[tool|tool_use|Bash|Read|Edit|Write/.test(d.text) ? 'tool' : null, d.text);
-      box.appendChild(line); box.scrollTop = box.scrollHeight;
+    var key = 'lead:' + cid;
+    if (LEAD.streamKey === key) return;
+    if (LEAD.streamKey) offStream(LEAD.streamKey, 'lead');
+    LEAD.streamKey = key;
+    // Shared with the Activity row for the same conversation (one connection).
+    onStream(key, leadStreamPath(cid), 'lead', {
+      line: function (d) {
+        LEAD.cursor[cid] = d.id;
+        var kept = leadLines(cid, d.turn); kept.push(d.text);
+        var box = $('lead-transcript').querySelector('.lead-msg[data-turn="' + String(d.turn) + '"] .live');
+        if (!box) return;
+        var line = el('div', /\[tool|tool_use|Bash|Read|Edit|Write|\[tagteam\]/.test(d.text) ? 'tool' : null, d.text);
+        box.appendChild(line); box.scrollTop = box.scrollHeight;
+      },
+      end: function (d) {
+        LEAD.cursor[cid] = d.id;
+        LEAD.sending = false; LEAD.sentAt = null;
+        $('lead-dot').classList.add('hidden');
+        loadConversation(cid, true).then(function () { refreshAll('lead-turn'); });
+      }
     });
-    es.addEventListener('end', function (ev) {
-      var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
-      LEAD.cursor[cid] = d.id;
-      LEAD.sending = false; LEAD.sentAt = null;
-      $('lead-dot').classList.add('hidden');
-      loadConversation(cid, true).then(function () { refreshAll('lead-turn'); });
-    });
-    es.addEventListener('error', function () { /* EventSource reconnects with Last-Event-ID */ });
   }
 
   $('lead-select').addEventListener('change', function () {
@@ -946,9 +1302,12 @@
     if (NOW.owed && NOW.owed.age_s != null) NOW.owed.age_s += 1;
     if (NOW.inflight && NOW.inflight.age_s != null) NOW.inflight.age_s += 1;
     if (NOW.paused && NOW.paused.age_s != null) NOW.paused.age_s += 1;
+    if (NOW.launch && NOW.launch.age_s != null) NOW.launch.age_s += 1;
     var owed = $('chip-owed');
     if (NOW.owed) owed.innerHTML = 'turn: <b>' + esc(NOW.owed.role) + '</b>' + (NOW.owed.agent ? ' (' + esc(NOW.owed.agent) + ')' : '') + ' · owed ' + esc(fmtAge(NOW.owed.age_s));
-    if (NOW.inflight) $('chip-inflight').innerHTML = '<span class="pulse"></span> in flight: <b>' + esc(NOW.inflight.agent || NOW.inflight.provider) + '</b> (' + esc(NOW.inflight.role) + ') · ' + esc(fmtAge(NOW.inflight.age_s)) + (NOW.inflight.pid_alive === false ? ' · <span class="muted">process gone</span>' : '');
+    if (NOW.inflight) $('chip-inflight').innerHTML = inflightChipHTML(NOW);
     if (NOW.paused) $('chip-paused').textContent = 'paused ' + fmtAge(NOW.paused.age_s) + (NOW.paused.by ? ' by ' + NOW.paused.by : '');
+    if (NOW.last_turn) $('chip-last').textContent = lastTurnText(NOW.last_turn);
+    renderCycleAges();
   }
 })();

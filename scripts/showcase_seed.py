@@ -11,6 +11,10 @@ round text authored right here (nothing is copied from a real project):
   demo-api   plan cycle ESCALATED at round 3, a decision brief on disk and
              in the DB, a declining per-round usage series  -> Needs you
   demo-web   impl cycle, reviewer turn owed for hours, no watcher -> Waiting · stale
+             (3.7) plus a RUNNING reviewer cycle turn for the Cycle region /
+             Activity log: an in-flight marker over a detached `sleep` (its
+             pid is printed — kill it when done), a turn log that keeps
+             growing for a minute, a passed gate and three finished turns
   demo-docs  impl cycle approved                             -> Quiet
   demo-idle  no cycle yet, roadmap has an open phase, plus a canned Lead
              conversation (two turns)                        -> Start card + Lead panel
@@ -206,6 +210,71 @@ def _seed_conversation(project: Path) -> None:
         conn.close()
 
 
+def _seed_running_turn(project: Path, phase: str, ctype: str) -> dict:
+    """Phase 43 (3.7): a reviewer cycle turn IN FLIGHT — the marker's pid is
+    a detached `sleep 3600` (so liveness is real), its log grows for ~60 s
+    in the background (so the Activity row streams), and the history has a
+    gate pass + three finished turns. Returns {pid, log_path}."""
+    import os
+    import subprocess
+    from tagteam import db, headless as h, procs
+    d = h.turns_dir(project); d.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    conn = db.connect(project_dir=str(project))
+    try:
+        # finished turns for the history (usage rows: the record of a cycle turn)
+        for i, (rnd, role, status, mins) in enumerate([(1, "lead", "ok", 62), (1, "reviewer", "ok", 48),
+                                                       (2, "lead", "ok", 21)]):
+            stem = f"{phase}_{ctype}_r{rnd}_{role}_demo{i}"
+            (d / f"{stem}.log").write_text(
+                f"[tagteam] {_iso(now - timedelta(minutes=mins))} spawning: "
+                f"{'claude -p' if role == 'lead' else 'codex exec'} …\n[{role}] read the round tail\n"
+                f"[{role}] {'edited 3 files, ran the focused tests' if role == 'lead' else 'read the diff, ran tests/test_checkout.py'}\n"
+                f"[tagteam] exit 0\n", encoding="utf-8")
+            db.add_usage(conn, ts=_iso(now - timedelta(minutes=mins - 4)), phase=phase, type=ctype, round=rnd,
+                         role=role, agent=(LEAD if role == "lead" else REVIEWER),
+                         provider=("claude" if role == "lead" else "codex"), status=status, exit_code=0,
+                         duration_ms=240_000, input_tokens=180_000, output_tokens=6_000,
+                         cache_read_tokens=150_000, cache_write_tokens=0, num_turns=1,
+                         log_path=str(d / f"{stem}.log"))
+        gid = db.claim_gate(conn, ts=_iso(now - timedelta(minutes=16)), phase=phase, cycle_type=ctype, round_=2,
+                            submission_seq=3, event_key="demo-gate-r2", kind="auto",
+                            runner_pid=os.getpid(), runner_ident=procs.identity(os.getpid()))[0]
+        (d / f"{phase}_{ctype}_r2_gate_demo.log").write_text(
+            "[gate] .venv/bin/python -m pytest -q\n[gate] 212 passed in 171.4s\n[gate] scope: 6 paths\n[gate] plan-doc ok\n",
+            encoding="utf-8")
+        db.finish_gate(conn, gid, status="pass", ts=_iso(now - timedelta(minutes=13)), duration_s=181.0,
+                       stem=f"{phase}_{ctype}_r2_gate_demo", reason="tests ok (212 passed) · scope 6 paths · plan-doc ok")
+    finally:
+        conn.close()
+    # the running reviewer turn: a live pid + a growing log
+    stem = f"{phase}_{ctype}_r2_reviewer_live"
+    log = d / f"{stem}.log"
+    started = now - timedelta(seconds=41)
+    sleeper = subprocess.Popen(["sleep", "3600"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    log.write_text(f"[tagteam] {_iso(started)} spawning: codex exec --json …\n"
+                   f"[tagteam] spawned pid {sleeper.pid}\n[codex] reading the round tail (r2)\n"
+                   f"[codex] tool: git diff --stat main...HEAD\n[codex] tool: sed -n 1,80p tests/test_checkout.py\n",
+                   encoding="utf-8")
+    marker = {"kind": "cycle", "role": "reviewer", "agent": REVIEWER, "provider": "codex",
+              "phase": phase, "type": ctype, "round": 2, "stem": stem, "log_path": str(log),
+              "events_path": str(d / f"{stem}.events.jsonl"), "started_at": _iso(started),
+              "pid": sleeper.pid, "child_ident": procs.identity(sleeper.pid),
+              "watcher_pid": sleeper.pid, "watcher_ident": procs.identity(sleeper.pid),
+              "owner_token": "demo", "by": "seed"}
+    h.inflight_path(project).write_text(json.dumps(marker, indent=2), encoding="utf-8")
+    # keep the log growing for a while (background, detached) so the running row visibly streams
+    grow = ("import time,sys\np=sys.argv[1]\nlines=['[codex] tool: pytest -q tests/test_checkout.py',"
+            "'[codex] 14 passed in 3.2s','[codex] reading src/checkout/validate.py','[codex] tool: rg postal src/',"
+            "'[codex] drafting the review: postal-code normalisation looks right; checking the CA case',"
+            "'[codex] tool: python -c \"import checkout\"']\n"
+            "for i in range(60):\n    time.sleep(3)\n    open(p,'a').write(lines[i%len(lines)]+'\\n')\n")
+    subprocess.Popen([sys.executable, "-c", grow, str(log)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    return {"pid": sleeper.pid, "log_path": str(log)}
+
+
 def seed(root: Path) -> dict:
     if root.exists():
         raise SystemExit(f"seed: {root} already exists — pick a fresh directory")
@@ -239,6 +308,7 @@ def seed(root: Path) -> dict:
 
     _play(projects["demo-web"], "checkout-validation", "impl", WEB_ROUNDS)
     _age_state(projects["demo-web"], hours=5.5)
+    running = _seed_running_turn(projects["demo-web"], "checkout-validation", "impl")
 
     _play(projects["demo-docs"], "docs-build", "impl", DOCS_ROUNDS)
     _age_state(projects["demo-docs"], hours=30)
@@ -251,7 +321,8 @@ def seed(root: Path) -> dict:
 
     reg = root / "registry.json"
     reg.write_text(json.dumps([str(p.resolve()) for p in projects.values()], indent=2) + "\n", encoding="utf-8")
-    return {"registry": str(reg), "projects": {k: str(v) for k, v in projects.items()}}
+    return {"registry": str(reg), "projects": {k: str(v) for k, v in projects.items()},
+            "running_turn": running}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(info, indent=2))
     print()
     print("cockpit:  tagteam serve --theme cockpit --dir", info["projects"]["demo-api"], "--port 8080")
+    print("cycle:    tagteam serve --theme cockpit --dir", info["projects"]["demo-web"], "--port 8082",
+          f"   (running reviewer turn; sleeper pid {info['running_turn']['pid']} — kill it when done)")
     print("hub:      tagteam hub --registry", info["registry"], "--port 8090")
     return 0
 

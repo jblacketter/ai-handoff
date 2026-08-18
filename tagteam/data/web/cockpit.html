@@ -19,26 +19,18 @@
     <div class="now-chips" id="now-chips">
       <span class="chip" id="chip-cycle" title="phase / type / round">—</span>
       <span class="chip" id="chip-owed" title="whose turn, and for how long">—</span>
-      <span class="chip chip-inflight hidden" id="chip-inflight" title="in-flight headless turn">—</span>
+      <span class="chip chip-inflight hidden" id="chip-inflight" title="the agent process running now, and what kind of turn it is">—</span>
+      <span class="chip hidden" id="chip-last" title="the last agent turn and how it ended">—</span>
       <span class="chip chip-hold hidden" id="chip-paused" title="dispatch is on hold">paused</span>
       <span class="chip" id="chip-watcher" title="watcher liveness">—<button class="chip-btn hidden" id="btn-watcher" type="button">Start</button></span>
       <span class="chip hidden" id="chip-gate" title="gatekeeper pre-checks">—</span>
       <span class="chip hidden" id="chip-notes" title="queued interjections">—</span>
     </div>
     <div class="now-actions">
-      <button class="btn btn-toggle" id="btn-tail" title="show the in-flight turn log (tagteam tail)">Tail</button>
       <button class="btn" id="btn-pause" title="tagteam pause / tagteam resume">Pause</button>
       <span class="conn" id="conn" data-mode="connecting"><span class="conn-dot"></span><span id="conn-text">Connecting…</span></span>
       <a class="theme-link" href="/?theme=saloon" title="the Saloon theme">Saloon ↗</a>
     </div>
-  </div>
-  <div class="tail-drawer hidden" id="tail-drawer">
-    <div class="tail-head">
-      <span id="tail-title">tagteam tail --no-follow</span>
-      <span class="spacer"></span>
-      <button class="btn btn-danger btn-small hidden" id="btn-cancel-turn" title="tagteam cancel-turn">Cancel turn</button>
-    </div>
-    <pre class="tail" id="tail-body">—</pre>
   </div>
 </header>
 
@@ -56,6 +48,29 @@
 
   <!-- WATCH: everything else, tabbed -->
   <section class="zone watch" id="watch" aria-label="Watch">
+    <!-- Phase 43: CYCLE region — the running handoff, legible as one thing:
+         two lanes (Lead | Reviewer) with the turn token on the owed side, then
+         the ACTIVITY log — every agent turn, the running one streaming, the
+         finished ones staying with a named outcome. Rows are keyed and
+         patched, never rebuilt. -->
+    <div class="cycle hidden" id="cycle" aria-label="Cycle">
+      <div class="lanes">
+        <div class="lane lead" id="lane-lead">
+          <div class="lane-name" id="lane-lead-name">Lead</div>
+          <div class="lane-state" id="lane-lead-state">—</div>
+        </div>
+        <div class="token" id="lane-token" title="whose turn it is"><span class="token-dot"></span></div>
+        <div class="lane reviewer" id="lane-reviewer">
+          <div class="lane-name" id="lane-reviewer-name">Reviewer</div>
+          <div class="lane-state" id="lane-reviewer-state">—</div>
+        </div>
+      </div>
+      <div class="cycle-line" id="cycle-line">—</div>
+      <div class="activity-head"><span class="activity-title">Activity</span><span class="spacer"></span><span class="muted small" id="activity-meta"></span></div>
+      <div class="activity" id="activity" aria-live="polite"></div>
+      <div class="empty small hidden" id="activity-empty">No agent turns recorded yet for this project.</div>
+      <div class="hint hidden" id="activity-more">Older turns: <code>tagteam tail</code> and <code>.tagteam/turns/</code>.</div>
+    </div>
     <nav class="tabs" role="tablist">
       <button class="tab" data-tab="lead" id="tab-lead" role="tab">Lead <span class="dot hidden" id="lead-dot"></span></button>
       <button class="tab active" data-tab="feed" id="tab-feed" role="tab">Feed</button>
