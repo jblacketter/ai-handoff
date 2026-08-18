@@ -390,7 +390,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ### Phase 45: Cockpit lanes — Lead | Reviewer, each in its own pane (3.8)
 - **Depends on:** Phase 43
-- **Status:** In progress — plan cycle opened 2026-08-17.
+- **Status:** In progress — plan approved round 2 (2026-08-17); implementation on branch `phase-45-cockpit-lanes`.
 - **Description:** replace the shared newest-first Activity log with two panes in the order the loop runs — `<lead> — lead` | `<reviewer> — reviewer` — each a timeline newest at the foot: the lead pane is the chat plus the lead's cycle turns as cards between the messages (composer at the foot); the reviewer pane holds each round's pre-check → review → verdict, streaming in place; the working pane pulses; the token sits between them; tabs shrink to Rounds · Diff · Usage · Notes with the flat "all activity" list as a disclosure. Front-end only; no schema/CLI change.
 - **Plan:** `docs/phases/cockpit-lanes.md`
 - **Source:** `docs/cockpit-issues.md` 2026-08-17 (later): "awkward to scroll up … Lead (Claude) and Reviewer (Codex) should be clearly labeled … since we start with the lead, it's unexpected to have the reviewer up above."
