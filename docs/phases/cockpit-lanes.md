@@ -3,8 +3,8 @@
 ## Status
 - [x] Planning
 - [x] In Review (round 1: Codex — three implementation-contract gaps: the `#tab-lead-name` write, the all-activity support elements, the refresh path for the always-visible lead lane; all specified in round 2)
-- [ ] Approved
-- [ ] Implementation
+- [x] Approved (round 2)
+- [x] Implementation (branch `phase-45-cockpit-lanes`)
 - [ ] Implementation Review
 - [ ] Complete
 
