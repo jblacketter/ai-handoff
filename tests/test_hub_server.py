@@ -285,9 +285,11 @@ class TestStandaloneUnchanged:
             r = s.client.get("/")
             html = r["raw"]
             packaged = (srv._WEB_DIR / "cockpit.html").read_bytes()
+            from tagteam import __version__
             expected = packaged.replace(b'<meta charset="UTF-8">',
-                                        b'<meta charset="UTF-8">\n<meta name="tagteam-token" content="' + s.token.encode() + b'">', 1)
-            assert html == expected                     # only the token meta, no base meta, no URL rewrite
+                                        b'<meta charset="UTF-8">\n<meta name="tagteam-token" content="' + s.token.encode() + b'">'
+                                        b'\n<meta name="tagteam-version" content="' + __version__.encode() + b'">', 1)
+            assert html == expected                     # only the token + version metas, no base meta, no URL rewrite
             assert b"tagteam-base" not in html and b'href="/cockpit.css"' in html
             assert s.client.get("/cockpit.css")["status"] == 200
             assert "The Handoff Saloon" in s.client.get("/?theme=saloon")["raw"].decode()   # Saloon still offered standalone
