@@ -750,7 +750,7 @@ class TestUxPassWords:
                     "Dispatch is on hold", "nothing is dispatching", "In-flight pointer", "Talk to the lead"):
             assert bad not in js and bad not in html, bad
         # and the words that replace them
-        for good in ("is working", "waiting on", "watcher: on", "watcher: off", "Turn on", "Turns are paused",
+        for good in ("is working", "waiting on", "watcher: on", "watcher: off", "Start the watcher", "Turns are paused",
                      "Chat with", "Leave note", "Rounds"):
             assert good in js or good in html, good
 

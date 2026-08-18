@@ -47,7 +47,7 @@ title, with the version; four chips in the arbiter's words (phase · who is work
 `watcher: on/off` with one action · connection); **one Start** on the card that says what it does
 (terminals left the page — `tagteam session start` stays in the CLI); the red badge only for what
 truly needs a human, the Start card an invitation, a quiet one-liner otherwise; "waiting on X but the
-watcher is off" card immediately, with **Turn the watcher on**; the glossary — turn · review · chat ·
+watcher is off" card immediately, with **Start the watcher**; the glossary — turn · review · chat ·
 pre-check · review lens · decision brief; working · done · cancelled · failed · timed out · process
 disappeared · no result recorded; leave a note; Rounds — everywhere; the lead's tab named after the
 lead agent; engine errors translated (`slot busy` → "the lead was already working on something else").
@@ -67,3 +67,12 @@ Reported by Jack starting a new handoff on `github-profile` from the cockpit, wi
 8. Stopping the watcher from the chip while a turn was about to be handed over left the cycle waiting with no runner; the *nothing is dispatching* card appears only after 2 minutes.
 
 Design pass opened on branch `cockpit-ux-pass` (no handoff cycle; arbiter + Claude), evidence above.
+
+## 2026-08-17 (later) — a cancelled chat turn read as a failure with no story
+
+Jack cancelled the chat turn that ran `/handoff start githubio-showcase` (78 s in); the lead had already
+opened the plan cycle, and once the watcher was started Codex reviewed and approved it — but the chat
+showed `cancelled — cancelled by web:jackblacketter log: /…/2.log` and `resumed session`, nothing about
+what stood. Fixed on `cockpit-ux-2`: "Cancelled by you (web:…) at <time>. No reply came — the activity
+below shows what Claude did before that." (log path in the tooltip); "same session"; the watcher's
+button reads **Start the watcher** (card) / **Start** (chip), as Jack asked.
