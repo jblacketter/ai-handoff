@@ -2,8 +2,8 @@
 
 ## Status
 - [x] Planning
-- [ ] In Review
-- [ ] Approved
+- [x] In Review (round 1)
+- [x] Approved (round 1 — Codex: scope + Phase 44 split endorsed)
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
