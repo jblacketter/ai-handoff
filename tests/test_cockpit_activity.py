@@ -573,11 +573,16 @@ class TestSourceGuards:
     def test_html_has_the_cycle_region_and_no_tail_drawer(self):
         html = (WEB / "cockpit.html").read_text(encoding="utf-8")
         for id_ in ("cycle", "lane-lead", "lane-reviewer", "lane-token", "cycle-line", "activity",
-                    "activity-empty", "chip-last", "chip-inflight"):
+                    "activity-empty", "chip-owed", "chip-inflight", "chip-watcher", "now-version", "tab-lead-name"):
             assert f'id="{id_}"' in html, id_
         assert "btn-tail" not in html and "tail-drawer" not in html and "btn-cancel-turn" not in html
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
         assert "btn-tail" not in js and "tail-drawer" not in js
+        # UX pass 2026-08-17: one Start (the cockpit's own engine); no terminals from the page;
+        # the tab for the lead is named after the lead; Feed reads "Rounds"
+        assert "Launch terminals" not in js and "/api/session/start" not in js and "Start headless" not in js
+        assert ">Rounds<" in html and 'id="tab-lead-name"' in html
+        assert 'name="tagteam-version"' not in html          # injected by the server, not shipped
 
     def test_cycle_activity_block_builds_dom_with_text_nodes_only(self):
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
@@ -600,7 +605,7 @@ class TestSourceGuards:
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
         lead_block = js[js.index("Phase 37: Lead panel"):js.index("Live connection: SSE with polling fallback")]
         assert "details" in lead_block and "activity (" in lead_block          # retained lines disclosure
-        assert "see Cycle activity" in lead_block
+        assert "watch it above" in lead_block
         assert "innerHTML" not in lead_block.replace("innerHTML = ''", "").replace("innerHTML=''", "")
 
     def test_css_has_the_lane_and_outcome_styles(self):
@@ -712,7 +717,7 @@ var RESULT = { before: before, after: after, after2: after2, after3: after3,
         assert res["after2"] == ["turn:run2", "turn:new", "turn:old"]   # a running row always sits on top
         assert res["after3"] == ["turn:new", "turn:run2", "turn:old"]   # terminal → running (newer started) moves up
         assert res["sameNode"] is True and res["lines"] == ["line one", "line two"] and res["boxKids"] == 2
-        assert res["oldStatus"].startswith("finished") and res["oldKey"].startswith("0|")
+        assert res["oldStatus"].startswith("done") and res["oldKey"].startswith("0|")
         assert res["rowsInDom"] == 3 and res["count"] == 3
 
     def test_source_guard_reinserts_on_key_change(self):
@@ -721,3 +726,38 @@ var RESULT = { before: before, after: after, after2: after2, after3: after3,
         body = js[start:end]
         assert "actSortKey(it)" in body and "insertActRow(list, rec)" in body, \
             "an existing row must be re-inserted when its sort key changes"
+
+
+class TestUxPassWords:
+    """UX pass 2026-08-17: the page speaks the arbiter's words; the CLI's names
+    live in tooltips and the confirm modal."""
+
+    def test_outcome_labels_are_plain_words(self):
+        js = (WEB / "cockpit.js").read_text(encoding="utf-8")
+        m = re.search(r"var OUTCOME_LABEL = \{([^}]*)\};", js)
+        vals = dict(re.findall(r"(\w+):\s*'([^']*)'", m.group(1)))
+        assert vals == {"running": "working", "finished": "done", "cancelled": "cancelled", "failed": "failed",
+                        "timed_out": "timed out", "process_gone": "process disappeared",
+                        "orphaned": "no result recorded"}
+
+    def test_strip_and_cards_avoid_engine_jargon(self):
+        """User-facing strings in the shipped JS must not use the engine's
+        words for the primary path. (Tooltips / confirm bodies may name the CLI.)"""
+        js = (WEB / "cockpit.js").read_text(encoding="utf-8")
+        html = (WEB / "cockpit.html").read_text(encoding="utf-8")
+        # visible labels that must be gone
+        for bad in ("in flight:", "no turn owed", "· owed ", "owed to ", "Start headless", "no watcher", "Interject</button>",
+                    "Dispatch is on hold", "nothing is dispatching", "In-flight pointer", "Talk to the lead"):
+            assert bad not in js and bad not in html, bad
+        # and the words that replace them
+        for good in ("is working", "waiting on", "watcher: on", "watcher: off", "Turn on", "Turns are paused",
+                     "Chat with", "Leave note", "Rounds"):
+            assert good in js or good in html, good
+
+    def test_version_meta_is_injected_in_cockpit_mode(self, project):
+        from tagteam import __version__
+        with Served(project, mode="cockpit") as s:
+            html = s.client.get("/")["raw"].decode()
+            assert f'<meta name="tagteam-version" content="{__version__}">' in html
+        with Served(project, mode="legacy") as s:
+            assert "tagteam-version" not in s.client.get("/")["raw"].decode()
