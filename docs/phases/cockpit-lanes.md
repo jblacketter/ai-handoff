@@ -6,7 +6,7 @@
 - [x] Approved (round 2)
 - [x] Implementation (branch `phase-45-cockpit-lanes`)
 - [x] Implementation Review (approved round 2, 2026-08-17; round 1: Codex — the no-conversation prompt hid whenever the timeline had a lead cycle card; fixed: the prompt follows the conversation's messages, not the merged timeline; regression added)
-- [ ] Complete (release **3.8.0** via PR #24 after merge)
+- [x] Complete — PR #24 merged; released as **3.8.0** (tag `v3.8.0`, 2026-08-17)
 
 ## Roles
 - Lead: Claude
