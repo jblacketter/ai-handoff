@@ -76,6 +76,10 @@ showed `cancelled — cancelled by web:jackblacketter log: /…/2.log` and `resu
 what stood. Fixed on `cockpit-ux-2`: "Cancelled by you (web:…) at <time>. No reply came — the activity
 below shows what Claude did before that." (log path in the tooltip); "same session"; the watcher's
 button reads **Start the watcher** (card) / **Start** (chip), as Jack asked.
+- *Lanes (Phase 45, `docs/phases/cockpit-lanes.md`, 3.8):* "awkward to scroll up … Lead (Claude) and Reviewer (Codex)
+  should be clearly labeled … since we start with the lead, it's unexpected to have the reviewer up above" →
+  two panes in loop order, `claude — lead` (the chat + its turns) | `codex — reviewer` (pre-check → review →
+  verdict, streaming in place), newest at the foot; the flat list becomes the *all activity* disclosure.
 - *Same session, later:* the turn was not stopped on purpose — the row's red `cancel` link sat beside
   `hide`, and the confirm's buttons read **Cancel / Run** (two readings for a cancel). Fixed on
   `cockpit-ux-2`: a separated red **stop turn** button, confirm buttons **Stop the turn / Keep going**;

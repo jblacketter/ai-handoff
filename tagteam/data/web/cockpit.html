@@ -51,62 +51,62 @@
 
   <!-- WATCH: everything else, tabbed -->
   <section class="zone watch" id="watch" aria-label="Watch">
-    <!-- Phase 43: CYCLE region — the running handoff, legible as one thing:
-         two lanes (Lead | Reviewer) with the turn token on the owed side, then
-         the ACTIVITY log — every agent turn, the running one streaming, the
-         finished ones staying with a named outcome. Rows are keyed and
-         patched, never rebuilt. -->
-    <div class="cycle hidden" id="cycle" aria-label="Cycle">
-      <div class="lanes">
-        <div class="lane lead" id="lane-lead">
+    <!-- Phase 45: LANES — one pane per agent, in the order the loop runs.
+         Left: <lead> — lead: the chat (messages, picker, composer at the foot)
+         merged in time with the lead's cycle-turn cards. Right: <reviewer> —
+         reviewer: each round's pre-check → review → verdict, streaming in
+         place. The token between them says whose turn it is; the working
+         lane pulses. Timelines are keyed and patched, newest at the foot,
+         never rebuilt. -->
+    <div class="lanes" id="lanes" aria-label="Lanes">
+      <section class="lane lead" id="lane-lead" aria-label="Lead">
+        <div class="lane-head">
           <div class="lane-name" id="lane-lead-name">Lead</div>
           <div class="lane-state" id="lane-lead-state">—</div>
+          <span class="spacer"></span>
+          <select id="lead-select" title="conversation"></select>
+          <button class="btn btn-small" id="btn-lead-new" title="start a fresh conversation (new agent session)">New</button>
         </div>
-        <div class="token" id="lane-token" title="whose turn it is"><span class="token-dot"></span></div>
-        <div class="lane reviewer" id="lane-reviewer">
+        <div class="timeline" id="lead-timeline" aria-live="polite"></div>
+        <div class="empty small hidden" id="lead-empty">No messages yet. Brainstorm, plan, or say <code>/handoff start &lt;phase&gt;</code> to begin a phase.</div>
+        <div class="lead-status muted small" id="lead-status">Loading…</div>
+        <form class="lead-form" id="lead-form">
+          <textarea id="lead-text" rows="3" placeholder="Message the lead… (Cmd/Ctrl-Enter to send)"></textarea>
+          <div class="row">
+            <span class="muted small" id="lead-hint">Each message is one turn of the lead's own CLI, with the same permissions as its handoff turns.</span>
+            <span class="spacer"></span>
+            <button class="btn btn-danger btn-small hidden" type="button" id="btn-lead-cancel" title="stop the running turn (tagteam cancel-turn)">Stop turn</button>
+            <button class="btn btn-primary" type="submit" id="btn-lead-send">Send</button>
+          </div>
+        </form>
+      </section>
+      <div class="token" id="lane-token" title="whose turn it is"><span class="token-dot"></span></div>
+      <section class="lane reviewer" id="lane-reviewer" aria-label="Reviewer">
+        <div class="lane-head">
           <div class="lane-name" id="lane-reviewer-name">Reviewer</div>
           <div class="lane-state" id="lane-reviewer-state">—</div>
         </div>
-      </div>
-      <div class="cycle-line" id="cycle-line">—</div>
-      <div class="activity-head"><span class="activity-title">Activity</span><span class="spacer"></span><span class="muted small" id="activity-meta"></span></div>
-      <div class="activity" id="activity" aria-live="polite"></div>
-      <div class="empty small hidden" id="activity-empty">No turns recorded yet for this project.</div>
-      <div class="hint hidden" id="activity-more">Older turns: <code>tagteam tail</code> and <code>.tagteam/turns/</code>.</div>
+        <div class="timeline" id="reviewer-timeline" aria-live="polite"></div>
+        <div class="empty small hidden" id="reviewer-empty">No reviews yet. The reviewer's pre-checks and reviews appear here, round by round.</div>
+      </section>
     </div>
     <nav class="tabs" role="tablist">
-      <button class="tab" data-tab="lead" id="tab-lead" role="tab"><span id="tab-lead-name">Lead</span> <span class="dot hidden" id="lead-dot"></span></button>
       <button class="tab active" data-tab="feed" id="tab-feed" role="tab">Rounds</button>
       <button class="tab" data-tab="diff" id="tab-diff" role="tab">Diff</button>
       <button class="tab" data-tab="usage" id="tab-usage" role="tab">Usage</button>
       <button class="tab" data-tab="notes" id="tab-notes" role="tab">Notes <span class="count" id="notes-count"></span></button>
     </nav>
 
-    <div class="panel" id="panel-lead" role="tabpanel">
-      <div class="panel-head">
-        <span id="lead-title">Chat with the lead</span>
-        <span class="muted small" id="lead-continuity"></span>
-        <span class="spacer"></span>
-        <select id="lead-select" title="conversation"></select>
-        <button class="btn btn-small" id="btn-lead-new" title="start a fresh conversation (new agent session)">New</button>
-      </div>
-      <div class="lead-status muted small" id="lead-status">Loading…</div>
-      <div class="lead-transcript" id="lead-transcript" aria-live="polite"></div>
-      <div class="empty small hidden" id="lead-empty">No messages yet. Brainstorm, plan, or say <code>/handoff start &lt;phase&gt;</code> to begin a phase.</div>
-      <form class="lead-form" id="lead-form">
-        <textarea id="lead-text" rows="3" placeholder="Message the lead… (Cmd/Ctrl-Enter to send)"></textarea>
-        <div class="row">
-          <span class="muted small" id="lead-hint">Each message is one turn of the lead's own CLI, with the same permissions as its handoff turns.</span>
-          <span class="spacer"></span>
-          <button class="btn btn-danger btn-small hidden" type="button" id="btn-lead-cancel" title="stop the running turn (tagteam cancel-turn)">Stop turn</button>
-          <button class="btn btn-primary" type="submit" id="btn-lead-send">Send</button>
-        </div>
-      </form>
-    </div>
     <div class="panel active" id="panel-feed" role="tabpanel">
       <div class="panel-head"><span id="feed-title">Rounds — what each side said, newest first</span><span class="spacer"></span><span class="muted" id="feed-meta"></span></div>
       <div id="feed-list"></div>
       <div class="empty small hidden" id="feed-empty">No rounds yet for this phase.</div>
+      <!-- Phase 45: the flat, newest-first list of every turn (Phase 43) stays for the record -->
+      <details id="all-activity" class="all-activity"><summary>all activity <span class="muted small" id="activity-meta"></span></summary>
+        <div class="activity" id="activity" aria-live="polite"></div>
+        <div class="empty small hidden" id="activity-empty">No turns recorded yet for this project.</div>
+        <div class="hint hidden" id="activity-more">Older turns: <code>tagteam tail</code> and <code>.tagteam/turns/</code>.</div>
+      </details>
     </div>
 
     <div class="panel" id="panel-diff" role="tabpanel">

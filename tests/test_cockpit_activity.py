@@ -572,16 +572,32 @@ class TestServer:
 class TestSourceGuards:
     def test_html_has_the_cycle_region_and_no_tail_drawer(self):
         html = (WEB / "cockpit.html").read_text(encoding="utf-8")
-        for id_ in ("cycle", "lane-lead", "lane-reviewer", "lane-token", "cycle-line", "activity",
-                    "activity-empty", "chip-owed", "chip-inflight", "chip-watcher", "now-version", "tab-lead-name"):
+        for id_ in ("lanes", "lane-lead", "lane-reviewer", "lane-token", "lane-lead-name", "lane-reviewer-name",
+                    "lead-timeline", "reviewer-timeline", "all-activity", "activity",
+                    "activity-empty", "activity-more", "activity-meta",
+                    "chip-owed", "chip-inflight", "chip-watcher", "now-version"):
             assert f'id="{id_}"' in html, id_
+        # Phase 45: the flat list and its support elements live inside the Rounds-tab disclosure
+        disc = html[html.index('id="all-activity"'):html.index("</details>", html.index('id="all-activity"'))]
+        for id_ in ("activity", "activity-empty", "activity-more", "activity-meta"):
+            assert f'id="{id_}"' in disc, id_
+        # ids that went with the Lead tab / the Cycle region — gone from the HTML and never written from the JS
+        js0 = (WEB / "cockpit.js").read_text(encoding="utf-8")
+        for gone in ("tab-lead", "tab-lead-name", "lead-dot", "panel-lead", "lead-title", "lead-continuity",
+                     "lead-transcript", "cycle-line", "activity-head"):
+            assert f'id="{gone}"' not in html, gone
+            assert f"$('{gone}')" not in js0, gone
+        assert 'id="cycle"' not in html
+        assert 'data-tab="lead"' not in html
         assert "btn-tail" not in html and "tail-drawer" not in html and "btn-cancel-turn" not in html
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
         assert "btn-tail" not in js and "tail-drawer" not in js
         # UX pass 2026-08-17: one Start (the cockpit's own engine); no terminals from the page;
         # the tab for the lead is named after the lead; Feed reads "Rounds"
         assert "Launch terminals" not in js and "/api/session/start" not in js and "Start headless" not in js
-        assert ">Rounds<" in html and 'id="tab-lead-name"' in html
+        assert ">Rounds<" in html
+        # the lead lane is always visible: the chat refreshes on every pass, no tab condition
+        assert "loadActivity(), loadLead(false)]" in js and "activeTab() === 'lead'" not in js
         assert 'name="tagteam-version"' not in html          # injected by the server, not shipped
 
     def test_cycle_activity_block_builds_dom_with_text_nodes_only(self):
@@ -589,10 +605,17 @@ class TestSourceGuards:
         start = js.index("Phase 43: Cycle region + Activity log")
         end = js.index("Phase 37: Lead panel")
         block = js[start:end]
-        assert "innerHTML" not in block, "the Cycle/Activity block must build DOM with createElement/textContent only"
-        # rows are keyed and patched — the container is never wiped
-        assert "ACT.rows[it.id]" in block and "$('activity').innerHTML" not in js
-        assert "function upsertActivity" in block and "function patchActRow" in block
+        assert "innerHTML" not in block, "the lanes/Activity block must build DOM with createElement/textContent only"
+        # rows are keyed and patched — no container is ever wiped
+        assert "store.rows[it.id]" in block
+        for cont in ("activity", "lead-timeline", "reviewer-timeline"):
+            assert f"$('{cont}').innerHTML" not in js, cont
+        assert "function upsertActivity" in block and "function patchActRow" in block and "function upsertRow" in block
+        # the verdict map lists exactly the six round actions
+        m = re.search(r"var VERDICT_WORD = \{([^}]*)\};", block)
+        assert m and re.findall(r"(\w+):", m.group(1)) == ["APPROVE", "REQUEST_CHANGES", "ESCALATE", "NEED_HUMAN", "GATE_PASS", "GATE_BOUNCE"]
+        # role split
+        assert "function inReviewerLane" in block and "function inLeadLane" in block
 
     def test_outcome_label_lists_exactly_the_seven_outcomes(self):
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
@@ -605,8 +628,10 @@ class TestSourceGuards:
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
         lead_block = js[js.index("Phase 37: Lead panel"):js.index("Live connection: SSE with polling fallback")]
         assert "details" in lead_block and "activity (" in lead_block          # retained lines disclosure
-        assert "watch it above" in lead_block
+        assert "streaming " in lead_block and "watch it" in lead_block
         assert "innerHTML" not in lead_block.replace("innerHTML = ''", "").replace("innerHTML=''", "")
+        # Phase 45: messages are keyed rows in the lead lane, never a wiped transcript
+        assert "LEAD.msgRows[key]" in lead_block and "function upsertLeadMessage" in lead_block
 
     def test_css_has_the_lane_and_outcome_styles(self):
         css = (WEB / "cockpit.css").read_text(encoding="utf-8")
@@ -652,8 +677,11 @@ var console = { error: function () {}, log: function () {} };
 function esc(s) { return String(s == null ? '' : s); }
 function fmtAge(s) { return String(s) + 's'; }
 function fmtTs(ts) { return String(ts || ''); }
+function fmtTime(ts) { return String(ts || '').slice(11, 19); }
 function url(p) { return p; }
 function getJSON() { return Promise.resolve({ ok: false }); }
+function postJSON() { return Promise.resolve({ ok: false }); }
+function toast() {}
 function act() {}
 function refreshAll() {}
 function showTab() {}
@@ -674,7 +702,8 @@ def _run_activity_harness(js_body: str) -> dict:
     if not node:
         pytest.skip("node is not installed — the behavioural activity-log test needs it")
     js = (WEB / "cockpit.js").read_text(encoding="utf-8")
-    block = js[js.index("// ---------- Phase 43: Cycle region + Activity log"):js.index("// ---------- Phase 37: Lead panel")]
+    # the lanes/activity block AND the lead-lane chat block (Phase 45: both feed the timelines)
+    block = js[js.index("// ---------- Phase 43: Cycle region + Activity log"):js.index("// ---------- Live connection: SSE with polling fallback")]
     prog = _DOM_STUB + "\n" + block + "\n" + js_body + "\nprocess.stdout.write(JSON.stringify(RESULT));\n"
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "harness.js"
@@ -722,9 +751,9 @@ var RESULT = { before: before, after: after, after2: after2, after3: after3,
 
     def test_source_guard_reinserts_on_key_change(self):
         js = (WEB / "cockpit.js").read_text(encoding="utf-8")
-        start = js.index("function upsertActivity("); end = js.index("function insertActRow(")
+        start = js.index("function upsertRow("); end = js.index("function insertKeyed(")
         body = js[start:end]
-        assert "actSortKey(it)" in body and "insertActRow(list, rec)" in body, \
+        assert "storeSortKey(store, it)" in body and "insertRow(store, rec)" in body, \
             "an existing row must be re-inserted when its sort key changes"
 
 
@@ -761,3 +790,77 @@ class TestUxPassWords:
             assert f'<meta name="tagteam-version" content="{__version__}">' in html
         with Served(project, mode="legacy") as s:
             assert "tagteam-version" not in s.client.get("/")["raw"].decode()
+
+
+class TestLanesBehaviour:
+    """Phase 45: the two lanes, driven through the real code under the DOM stub."""
+
+    def test_reviewer_lane_ascending_streams_and_gets_its_verdict(self):
+        res = _run_activity_harness(r"""
+NOW = { agents: { lead: 'Claude', reviewer: 'Codex' } };
+function item(id, role, kind, status, started, round, extra) { var o = { id: id, kind: kind, role: role, agent: role === 'reviewer' ? 'Codex' : (role === 'lead' ? 'Claude' : null), status: status, started_at: started, ref: { log: id }, stem: id, age_s: 1, duration_ms: 1000, round: round }; Object.keys(extra || {}).forEach(function (k) { o[k] = extra[k]; }); return o; }
+var rl = $('reviewer-timeline'), ll = $('lead-timeline');
+// two rounds arrive newest-first from the API; the lane must be ascending
+[item('turn:rev-r2', 'reviewer', 'cycle', 'running', '2026-01-01T00:20:00+00:00', 2),
+ item('turn:gate-r2', 'gatekeeper', 'gate', 'finished', '2026-01-01T00:15:00+00:00', 2, { raw_status: 'pass' }),
+ item('turn:lead-r2', 'lead', 'cycle', 'finished', '2026-01-01T00:10:00+00:00', 2),
+ item('turn:rev-r1', 'reviewer', 'cycle', 'finished', '2026-01-01T00:05:00+00:00', 1),
+ item('turn:lead-r1', 'lead', 'cycle', 'finished', '2026-01-01T00:00:00+00:00', 1)].forEach(function (it) {
+  upsertRow(ACT, it); if (inReviewerLane(it)) upsertRow(RLANE, it); if (inLeadLane(it)) upsertRow(LLANE, it);
+});
+var revOrder = rl.children.map(function (r) { return r.dataset.id; });
+var leadOrder = ll.children.map(function (r) { return r.dataset.id; });
+var running = RLANE.rows['turn:rev-r2']; var runningNode = running.row;
+appendActLine(running, '[codex] reading the diff');
+// the rounds arrive: round 1 was REQUEST_CHANGES, round 2 approves once it ends
+ROUNDS_BY_N = { 1: { reviewer: { action: 'REQUEST_CHANGES', text: 'Please fix the postal code case.' } }, 2: { reviewer: { action: 'APPROVE', text: 'Approved.' } } };
+refreshVerdicts();
+var v1 = RLANE.rows['turn:rev-r1'].verdictEl.textContent;
+var v2running = RLANE.rows['turn:rev-r2'].verdictEl.textContent;   // still running: no verdict yet
+var gateV = RLANE.rows['turn:gate-r2'].verdictEl.textContent;
+// the review ends → same node, verdict word, lines intact, still at the foot
+upsertRow(RLANE, item('turn:rev-r2', 'reviewer', 'cycle', 'finished', '2026-01-01T00:20:00+00:00', 2));
+var v2 = RLANE.rows['turn:rev-r2'].verdictEl.textContent;
+toggleActText(RLANE.rows['turn:rev-r1']);
+var RESULT = { revOrder: revOrder, leadOrder: leadOrder, v1: v1, v2running: v2running, gateV: gateV, v2: v2,
+               sameNode: RLANE.rows['turn:rev-r2'].row === runningNode, lines: RLANE.rows['turn:rev-r2'].lines,
+               foot: rl.children[rl.children.length - 1].dataset.id, text: RLANE.rows['turn:rev-r1'].textEl.textContent,
+               actCount: Object.keys(ACT.rows).length, revCount: Object.keys(RLANE.rows).length, leadCount: Object.keys(LLANE.rows).length };
+""")
+        assert res["revOrder"] == ["turn:rev-r1", "turn:gate-r2", "turn:rev-r2"]      # ascending; pre-check before its review
+        assert res["leadOrder"] == ["turn:lead-r1", "turn:lead-r2"]                    # only the lead's turns, ascending
+        assert res["v1"] == "changes requested" and res["v2running"] == "" and res["gateV"] == "passed"
+        assert res["v2"] == "approved" and res["sameNode"] is True and res["lines"] == ["[codex] reading the diff"]
+        assert res["foot"] == "turn:rev-r2" and res["text"] == "Please fix the postal code case."
+        assert (res["actCount"], res["revCount"], res["leadCount"]) == (5, 3, 2)      # role split: nothing crosses lanes
+
+    def test_lead_lane_merges_chat_and_turns_in_time_without_wiping(self):
+        res = _run_activity_harness(r"""
+NOW = { agents: { lead: 'Claude', reviewer: 'Codex' } };
+LEAD.cfg = { ok: true, agent: 'Claude' };
+var ll = $('lead-timeline');
+LEAD.conv = { id: 'c-1', turns: [
+  { n: 1, ts: '2026-01-01T00:00:00+00:00', user_text: 'plan it', status: 'ok', reply: 'Here is the plan', finished_at: '2026-01-01T00:01:00+00:00' },
+  { n: 2, ts: '2026-01-01T00:30:00+00:00', user_text: '/handoff start x', status: 'running' } ] };
+renderLeadTimeline();
+var card = { id: 'turn:lead-r1', kind: 'cycle', role: 'lead', agent: 'Claude', status: 'finished', started_at: '2026-01-01T00:10:00+00:00', ref: { log: 'turn:lead-r1' }, stem: 'turn:lead-r1', age_s: 1, duration_ms: 240000, round: 1, type: 'plan' };
+upsertRow(LLANE, card);
+var order = ll.children.map(function (r) { return r.dataset.id; });
+var row2 = LEAD.msgRows['msg:c-1:2'].row;
+// lines stream into the running message; a re-render keeps them
+leadLines('c-1', 2).push('[claude] reading the roadmap');
+LEAD.conv.turns[1] = { n: 2, ts: '2026-01-01T00:30:00+00:00', user_text: '/handoff start x', status: 'ok', reply: 'Cycle opened.', finished_at: '2026-01-01T00:31:00+00:00' };
+renderLeadTimeline();
+var sameRow = LEAD.msgRows['msg:c-1:2'].row === row2;
+var hasDetails = !!row2.children[1] && row2.children[1].children.some(function (c) { return c.tagName === 'details'; });
+var order2 = ll.children.map(function (r) { return r.dataset.id; });
+// switching conversation removes the other's messages, keeps the lead's cards
+LEAD.conv = { id: 'c-2', turns: [ { n: 1, ts: '2026-01-01T00:40:00+00:00', user_text: 'hi', status: 'ok', reply: 'hello', finished_at: '2026-01-01T00:41:00+00:00' } ] };
+renderLeadTimeline();
+var order3 = ll.children.map(function (r) { return r.dataset.id; });
+var RESULT = { order: order, sameRow: sameRow, hasDetails: hasDetails, order2: order2, order3: order3, kids: ll.children.length };
+""")
+        assert res["order"] == ["msg:c-1:1", "turn:lead-r1", "msg:c-1:2"]     # merged in time: message · card · message
+        assert res["sameRow"] is True and res["hasDetails"] is True         # patched, not rebuilt; kept lines under a disclosure
+        assert res["order2"] == ["msg:c-1:1", "turn:lead-r1", "msg:c-1:2"]
+        assert res["order3"] == ["turn:lead-r1", "msg:c-2:1"] and res["kids"] == 2

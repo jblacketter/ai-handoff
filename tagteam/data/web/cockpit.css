@@ -223,7 +223,6 @@ table.u th { color: var(--text-dim); font-weight: 500; }
 .lead-status .spin { width: 12px; height: 12px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; flex: none; }
 .lead-msg.working { border-color: var(--accent); animation: lanepulse 1.6s ease-in-out infinite; }
 .lead-status.error { color: var(--danger); }
-.lead-transcript { padding: 6px 12px; max-height: 52vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .lead-msg { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--bg); }
 .lead-msg.you { border-color: rgba(90,169,255,0.45); }
 .lead-msg.lead { background: var(--bg-2); }
@@ -233,30 +232,32 @@ table.u th { color: var(--text-dim); font-weight: 500; }
 .lead-msg .live { color: var(--text-dim); font-size: 12px; white-space: pre-wrap; margin-top: 4px; max-height: 12em; overflow: auto; }
 .lead-msg .live .tool { opacity: .75; }
 .lead-msg .fail { color: var(--danger); margin-top: 4px; }
-.lead-form { padding: 8px 12px 12px; border-top: 1px solid var(--line); }
+.lead-form { padding: 8px 10px 10px; border-top: 1px solid var(--line); margin-top: auto; }
 .lead-form textarea { width: 100%; box-sizing: border-box; background: var(--bg-2); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; font: inherit; }
 .lead-form .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 
-/* ---- Phase 43: Cycle region + Activity log ----
-   The running handoff as one thing (Gestalt common region): two lanes with
-   the turn token on the owed side, a status line, and the activity rows.
-   The lane whose agent process runs pulses; outcomes are colored by the
-   shared vocabulary (s-<outcome>), never inferred from absence. */
-.cycle { border-bottom: 1px solid var(--line); padding: 10px 12px 8px; background: var(--bg-2); }
-.lanes { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; align-items: stretch; }
-.lane { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--bg); min-height: 52px; }
+/* ---- Phase 45: the lanes — one pane per agent, in the order the loop runs ----
+   <lead> — lead | token | <reviewer> — reviewer. Each lane: a header (name —
+   role, state; pulses while its agent works), a timeline in time order with
+   the newest at the foot (keyed rows, never rebuilt); the lead lane carries
+   the chat's composer at its foot. Below 1000px the lanes stack, lead first. */
+.lanes { display: grid; grid-template-columns: 1fr 44px 1fr; gap: 8px; align-items: stretch; padding: 10px 12px 8px; border-bottom: 1px solid var(--line); background: var(--bg-2); }
+@media (max-width: 1000px) { .lanes { grid-template-columns: 1fr; } .lanes .token { display: none; } }
+.lane { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); min-height: 52px; display: flex; flex-direction: column; min-width: 0; }
 .lane.lead { border-left: 3px solid var(--lead); }
 .lane.reviewer { border-left: 3px solid var(--reviewer); }
 .lane.on-turn { border-color: var(--text-dim); box-shadow: 0 0 0 1px rgba(230,233,238,0.08); }
-.lane.running { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(90,169,255,0.25); animation: lanepulse 1.6s ease-in-out infinite; }
+.lane.running, .lane.chatting { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(90,169,255,0.25); animation: lanepulse 1.6s ease-in-out infinite; }
 .lane.gone { border-color: var(--warn); }
 @keyframes lanepulse { 0%,100% { box-shadow: 0 0 0 1px rgba(90,169,255,0.25); } 50% { box-shadow: 0 0 0 3px rgba(90,169,255,0.12); } }
-.lane-name { font-weight: 600; font-size: 13px; }
+.lane-head { display: flex; align-items: baseline; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.lane-name { font-weight: 700; font-size: 13.5px; letter-spacing: 0.2px; }
 .lane.lead .lane-name { color: var(--lead); }
 .lane.reviewer .lane-name { color: var(--reviewer); }
-.lane-state { color: var(--text-dim); font-size: 12.5px; margin-top: 2px; font-variant-numeric: tabular-nums; }
-.lane.running .lane-state { color: var(--text); }
+.lane-state { color: var(--text-dim); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.lane.running .lane-state, .lane.chatting .lane-state { color: var(--text); }
 .lane.gone .lane-state { color: var(--warn); }
+.lane-head select { background: var(--bg-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px; max-width: 40%; }
 .token { display: flex; align-items: center; justify-content: center; position: relative; color: var(--muted); }
 .token::before, .token::after { content: ""; position: absolute; top: 50%; height: 1px; background: var(--line); width: 12px; }
 .token::before { left: 2px; } .token::after { right: 2px; }
@@ -265,11 +266,26 @@ table.u th { color: var(--text-dim); font-weight: 500; }
 .token.reviewer .token-dot { background: var(--reviewer); transform: translateX(16px); }
 .token.you .token-dot { background: var(--danger); animation: pulse 1.2s ease-in-out infinite; }
 .token.none .token-dot { background: var(--muted); }
-.cycle-line { margin: 8px 2px 0; color: var(--text-dim); font-size: 12.5px; font-family: var(--mono); display: flex; flex-wrap: wrap; gap: 2px 14px; }
-.cycle-line .seg { white-space: nowrap; }
-.cycle-line.starting { color: var(--accent); }
-.activity-head { display: flex; align-items: center; gap: 8px; margin: 10px 2px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
-.activity-title { font-weight: 600; }
+.timeline { flex: 0 1 auto; min-height: 0; max-height: 46vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; }
+.timeline:empty { padding: 0; }
+.lane > .empty { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 120px; }
+.lane.lead > .empty { min-height: 60px; }
+.timeline .act-row { border: 1px solid var(--line); border-radius: 6px; background: var(--bg-2); }
+.timeline .act-head .tag.role, .timeline .act-head .agent { display: none; }   /* the lane header says who */
+.timeline .act-head { padding: 5px 8px; gap: 6px; }
+.timeline .act-lines { margin-left: 8px; }
+.timeline .act-detail { padding-left: 8px; }
+.timeline .act-text { margin-left: 8px; }
+.timeline .act-row:last-child { border-bottom: 1px solid var(--line); }
+.tl-msg { display: flex; flex-direction: column; gap: 8px; }
+.act-head .verdict { font-size: 11px; padding: 1px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600; background: var(--bg-3); color: var(--text-dim); }
+.act-head .verdict.ok { color: var(--ok); background: rgba(63,185,80,0.14); }
+.act-head .verdict.changes { color: var(--warn); background: rgba(210,153,34,0.16); }
+.act-head .verdict.warn { color: var(--danger); background: rgba(248,81,73,0.14); }
+.act-text { margin: 0 10px 8px 27px; padding: 6px 8px; border-left: 2px solid var(--reviewer); color: var(--text-dim); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; max-height: 16em; overflow: auto; }
+.all-activity { margin-top: 10px; }
+.all-activity summary { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; }
+.all-activity .activity { margin: 8px 8px 10px; }
 .activity { max-height: 42vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .activity:empty { display: none; }
 .act-row { border-bottom: 1px solid var(--line); }
