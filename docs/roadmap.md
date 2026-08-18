@@ -388,8 +388,15 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/cockpit-hardening.md`
 - **Source:** `docs/cockpit-issues.md` (2026-08-16: a running handoff is not legible as a handoff); backlog item "Cockpit hardening & UX"; promoted 2026-08-17. The saloon rethink is **not** folded in — it is Phase 44 (see the plan's scoping call).
 
-### Phase 44: Saloon rethink — archetype cast & theme packs (3.8)
+### Phase 45: Cockpit lanes — Lead | Reviewer, each in its own pane (3.8)
 - **Depends on:** Phase 43
+- **Status:** In progress — plan cycle opened 2026-08-17.
+- **Description:** replace the shared newest-first Activity log with two panes in the order the loop runs — `<lead> — lead` | `<reviewer> — reviewer` — each a timeline newest at the foot: the lead pane is the chat plus the lead's cycle turns as cards between the messages (composer at the foot); the reviewer pane holds each round's pre-check → review → verdict, streaming in place; the working pane pulses; the token sits between them; tabs shrink to Rounds · Diff · Usage · Notes with the flat "all activity" list as a disclosure. Front-end only; no schema/CLI change.
+- **Plan:** `docs/phases/cockpit-lanes.md`
+- **Source:** `docs/cockpit-issues.md` 2026-08-17 (later): "awkward to scroll up … Lead (Claude) and Reviewer (Codex) should be clearly labeled … since we start with the lead, it's unexpected to have the reviewer up above."
+
+### Phase 44: Saloon rethink — archetype cast & theme packs (3.9)
+- **Depends on:** Phase 45
 - **Status:** Not started — promoted 2026-08-17 from the backlog; brainstorm in `docs/saloon-rethink.md`. Plan to be written when Phase 43 ships (it consumes Phase 43's per-role turn state and outcome vocabulary for the state → picture table).
 - **Description:** recast the fun theme around the loop's real roles (Host, Lead, Reviewer, Turn-keeper, Round clock, You-as-Arbiter) instead of feature mascots; three-beat first-run flow (init agents → start watcher → hand the user the kickoff message); every element bound to real state. Make the engine theme-driven so up to five settings can be trialed (saloon revised, alien spaceship, pirate ship, mission control, restaurant kitchen). Cockpit remains the serious surface; theme is a skin.
 
