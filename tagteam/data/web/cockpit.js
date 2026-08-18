@@ -230,6 +230,7 @@
 
     renderLanes(n);
     renderNeeds();
+    fitLanes();
   }
 
   function renderOwedChip(n) {
@@ -393,18 +394,19 @@
       var it = START.intent;
       if (it.command) {
         var canStart = !!(START.headless && START.headless.ok);
+        // compact: an invitation, one row — title · the command · Start; the
+        // explanation is one small line (the card is not the page's billboard)
         var scard = cardShell('start', 'Next: ' + it.phase + ' — ' + typeWord(it.type), String(it.reason || '').replace(/no cycle in progress/, 'nothing in progress'));
+        scard.classList.add('compact');
         var sbody = el('div', 'card-body');
+        var cmd = el('code', 'cmd', it.command); sbody.appendChild(cmd);
         var what = el('div', 'muted small');
         if (canStart) {
-          what.textContent = 'Start turns the watcher on (if it is off) and tells ' + lead + ':';
+          what.textContent = 'Start turns the watcher on (if it is off) and tells ' + lead + ' this. Prefer to talk first? Chat with ' + lead + ' below, then say it yourself.';
         } else {
-          what.textContent = 'This page cannot run turns for both agents yet (' + ((START.headless && START.headless.errors) || []).join('; ') + '). Tell ' + lead + ' yourself, in its terminal:';
+          what.textContent = 'This page cannot run turns for both agents yet (' + ((START.headless && START.headless.errors) || []).join('; ') + '). Tell ' + lead + ' yourself, in its terminal.';
         }
         sbody.appendChild(what);
-        var cmd = el('code', 'cmd', it.command); sbody.appendChild(cmd);
-        var alt = el('div', 'muted small', 'Prefer to talk first? Chat with ' + lead + ' below, then say the command yourself.');
-        sbody.appendChild(alt);
         // Phase 43: a launch that failed for THIS intent says so under the card
         if (n.launch && n.launch.status === 'failed') {
           var lf = el('div', 'inline-error', 'Last Start failed' + (n.launch.finished_at ? ' ' + fmtTs(n.launch.finished_at) : '') + ': ' + plainError(n.launch.error) + (n.launch.log_path ? '\nlog: ' + n.launch.log_path : ''));
@@ -899,6 +901,18 @@
     var side = owedRole || (pending ? 'lead' : ((cs === 'escalated' || cs === 'needs-human') ? 'you' : 'none'));
     tok.className = 'token ' + side;
     tok.title = side === 'you' ? 'waiting on you (arbiter)' : side === 'none' ? 'nobody\'s turn right now' : 'waiting on the ' + side;
+  }
+  // Fitts / hierarchy: the chat's composer and both streams share the first
+  // viewport — the lanes block takes the space below the Needs-you banner
+  // (min 360px) and the timelines scroll inside their lane; the tabs sit
+  // below the fold. Recomputed on resize and after every render (the banner
+  // changes height).
+  function fitLanes() {
+    var lanes = $('lanes'); if (!lanes) return;
+    if (window.innerWidth <= 1000) { lanes.style.height = ''; return; }   // stacked: natural height
+    var top = lanes.getBoundingClientRect().top + (window.scrollY || 0);
+    var h = (window.innerHeight || 800) - top - 14;
+    lanes.style.height = Math.max(360, Math.round(h)) + 'px';
   }
   function renderLaneAges() {
     if (!NOW) return;
@@ -1447,6 +1461,7 @@
   try { var saved = localStorage.getItem('tagteam.cockpit.tab'); if (saved && $('tab-' + saved)) showTab(saved); } catch (e) { /* ignore */ }
   refreshAll('boot');
   connectSSE();
+  window.addEventListener('resize', fitLanes);
   // Ages in the strip tick locally between refreshes.
   setInterval(function () { if (NOW) renderNowAges(); }, 1000);
   // Safety net in live mode: a slow full refresh (process liveness that

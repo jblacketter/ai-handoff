@@ -87,3 +87,11 @@ button reads **Start the watcher** (card) / **Start** (chip), as Jack asked.
   sending a chat message → a working banner with spinner + elapsed under the composer, the reply bubble
   pulses. Wanted: "when it goes to the reviewer, so I can see it" — the Cycle region does that (the
   reviewer lane pulses; the review row streams).
+
+## 2026-08-17 (3.8.0) — the chat is below the fold
+
+"When I talk to the lead, that needs to be the first thing, up top. I still have to scroll down to get
+to the lead chat, then scroll back up to see the activity after it starts." Vertical budget, not order:
+strip + Start card + lane header + a 46 vh timeline + composer > 800 px. Fixed on `cockpit-ux-3`
+(3.8.1): the lanes block fits the viewport (timelines scroll inside their lane; the composer and both
+streams share the first screen; tabs below the fold) and the Start card is compact (one row).

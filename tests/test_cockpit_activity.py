@@ -890,3 +890,13 @@ var RESULT = { promptNoConv: promptNoConv, promptWithCard: promptWithCard, cards
         assert res["promptWithCard"] is True and res["cards"] == 1
         assert res["promptEmptyConv"] is True
         assert res["promptAfterMsg"] is False and res["kids"] == 2
+
+
+class TestViewportFit:
+    def test_lanes_fit_the_viewport_and_the_start_card_is_compact(self):
+        js = (WEB / "cockpit.js").read_text(encoding="utf-8")
+        css = (WEB / "cockpit.css").read_text(encoding="utf-8")
+        assert "function fitLanes(" in js and "window.addEventListener('resize', fitLanes)" in js
+        assert "fitLanes();" in js[js.index("function renderNow("):js.index("function renderOwedChip(")]
+        assert "scard.classList.add('compact')" in js
+        assert ".card.start.compact" in css and ".lanes .lane { min-height: 0; overflow: hidden; }" in css
