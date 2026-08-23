@@ -395,6 +395,12 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - **Plan:** `docs/phases/cockpit-lanes.md`
 - **Source:** `docs/cockpit-issues.md` 2026-08-17 (later): "awkward to scroll up … Lead (Claude) and Reviewer (Codex) should be clearly labeled … since we start with the lead, it's unexpected to have the reviewer up above."
 
+### Phase 46: Pause visibility — a held pause marker is announced where it matters (3.8.2)
+- **Status:** In implementation review (2026-08-22) — no plan cycle by the arbiter's instruction (implementation reviewed directly); branch `fix/stale-pause-visibility`, PR #26; release **3.8.2** after merge.
+- **Description:** a `tagteam pause` marker is unbounded and was visible only in the watcher's own log; a four-day-old pause silently held the next cycle's first turn on the aegis project (3.7.0). Now `cycle init` / `cycle add` / `state set` print `note: watcher dispatch is PAUSED (<age> ago, by <who>): <reason>` whenever the write hands a turn over; the watcher log is aged; `cycle status` / `state` show `dispatch:`; `pause` records the state it was set on; SKILL.md tells the lead what to do. The marker is deliberately not auto-expired.
+- **Plan:** `docs/phases/stale-pause-visibility.md`
+- **Source:** `docs/tagteam-issue-stale-pause-marker-2026-08-22.md`
+
 ### Phase 44: Saloon rethink — archetype cast & theme packs (3.9)
 - **Depends on:** Phase 45
 - **Status:** Not started — promoted 2026-08-17 from the backlog; brainstorm in `docs/saloon-rethink.md`. Plan to be written when Phase 43 ships (it consumes Phase 43's per-role turn state and outcome vocabulary for the state → picture table).
