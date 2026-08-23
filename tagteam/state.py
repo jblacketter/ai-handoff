@@ -692,6 +692,8 @@ def state_command(args: list[str]) -> int:
             print("No handoff-state.json found.")
             return 0
         print(format_state(state))
+        from tagteam.cycle import _dispatch_line
+        print(f"Dispatch:   {_dispatch_line()}")
         return 0
 
     subcmd = args[0]
@@ -948,6 +950,9 @@ def _state_set(args: list[str]) -> int:
 
     state = update_state(updates)
     print(f"State updated: turn={state.get('turn')}, status={state.get('status')}")
+    if state.get("status") == "ready" and state.get("turn") in ("lead", "reviewer"):
+        from tagteam.cycle import _print_pause_notice, _agent_name_for
+        _print_pause_notice(_agent_name_for(state.get("turn")))
     return 0
 
 

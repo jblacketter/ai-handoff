@@ -731,7 +731,8 @@ class _StateProcessor:
         now = time.time()
         if force or now - self._last_pause_log > 60:
             self._last_pause_log = now
-            _log(f"!! PAUSED: {info.get('reason')}")
+            from tagteam.headless import describe_pause
+            _log(f"!! {describe_pause(info)}")
             _log("   resume with: tagteam resume")
 
     def try_repair(self) -> None:

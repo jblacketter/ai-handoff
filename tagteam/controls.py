@@ -111,6 +111,15 @@ def pause_command(args: list[str], project_root: str | Path | None = None,
     prior = h.read_pause(root)
     payload = {"reason": reason, "by": by, "source": "cli", "ts": _now_iso(),
                "log_path": None}
+    # Remember the state the pause was set on, so a marker that outlives its
+    # run reads as stale wherever it is shown (watcher log, hand-off notice).
+    try:
+        from tagteam.state import read_state
+        st = read_state(str(root)) or {}
+    except Exception:
+        st = {}
+    if st:
+        payload["state"] = {k: st.get(k) for k in ("phase", "type", "round", "status", "turn", "seq")}
     if prior and prior.get("source") != "cli":
         # keep the failed-turn context visible for `resume`
         payload["previous"] = {k: prior.get(k) for k in
@@ -120,6 +129,8 @@ def pause_command(args: list[str], project_root: str | Path | None = None,
     print(f"{verb}: {reason} (by {by})", file=out)
     print(f"  marker: {p}", file=out)
     print("  resume with: tagteam resume", file=out)
+    print("  Dispatch stays held across watcher restarts and new cycles until then;"
+          " `cycle init` / `cycle add` / `cycle status` will say so.", file=out)
     return 0
 
 

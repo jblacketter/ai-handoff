@@ -790,6 +790,60 @@ def write_pause(project_root: str | Path, payload: dict) -> Path:
     return p
 
 
+def pause_age(info: dict | None) -> str:
+    """Human age of a pause marker ("4d 15h", "12m", "just now"); "?" when
+    the timestamp is missing or unparseable."""
+    ts = (info or {}).get("ts")
+    if not ts:
+        return "?"
+    try:
+        start = datetime.fromisoformat(ts)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        secs = int((datetime.now(timezone.utc) - start).total_seconds())
+    except (TypeError, ValueError):
+        return "?"
+    secs = max(secs, 0)
+    if secs < 60:
+        return "just now"
+    m, _ = divmod(secs, 60)
+    hh, m = divmod(m, 60)
+    d, hh = divmod(hh, 24)
+    if d:
+        return f"{d}d {hh}h"
+    if hh:
+        return f"{hh}h {m:02d}m"
+    return f"{m}m"
+
+
+def describe_pause(info: dict) -> str:
+    """One line for logs and CLI notices: age, author, reason, and — when the
+    marker remembers the state it was set on — that cycle, so a pause that
+    has outlived its run reads as stale at a glance."""
+    age = pause_age(info)
+    when = age if age in ("just now", "?") else f"{age} ago"
+    by = info.get("by") or info.get("source") or "?"
+    who = f", by {by}" if by != "?" else ""
+    head = f"PAUSED ({when}{who}): {info.get('reason') or '?'}"
+    on = info.get("state") or {}
+    if on.get("phase"):
+        head += f" [set on {on.get('phase')}/{on.get('type')} r{on.get('round')}, status {on.get('status')}]"
+    return head
+
+
+def handoff_pause_notice(project_root: str | Path, next_agent: str | None = None) -> str | None:
+    """The note a turn-handing write (`cycle init`, `cycle add`, `state set`)
+    prints when dispatch is paused, or None. The lead's write path is the
+    moment the pause matters and the one place the lead will see it."""
+    info = read_pause(project_root)
+    if info is None:
+        return None
+    who = next_agent or "the next agent"
+    return (f"note: watcher dispatch is {describe_pause(info)}\n"
+            f"      {who} will NOT be dispatched until `tagteam resume` "
+            f"(or tell the arbiter, if the pause is theirs)")
+
+
 def clear_pause(project_root: str | Path) -> bool:
     p = pause_path(project_root)
     if p.exists():
