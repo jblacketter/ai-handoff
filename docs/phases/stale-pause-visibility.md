@@ -3,7 +3,7 @@
 ## Status
 - [x] Planning — no plan cycle: the arbiter asked for the implementation itself to be reviewed ("don't revert anything, just have it check your implementation", 2026-08-22); the design is this document, written alongside the code
 - [x] Implementation (branch `fix/stale-pause-visibility`, PR #26)
-- [ ] Implementation Review
+- [x] Implementation Review (approved round 2, 2026-08-22; round 1: Codex — `cycle status` on a legacy-markdown cycle returned without the `dispatch:` line; fixed on the fallback path with unpaused + held-pause regression tests)
 - [ ] Complete — merge PR #26, release **3.8.2**
 
 ## Roles
