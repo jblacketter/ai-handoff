@@ -1352,6 +1352,7 @@ def _cli_status(args: list[str]) -> int:
         print(f"ready_for: {ready_m.group(1) if ready_m else '?'}")
         print(f"round: {round_m.group(1) if round_m else '?'}")
         print(f"format: markdown (legacy)")
+        print(f"dispatch: {_dispatch_line()}")
         return 0
 
     print(f"No cycle found: {phase}_{cycle_type}")

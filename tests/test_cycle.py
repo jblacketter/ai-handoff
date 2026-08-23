@@ -519,6 +519,21 @@ class TestCLILegacyFallback:
         assert result == 0
         captured = capsys.readouterr()
         assert "approved" in captured.out
+        # Phase 46: the dispatch line is printed on the legacy path too
+        assert "dispatch: not paused" in captured.out
+
+    def test_cli_status_legacy_md_shows_held_pause(self, project, capsys, monkeypatch):
+        from tagteam import headless as h
+        monkeypatch.chdir(project)
+        handoffs = Path(project) / "docs" / "handoffs"
+        (handoffs / "legacy-phase_plan_cycle.md").write_text(LEGACY_CYCLE_MD)
+        h.write_pause(project, {"reason": "hand review", "by": "jack", "source": "cli"})
+
+        assert cycle_command(["status", "--phase", "legacy-phase", "--type", "plan"]) == 0
+        out = capsys.readouterr().out
+        assert "format: markdown (legacy)" in out
+        assert "dispatch: PAUSED (just now, by jack): hand review" in out
+        assert "tagteam resume" in out
 
     def test_cli_render_reads_legacy_md(self, project, capsys, monkeypatch):
         monkeypatch.chdir(project)
