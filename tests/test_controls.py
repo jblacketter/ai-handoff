@@ -153,6 +153,98 @@ class TestWatcherPauseAllModes:
         assert out.count("PAUSED") == 1
 
 
+class TestPauseVisibility:
+    """A stale pause marker must be visible where it matters: at the lead's
+    hand-off write, in the watcher log (aged), and in `cycle status` /
+    `state` (docs/tagteam-issue-stale-pause-marker-2026-08-22.md)."""
+
+    def _stale_marker(self, project, days=4, hours=15, **extra):
+        from datetime import datetime, timedelta, timezone
+        ts = (datetime.now(timezone.utc) - timedelta(days=days, hours=hours)).isoformat()
+        payload = {"reason": "roadmap run complete; no active cycle", "by": "claude",
+                   "source": "cli", "ts": ts}
+        payload.update(extra)
+        h.write_pause(project, payload)
+
+    def test_pause_age_and_describe(self, project):
+        assert h.pause_age(None) == "?"
+        assert h.pause_age({"ts": "garbage"}) == "?"
+        assert h.pause_age({"ts": h._now_iso()}) == "just now"
+        self._stale_marker(project, state={"phase": "old", "type": "impl", "round": 3,
+                                           "status": "done", "turn": None, "seq": 9})
+        line = h.describe_pause(h.read_pause(project))
+        assert line.startswith("PAUSED (4d 15h ago, by claude): roadmap run complete")
+        assert "[set on old/impl r3, status done]" in line
+        assert "just now ago" not in h.describe_pause({"ts": h._now_iso(), "reason": "r"})
+
+    def test_pause_command_records_state_context(self, project):
+        _init_cycle(project)
+        controls.pause_command(["--reason", "hold"], project_root=project)
+        on = h.read_pause(project)["state"]
+        assert on["phase"] == "feat-x" and on["type"] == "plan" and on["turn"] == "reviewer"
+
+    def test_cycle_init_warns_when_paused(self, project, capsys):
+        self._stale_marker(project)
+        assert cycle_mod.cycle_command(["init", "--phase", "p1", "--type", "plan",
+                                        "--updated-by", "Claude", "--content", "c", "--no-gate"]) == 0
+        out = capsys.readouterr().out
+        assert "Cycle created" in out
+        assert "note: watcher dispatch is PAUSED (4d 15h ago, by claude)" in out
+        assert "Codex will NOT be dispatched until `tagteam resume`" in out
+
+    def test_cycle_init_silent_when_not_paused(self, project, capsys):
+        assert cycle_mod.cycle_command(["init", "--phase", "p1", "--type", "plan",
+                                        "--updated-by", "Claude", "--content", "c", "--no-gate"]) == 0
+        assert "PAUSED" not in capsys.readouterr().out
+
+    def test_cycle_add_warns_only_when_a_turn_is_handed_over(self, project, capsys):
+        _init_cycle(project)
+        self._stale_marker(project)
+        # reviewer → lead: a turn is owed → note (named for the lead)
+        assert cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "plan", "--role", "reviewer",
+                                        "--action", "REQUEST_CHANGES", "--round", "1",
+                                        "--updated-by", "Codex", "--content", "fix"]) == 0
+        out = capsys.readouterr().out
+        assert "PAUSED" in out and "Claude will NOT be dispatched" in out
+        # lead → reviewer
+        assert cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "plan", "--role", "lead",
+                                        "--action", "SUBMIT_FOR_REVIEW", "--round", "2",
+                                        "--updated-by", "Claude", "--content", "done", "--no-gate"]) == 0
+        assert "Codex will NOT be dispatched" in capsys.readouterr().out
+        # APPROVE closes the cycle: nobody is owed, no note
+        assert cycle_mod.cycle_command(["add", "--phase", "feat-x", "--type", "plan", "--role", "reviewer",
+                                        "--action", "APPROVE", "--round", "2",
+                                        "--updated-by", "Codex", "--content", "ok"]) == 0
+        assert "PAUSED" not in capsys.readouterr().out
+
+    def test_state_set_warns_when_handing_a_turn(self, project, capsys):
+        _init_cycle(project)
+        self._stale_marker(project)
+        assert state_mod.state_command(["set", "--turn", "reviewer", "--status", "ready"]) == 0
+        assert "Codex will NOT be dispatched" in capsys.readouterr().out
+        assert state_mod.state_command(["set", "--status", "done"]) == 0
+        assert "PAUSED" not in capsys.readouterr().out
+
+    def test_cycle_status_and_state_show_dispatch(self, project, capsys):
+        _init_cycle(project)
+        assert cycle_mod.cycle_command(["status", "--phase", "feat-x", "--type", "plan"]) == 0
+        assert "dispatch: not paused" in capsys.readouterr().out
+        self._stale_marker(project)
+        assert cycle_mod.cycle_command(["status", "--phase", "feat-x", "--type", "plan"]) == 0
+        out = capsys.readouterr().out
+        assert "dispatch: PAUSED (4d 15h ago, by claude)" in out and "tagteam resume" in out
+        assert state_mod.state_command([]) == 0
+        assert "Dispatch:   PAUSED (4d 15h ago" in capsys.readouterr().out
+
+    def test_watcher_log_ages_the_reason(self, project, capsys):
+        self._stale_marker(project)
+        p = TestWatcherPauseAllModes()._proc("notify", project)
+        with patch("tagteam.watcher.notify_macos"):
+            p.tick(TestWatcherPauseAllModes()._state(1))
+        out = capsys.readouterr().out
+        assert "!! PAUSED (4d 15h ago, by claude): roadmap run complete" in out
+
+
 # ---------------------------------------------------------------------------
 # cancel-turn
 # ---------------------------------------------------------------------------

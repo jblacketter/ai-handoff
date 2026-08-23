@@ -69,6 +69,8 @@ If there is no state file, show: `Phase: — | Type: — | Round: — | Turn: �
 2. Address the feedback: update the plan or implementation files
 3. Add your round and update state in one command: `tagteam cycle add --phase [phase] --type [plan|impl] --role lead --action SUBMIT_FOR_REVIEW --round [N+1] --updated-by [your-agent-name] --content "summary of changes"`
 
+**Dispatch paused?** If the write prints `note: watcher dispatch is PAUSED (…)`, the turn was recorded but the other agent will **not** be woken: an arbiter `tagteam pause` marker is held (it survives watcher restarts and new cycles — the age and the state it was set on are in the note). Say so in your response; the arbiter releases it with `tagteam resume`. `tagteam cycle status` shows `dispatch:` at any time.
+
 **Verification budget — the one-run rule (impl cycles).** A submission costs **one** full-suite run, the one on the record. Run focused tests while you work; then:
 - `gatekeeper.on_submit: true` (and the type is gated): the gate's run *is* the run — your `tagteam cycle add … SUBMIT_FOR_REVIEW` runs it and prints the verdict. Pre-flight with `tagteam gate check --skip-tests` (scope + plan-doc, seconds). Do **not** run the suite yourself before submitting; cite the gate in your submission (`gate: see entry @ <commit>`). `--no-gate` skips only the synchronous run — use it only when a watcher (or `tagteam gate run`) will gate the submission; you still do not run the suite.
 - gate off / not on for this type: run the full suite **once**, right before you submit, and cite it (`full suite: N passed, M skipped @ <commit>`).
@@ -124,6 +126,7 @@ Replace `[agent name]` with the next agent's name. For completed/escalated/needs
 1. Read `tagteam.yaml` to confirm you are the lead
 2. Create or verify the phase plan at `docs/phases/[phase].md` (Summary, Scope, Technical Approach, Files, Success Criteria)
 3. Create the cycle and update state in one command: `tagteam cycle init --phase [phase] --type [plan|impl] --lead [lead-name] --reviewer [reviewer-name] --updated-by [your-agent-name] --content "summary of initial submission"`
+   If it prints `note: watcher dispatch is PAUSED (…)`, the reviewer will not be woken until the arbiter runs `tagteam resume` — say so in your response.
 4. Begin your response with the status banner (showing the newly created state).
 5. End with the NEXT COMMAND box.
 
@@ -180,7 +183,7 @@ For both agents. Re-reads everything and gives a full orientation.
 
 1. Read `tagteam.yaml` → show role assignment
 2. Read `handoff-state.json` → show current state
-3. Read active cycle via `tagteam cycle status --phase [phase] --type [type]` and `tagteam cycle rounds --phase [phase] --type [type]` → show round, last action
+3. Read active cycle via `tagteam cycle status --phase [phase] --type [type]` and `tagteam cycle rounds --phase [phase] --type [type]` → show round, last action, and the `dispatch:` line (`not paused`, or `PAUSED (age, by): reason`)
 4. Begin with the status banner: `Phase: [phase] | Type: [plan/impl] | Round: [N] | Turn: [agent] | Status: [state]` and description line
 5. Show role assignments and cycle details below the banner
 6. End with the NEXT COMMAND box showing the appropriate next action.

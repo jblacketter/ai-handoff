@@ -1205,9 +1205,52 @@ def _cli_init(args: list[str]) -> int:
                updated_by=updated_by)
     print(f"Cycle created: {phase}_{cycle_type} (round 1, ready_for: reviewer)"
           " + state updated")
+    _print_pause_notice(reviewer)
     if not no_gate:
         _on_submit_gate(phase, cycle_type, reviewer)
     return 0
+
+
+def _print_pause_notice(next_agent: str | None = None) -> None:
+    """After a write that hands the turn over: if watcher dispatch is paused
+    (`.tagteam/headless-paused.json`), say so — the watcher's own log is the
+    only other place the pause is visible and the writer does not read it."""
+    try:
+        from tagteam.headless import handoff_pause_notice
+        from tagteam.state import _resolve_project_root
+        note = handoff_pause_notice(_resolve_project_root(), next_agent)
+    except Exception:
+        note = None
+    if note:
+        print(note)
+
+
+def _dispatch_line() -> str:
+    """`cycle status` / `state` field: is watcher dispatch held by a pause marker?"""
+    try:
+        from tagteam.headless import read_pause, describe_pause
+        from tagteam.state import _resolve_project_root
+        info = read_pause(_resolve_project_root())
+    except Exception:
+        return "unknown"
+    if info is None:
+        return "not paused"
+    return describe_pause(info) + " — tagteam resume to release"
+
+
+def _agent_name_for(role: str | None) -> str | None:
+    if role not in ("lead", "reviewer"):
+        return None
+    try:
+        from tagteam.config import read_config, get_agent_names
+        from tagteam.state import _resolve_project_root
+        cfg = read_config(Path(_resolve_project_root()) / "tagteam.yaml")
+        if cfg is None:
+            return role
+        lead, reviewer = get_agent_names(cfg)
+        return lead if role == "lead" else reviewer
+    except Exception:
+        return role
 
 
 def _strip_flag(args: list[str], flag: str) -> tuple[list[str], bool]:
@@ -1273,6 +1316,8 @@ def _cli_add(args: list[str]) -> int:
     print(f"Round added: {phase}_{cycle_type} round={status['round']} "
           f"state={status['state']} ready_for={status.get('ready_for')}"
           " + state updated")
+    if status.get("ready_for"):
+        _print_pause_notice(_agent_name_for(status.get("ready_for")))
     if role == "lead" and action == "SUBMIT_FOR_REVIEW" and not no_gate:
         _on_submit_gate(phase, cycle_type)
     return 0
@@ -1292,6 +1337,7 @@ def _cli_status(args: list[str]) -> int:
     if status is not None:
         for k, v in status.items():
             print(f"{k}: {v}")
+        print(f"dispatch: {_dispatch_line()}")
         return 0
 
     # Fall back to legacy markdown — extract status from CYCLE_STATUS block
