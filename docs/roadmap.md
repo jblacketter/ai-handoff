@@ -9,6 +9,16 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ## Phases
 
+### Phase 47: Reviewer Context Parity
+- **Status:** Implemented, awaiting impl review (2026-08-29)
+- **Description:** The headless turn prompt carried the contract, the state and the round tail — and nothing about the project under review. Adds a provider-aware `PROJECT CONTEXT` block (the context file the provider's own CLI does *not* auto-load) and, for impl cycles, a `CHANGE SURFACE` block built from the existing `compute_scope_diff`, so the reviewer is handed the baseline sha and the attributable path list instead of guessing which diff to read.
+- **Key Deliverables:**
+  - `select_context_file` / `read_project_context` / `render_project_context` in `headless.py`
+  - `collect_change_surface` / `render_change_surface` reusing `cycle.compute_scope_diff`
+  - Two optional kwargs on `compose_prompt`; both blocks degrade to absent, never fail a turn
+  - 19 tests in `tests/test_headless.py`
+- See `docs/phases/reviewer-context-parity.md`
+
 ### Phase 1: Configurable Agents Init
 - **Status:** Complete
 - **Description:** Create interactive init command for configuring AI agents and their roles

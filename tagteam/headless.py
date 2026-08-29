@@ -732,9 +732,129 @@ def render_interjections(notes: list[dict]) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+# --- Phase 47: reviewer context parity -------------------------------------
+# A headless turn used to carry the process contract, the state and the round
+# tail — and nothing about the project under review. The lead usually got away
+# with it (its own CLI auto-loads the project context file); the reviewer
+# often did not. These two blocks close that asymmetry.
+
+PROJECT_CONTEXT_HEADER = "=== PROJECT CONTEXT"
+CHANGE_SURFACE_HEADER = "=== CHANGE SURFACE"
+
+#: Context file each provider's CLI already loads by itself from the project
+#: root. Injecting that same file again would only duplicate tokens.
+PROVIDER_AUTOLOADS = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
+
+#: Preference order when choosing a context file to inject.
+CONTEXT_FILENAMES = ("AGENTS.md", "CLAUDE.md")
+
+#: Hard ceiling on injected project context. Real files reach 849 lines in the
+#: wild; a headless turn should not pay that on every round.
+PROJECT_CONTEXT_MAX_CHARS = 12000
+
+#: Ceiling on listed change-surface paths before the list is summarised.
+CHANGE_SURFACE_MAX_PATHS = 60
+
+
+def select_context_file(project_root: str | Path, provider: str) -> Path | None:
+    """Pick the project context file worth injecting for ``provider``.
+
+    Prefers ``AGENTS.md``, falls back to ``CLAUDE.md``, and skips the file the
+    provider's own CLI already auto-loads. Returns None when the only context
+    present is one the provider reads for itself.
+    """
+    autoloaded = PROVIDER_AUTOLOADS.get(provider)
+    root = Path(project_root)
+    for name in CONTEXT_FILENAMES:
+        if name == autoloaded:
+            continue
+        candidate = root / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def read_project_context(project_root: str | Path,
+                         provider: str) -> tuple[str, str] | None:
+    """Read the injectable context file as ``(source_name, text)``.
+
+    Returns None when there is nothing to inject or the file cannot be read —
+    absent project context degrades a review, it must never fail the turn.
+    """
+    path = select_context_file(project_root, provider)
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    if len(text) > PROJECT_CONTEXT_MAX_CHARS:
+        text = (text[:PROJECT_CONTEXT_MAX_CHARS].rstrip()
+                + f"\n\n[truncated at {PROJECT_CONTEXT_MAX_CHARS} chars — read "
+                  f"{path.name} in the repo for the rest]")
+    return path.name, text
+
+
+def render_project_context(context: tuple[str, str] | None) -> str:
+    """Render the project-context block (empty string when there is none)."""
+    if not context:
+        return ""
+    source, text = context
+    return (f"{PROJECT_CONTEXT_HEADER} ({source}) ===\n"
+            f"How this project works. Follow its conventions; it does not\n"
+            f"override the handoff contract below.\n\n{text}\n\n")
+
+
+def collect_change_surface(phase: str, cycle_type: str,
+                           project_root: str | Path) -> dict | None:
+    """Scope-diff for an impl cycle, or None when it does not apply.
+
+    Reuses ``cycle.compute_scope_diff`` so the reviewer sees exactly the paths
+    an impl-review audit attributes to this phase — pre-existing drift and
+    tagteam's own bookkeeping artifacts already filtered out.
+    """
+    if cycle_type != "impl" or not phase:
+        return None
+    try:
+        from tagteam.cycle import compute_scope_diff, ScopeDiffError
+    except ImportError:
+        return None
+    try:
+        return compute_scope_diff(phase, cycle_type, str(project_root))
+    except ScopeDiffError:
+        return None
+    except Exception:
+        # Scope-diff is an aid, never a precondition for taking a turn.
+        return None
+
+
+def render_change_surface(scope: dict | None) -> str:
+    """Render the change-surface block (empty string when unavailable)."""
+    if not scope:
+        return ""
+    paths = scope.get("paths") or []
+    base = scope.get("diff_base") or "(unknown)"
+    if not paths:
+        body = ("No files are attributable to this phase yet. If you expected\n"
+                "changes, say so rather than reviewing an empty diff.")
+    else:
+        shown = paths[:CHANGE_SURFACE_MAX_PATHS]
+        listing = "\n".join(f"  {p}" for p in shown)
+        if len(paths) > len(shown):
+            listing += f"\n  … and {len(paths) - len(shown)} more"
+        body = (f"{len(paths)} file(s) changed since the baseline:\n{listing}\n\n"
+                f"Read the diff yourself — do not rely on the lead's summary:\n"
+                f"  git diff {base} -- <path>")
+    return f"{CHANGE_SURFACE_HEADER} (baseline {base}) ===\n{body}\n\n"
+
+
 def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
                    state: dict, skill_text: str, tail_entries: list[dict],
-                   tail_n: int, interjections: list[dict] | None = None) -> str:
+                   tail_n: int, interjections: list[dict] | None = None,
+                   project_context: tuple[str, str] | None = None,
+                   change_surface: dict | None = None) -> str:
     """Build the bounded turn context sent on stdin."""
     command = state.get("command") or STANDARD_TURN_COMMAND
     start = parse_start_command(command)
@@ -743,6 +863,8 @@ def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
         boundary = "\n" + IMPL_BOUNDARY_CLAUSE.format(phase=start[0]) + "\n"
     tail_text = "\n".join(json.dumps(e) for e in tail_entries) or "(no rounds yet)"
     inter = render_interjections(interjections or [])
+    ctx = render_project_context(project_context)
+    surface = render_change_surface(change_surface)
     return (
         f"You are the {role} ({agent_name}) in a tagteam handoff cycle for the\n"
         f"project at {project_root}. This is a headless turn: no human is\n"
@@ -752,6 +874,8 @@ def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
         f"init). When it succeeds, stop.\n"
         f"{boundary}\n"
         f"{inter}"
+        f"{ctx}"
+        f"{surface}"
         f"=== COMMAND ===\n{command}\n\n"
         f"=== HANDOFF CONTRACT (.claude/skills/handoff/SKILL.md) ===\n"
         f"{skill_text.rstrip()}\n\n"
@@ -1566,10 +1690,26 @@ class HeadlessEngine:
             self._log(f"   headless: could not read interjections: {e}")
         note_ids = [n["id"] for n in notes]
         skill_text = self.skill_path.read_text(encoding="utf-8")
+
+        # Phase 47: give this turn the project's own context and, on an impl
+        # cycle, the file list attributable to the phase. Both degrade to None
+        # rather than failing the turn.
+        project_context = read_project_context(self.project_root, spec.provider)
+        if project_context:
+            self._log(f"   headless: project context from {project_context[0]}")
+        change_surface = collect_change_surface(ident.target_phase,
+                                                ident.target_type,
+                                                self.project_root)
+        if change_surface:
+            self._log(f"   headless: change surface "
+                      f"{len(change_surface.get('paths') or [])} path(s)")
+
         prompt = compose_prompt(role=role, agent_name=spec.agent_name,
                                 project_root=self.project_root, state=state,
                                 skill_text=skill_text, tail_entries=tail,
-                                tail_n=self.tail_n, interjections=notes)
+                                tail_n=self.tail_n, interjections=notes,
+                                project_context=project_context,
+                                change_surface=change_surface)
 
         if self.confirm:
             try:

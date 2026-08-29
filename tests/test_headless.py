@@ -1120,3 +1120,118 @@ class TestRateLimitCapture:
         monkeypatch.setattr(db, "connect", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no db")))
         line = '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1,"rateLimitType":"five_hour"}}'
         assert h.record_rate_limits(tmp_path, "claude", [line], log=lambda m: None) == 0
+
+
+# --- Phase 47: reviewer context parity -------------------------------------
+
+class TestProjectContextInjection:
+    """The context file a provider does NOT auto-load is the one worth sending."""
+
+    def _root(self, tmp_path, names):
+        for n in names:
+            (tmp_path / n).write_text(f"# {n}\nconventions for this project\n",
+                                      encoding="utf-8")
+        return tmp_path
+
+    def test_codex_gets_claude_md_when_only_claude_md_exists(self, tmp_path):
+        # The 40-repo case: CLAUDE.md present, no AGENTS.md. Codex would
+        # otherwise see nothing about the project at all.
+        root = self._root(tmp_path, ["CLAUDE.md"])
+        assert h.select_context_file(root, "codex").name == "CLAUDE.md"
+
+    def test_codex_skips_agents_md_it_already_autoloads(self, tmp_path):
+        root = self._root(tmp_path, ["AGENTS.md"])
+        assert h.select_context_file(root, "codex") is None
+
+    def test_codex_prefers_claude_md_when_both_exist(self, tmp_path):
+        root = self._root(tmp_path, ["AGENTS.md", "CLAUDE.md"])
+        assert h.select_context_file(root, "codex").name == "CLAUDE.md"
+
+    def test_claude_skips_claude_md_it_already_autoloads(self, tmp_path):
+        root = self._root(tmp_path, ["CLAUDE.md"])
+        assert h.select_context_file(root, "claude") is None
+
+    def test_claude_gets_agents_md(self, tmp_path):
+        root = self._root(tmp_path, ["AGENTS.md"])
+        assert h.select_context_file(root, "claude").name == "AGENTS.md"
+
+    def test_no_context_files_at_all(self, tmp_path):
+        assert h.select_context_file(tmp_path, "codex") is None
+        assert h.read_project_context(tmp_path, "codex") is None
+
+    def test_empty_file_is_not_injected(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("   \n", encoding="utf-8")
+        assert h.read_project_context(tmp_path, "codex") is None
+
+    def test_oversized_context_is_truncated(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("x" * 40000, encoding="utf-8")
+        source, text = h.read_project_context(tmp_path, "codex")
+        assert source == "CLAUDE.md"
+        assert len(text) < 40000
+        assert "truncated" in text
+
+    def test_render_is_empty_without_context(self):
+        assert h.render_project_context(None) == ""
+
+    def test_render_names_its_source(self):
+        out = h.render_project_context(("AGENTS.md", "body text"))
+        assert "AGENTS.md" in out
+        assert "body text" in out
+        assert out.startswith(h.PROJECT_CONTEXT_HEADER)
+
+
+class TestChangeSurface:
+    """The reviewer is told which diff to read, not left to guess."""
+
+    def test_plan_cycles_have_no_change_surface(self, tmp_path):
+        assert h.collect_change_surface("feat-x", "plan", tmp_path) is None
+
+    def test_missing_phase_is_skipped(self, tmp_path):
+        assert h.collect_change_surface("", "impl", tmp_path) is None
+
+    def test_unavailable_scope_diff_does_not_raise(self, tmp_path):
+        # No cycle exists here — ScopeDiffError must degrade to None.
+        assert h.collect_change_surface("nope", "impl", tmp_path) is None
+
+    def test_render_is_empty_without_scope(self):
+        assert h.render_change_surface(None) == ""
+
+    def test_render_lists_paths_and_baseline(self):
+        out = h.render_change_surface({"paths": ["a.py", "b.py"],
+                                       "diff_base": "abc123"})
+        assert "abc123" in out
+        assert "a.py" in out and "b.py" in out
+        assert "2 file(s) changed" in out
+
+    def test_render_caps_long_path_lists(self):
+        paths = [f"f{i}.py" for i in range(200)]
+        out = h.render_change_surface({"paths": paths, "diff_base": "abc123"})
+        assert "and 140 more" in out
+        assert "f199.py" not in out
+
+    def test_render_flags_an_empty_surface(self):
+        out = h.render_change_surface({"paths": [], "diff_base": "abc123"})
+        assert "No files are attributable" in out
+
+
+class TestComposePromptWithNewBlocks:
+    """Both blocks are optional; the prompt is unchanged when they are absent."""
+
+    BASE = dict(role="reviewer", agent_name="codex", project_root="/tmp/p",
+                skill_text="CONTRACT", tail_entries=[], tail_n=3)
+
+    def test_absent_blocks_leave_prompt_clean(self):
+        out = h.compose_prompt(state={"command": STD_CMD}, **self.BASE)
+        assert h.PROJECT_CONTEXT_HEADER not in out
+        assert h.CHANGE_SURFACE_HEADER not in out
+
+    def test_blocks_appear_before_the_contract(self):
+        out = h.compose_prompt(state={"command": STD_CMD},
+                               project_context=("CLAUDE.md", "project rules"),
+                               change_surface={"paths": ["x.py"],
+                                               "diff_base": "sha1"},
+                               **self.BASE)
+        assert out.index(h.PROJECT_CONTEXT_HEADER) < out.index("=== HANDOFF CONTRACT")
+        assert out.index(h.CHANGE_SURFACE_HEADER) < out.index("=== HANDOFF CONTRACT")
+        assert "project rules" in out
+        assert "x.py" in out
