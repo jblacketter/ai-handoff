@@ -1031,7 +1031,7 @@ def gate_command(args: list[str], project_root: str | Path | None = None, out=No
                 print(res.decision["content"], file=out)
             print(f"gate: {res.status} — {res.reason}" + (f" ({res.event_key})" if res.event_key else ""), file=out)
             if res.status == "pass":
-                print("next: the reviewer's turn (the watcher, if running, hands off; otherwise tell the reviewer to run /handoff)", file=out)
+                print(f"next: the reviewer's turn (the watcher, if running, hands off; otherwise tell the reviewer to run {handoff_command(root)})", file=out)
             elif res.status == "bounce":
                 print("next: the lead's turn (turn handed back with the failing report)", file=out)
         return 0 if res.status in ("pass", "bounce", "not-applicable") else 1

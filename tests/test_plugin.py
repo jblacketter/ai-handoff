@@ -225,7 +225,64 @@ class TestContractCommand:
     def test_path(self, tmp_path):
         r = subprocess.run([sys.executable, "-m", "tagteam", "contract", "--path"], cwd=str(tmp_path),
                            capture_output=True, text=True)
-        assert r.returncode == 0 and Path(r.stdout.strip()) == PACKAGED.resolve() or r.stdout.strip().endswith("SKILL.md")
+        assert r.returncode == 0
+        assert Path(r.stdout.strip()).resolve() == PACKAGED.resolve()
+
+
+class TestRuntimeStringsAudit:
+    """No runtime instruction may point an agent at the vendored path or an
+    unconditional `/handoff`: a migrated project has neither."""
+
+    RUNTIME = sorted((REPO / "tagteam").glob("*.py"))
+    # modules that legitimately name the path: they define/resolve it
+    PATH_OWNERS = {"contract.py", "headless.py", "plugin.py", "setup.py"}
+
+    def test_no_bare_vendored_path_instruction(self):
+        hits = []
+        for f in self.RUNTIME:
+            if f.name in self.PATH_OWNERS:
+                continue
+            for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if ".claude/skills/handoff/SKILL.md" in line and not line.lstrip().startswith("#"):
+                    hits.append(f"{f.name}:{n}: {line.strip()}")
+        assert not hits, "\n".join(hits)
+
+    def test_no_unconditional_slash_handoff_instruction(self):
+        import re
+        pat = re.compile(r"(run|type|paste|tell [^\"']+ to run)\s+/handoff\b")
+        hits = []
+        for f in self.RUNTIME:
+            for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if pat.search(line) and "handoff_command" not in line and not line.lstrip().startswith("#"):
+                    hits.append(f"{f.name}:{n}: {line.strip()}")
+        assert not hits, "\n".join(hits)
+
+    def test_prime_message_names_both_routes(self):
+        from tagteam.session import PRIME_MESSAGE
+        from tagteam.contract import CONTRACT_HOWTO
+        assert CONTRACT_HOWTO in PRIME_MESSAGE and ".claude/skills" not in PRIME_MESSAGE
+
+    def test_lead_chat_header_is_project_aware(self, tmp_path):
+        from tagteam.lead_chat import FIRST_TURN_HEADER
+        from tagteam.contract import handoff_command
+        migrated = FIRST_TURN_HEADER.format(root=tmp_path, name="x", state_line="s",
+                                            handoff_cmd=handoff_command(tmp_path))
+        assert "/tagteam:handoff start <phase>" in migrated and ".claude/skills" not in migrated
+        d = tmp_path / ".claude" / "skills" / "handoff"; d.mkdir(parents=True); (d / "SKILL.md").write_text("x")
+        vendored = FIRST_TURN_HEADER.format(root=tmp_path, name="x", state_line="s",
+                                            handoff_cmd=handoff_command(tmp_path))
+        assert "`/handoff start <phase>`" in vendored
+
+    @pytest.mark.parametrize("vendored", [False, True])
+    def test_gate_and_panel_next_lines_are_project_aware(self, tmp_path, vendored):
+        from tagteam.contract import handoff_command
+        if vendored:
+            d = tmp_path / ".claude" / "skills" / "handoff"; d.mkdir(parents=True); (d / "SKILL.md").write_text("x")
+        expect = "/handoff" if vendored else "/tagteam:handoff"
+        assert handoff_command(tmp_path) == expect
+        # the literal strings the two manual paths print are built from handoff_command(root)
+        src = (REPO / "tagteam" / "gatekeeper.py").read_text() + (REPO / "tagteam" / "panel.py").read_text()
+        assert src.count("tell the reviewer to run {handoff_command(root)}") == 2
 
 
 class TestProvenance:

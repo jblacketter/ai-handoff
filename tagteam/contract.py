@@ -18,12 +18,15 @@ PACKAGED_SKILL_PATH = Path(__file__).parent / "data" / SKILL_RELPATH
 PLUGIN_SKILL_COMMAND = "/tagteam:handoff"   # plugin skills are namespaced by plugin name
 LOCAL_SKILL_COMMAND = "/handoff"            # a project-local (vendored) skill
 
-# The standard "act on your turn" command written by cycle add/init. It must
-# work for any agent: Claude Code has the slash command; anything with a
-# shell (Codex) reads the same contract with `tagteam contract`.
+# How any agent gets at the contract: Claude Code has the slash command;
+# anything with a shell (Codex) reads the same bytes with `tagteam contract`.
+# Every runtime instruction that names the contract is built from this one
+# phrase — never from a file path, which a migrated project no longer has.
+CONTRACT_HOWTO = "the handoff contract (`tagteam contract`; in Claude Code: /tagteam:handoff)"
+
+# The standard "act on your turn" command written by cycle add/init.
 STANDARD_TURN_COMMAND = (
-    "Read the handoff contract (`tagteam contract`; in Claude Code: "
-    "/tagteam:handoff) and handoff-state.json, then act on your turn"
+    f"Read {CONTRACT_HOWTO} and handoff-state.json, then act on your turn"
 )
 
 

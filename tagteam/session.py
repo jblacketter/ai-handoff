@@ -23,9 +23,10 @@ SESSION_NAME = "tagteam"
 SUPPORTED_BACKENDS = ("iterm2", "tmux", "terminal", "manual")
 _TAB_BACKEND_LABELS = {"iterm2": "iTerm2", "terminal": "Terminal.app"}
 TAB_BACKENDS_FOR_MESSAGES = tuple(_TAB_BACKEND_LABELS)
+from tagteam.contract import CONTRACT_HOWTO  # noqa: E402
+
 PRIME_MESSAGE = (
-    "Read tagteam.yaml to see your role, then read"
-    " .claude/skills/handoff/SKILL.md for the workflow."
+    f"Read tagteam.yaml to see your role, then read {CONTRACT_HOWTO} for the workflow."
 )
 
 # Markers that an agent TUI (not the shell) has drawn its input prompt and
