@@ -194,3 +194,39 @@ class TestLegacyUserSkillNote:
         p = tmp_path / "proj"; p.mkdir(); registry_mod.register_project(str(p))
         assert upgrade_command() == 0
         assert "may conflict" not in capsys.readouterr().out
+
+    def test_run_setup_already_complete_still_reports_once(self, project, tmp_path, monkeypatch, capsys):
+        """quickstart rerun on a configured project: the early-return path
+        must report exactly once and modify nothing (impl review r2)."""
+        no_plugin(tmp_path, monkeypatch)
+        framework_files(project, skill=True)
+        cfg = self._legacy(tmp_path, monkeypatch)
+        before = self._snapshot(cfg)
+        su.run_setup(str(project))
+        out = capsys.readouterr().out
+        assert "Framework files already present" in out
+        assert out.count("may conflict with the tagteam plugin") == 1
+        assert "tagteam did not modify them" in out and "rm " not in out
+        assert self._snapshot(cfg) == before
+
+    def test_run_setup_already_complete_no_plugin_flag_is_silent(self, project, tmp_path, monkeypatch, capsys):
+        no_plugin(tmp_path, monkeypatch)
+        framework_files(project, skill=True)
+        self._legacy(tmp_path, monkeypatch)
+        su.run_setup(str(project), no_plugin=True)
+        assert "may conflict" not in capsys.readouterr().out
+
+    def test_quickstart_rerun_reports_once(self, project, tmp_path, monkeypatch, capsys):
+        """The real quickstart entry point over an already-complete project."""
+        from unittest.mock import patch
+        from tagteam.cli import quickstart_command
+        no_plugin(tmp_path, monkeypatch)
+        framework_files(project, skill=True)
+        cfg = self._legacy(tmp_path, monkeypatch)
+        before = self._snapshot(cfg)
+        with patch("tagteam.session.ensure_session", return_value="created"), \
+                patch("tagteam.cli.needs_init", return_value=False):
+            quickstart_command(["--dir", str(project), "--backend", "manual"])
+        out = capsys.readouterr().out
+        assert out.count("may conflict with the tagteam plugin") == 1
+        assert self._snapshot(cfg) == before

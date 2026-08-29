@@ -1,0 +1,25 @@
+{
+  "state": "in-progress",
+  "ready_for": "lead",
+  "round": 2,
+  "phase": "legacy-skill-drift",
+  "type": "impl",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-08-29",
+  "baseline": {
+    "sha": "5c194277ff42f69d7f2b9b70d7a4e601a68d6e9f",
+    "dirty_paths": [],
+    "captured_at": "2026-08-29T22:04:52.501648+00:00",
+    "source": "copied-from-plan"
+  },
+  "impl_boundary": {
+    "sha": "bb2f433098f80d849eaf5c7a4dfac4ed119f7c5a",
+    "dirty": {
+      "docs/handoffs/legacy-skill-drift_plan_rounds.jsonl": "78a5a19dc6b885fa8eb9a7858786eee124293cfd71eb82cd8f607372ef5737dc",
+      "docs/handoffs/legacy-skill-drift_plan_status.json": "326404c5dca12d779bd7bf930427ff68606373118eec7a94cbb8987c403b4af4"
+    },
+    "captured_at": "2026-08-29T22:10:02.346435+00:00",
+    "source": "copied-from-plan"
+  }
+}
