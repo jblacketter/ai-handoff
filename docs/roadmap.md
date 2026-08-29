@@ -9,6 +9,11 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ## Phases
 
+### Phase 49: Legacy Skill Drift
+- **Status:** Plan cycle opened 2026-08-29; see `docs/phases/legacy-skill-drift.md`
+- **Description:** After Phase 48, superseded pre-plugin artifacts still describe the old contract: ten user-level `~/.claude/skills/handoff-*` skills competed with `tagteam:handoff` in every project (removed by hand on the arbiter's machine), the shipped `data/workflows.md` documents the dead `/handoff-*` command family into every project, and `server.py` still emits `/handoff-cycle`. Retire the dead family from what tagteam ships; **detect and report** superseded user-level skills from `setup`/`upgrade` rather than delete them (a project tool never writes to `~/.claude/` — provenance rule from Phase 48). Reviewer rules on detect-vs-remove.
+- **Depends on:** Phase 48 (released 3.10.0)
+
 ### Phase 48: Plugin Distribution
 - **Status:** ✅ Complete — plan approved round 3, impl approved round 5 (2026-08-29); PR #28 merged; released as **3.10.0** (tag `v3.10.0`, PyPI 2026-08-29). See `docs/phases/plugin-distribution.md`
 - **Description:** `tagteam setup` vendors the handoff contract into every project, and the copies have forked — 58 on the arbiter's machine, 6 live projects running a 155-line contract with no mention of the gatekeeper, the one-run rule, AMEND, interjections, GATE_BOUNCE or the panel. Ship the Claude-facing contract as an installable plugin (skill + SessionStart hook), keep the engine in the package, and change `setup` from vendoring to removing the vendored copy once the plugin is present.
