@@ -1,7 +1,7 @@
 # Phase 49: Legacy skill drift — detect superseded contracts, retire the dead command family
 
 ## Status
-- [ ] Planning — plan cycle opened 2026-08-29. Round 1: reviewer ruled **B (detect and report; no deletion, no flag)** and required four plan changes, applied in round 2 (marked *r2*).
+- [x] Planning — plan approved round 3 (2026-08-29, bb2f433). Round 1: reviewer ruled **B (detect and report; no deletion, no flag)** and required four plan changes, applied in round 2 (marked *r2*).
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
