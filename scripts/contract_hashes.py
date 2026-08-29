@@ -28,6 +28,13 @@ def _git(root: Path, *args: str) -> str:
                           capture_output=True, text=True).stdout
 
 
+def _is_shallow(root: Path) -> bool:
+    try:
+        return _git(root, "rev-parse", "--is-shallow-repository").strip() == "true"
+    except subprocess.CalledProcessError:
+        return False
+
+
 def compute(root: Path) -> dict:
     commits = _git(root, "log", "--format=%H", "--follow", "--", CONTRACT).split()
     hashes: dict[str, str] = {}
@@ -65,8 +72,11 @@ def main(argv: list[str] | None = None) -> int:
             check = True; i += 1
         else:
             print(__doc__.strip(), file=sys.stderr); return 1
-    text = render(compute(root))
     out = root / OUT
+    if check and _is_shallow(root):
+        print(f"{OUT}: check skipped — shallow clone (history incomplete); fetch-depth 0 to verify")
+        return 0
+    text = render(compute(root))
     if check:
         current = out.read_text(encoding="utf-8") if out.exists() else ""
         if current != text:
