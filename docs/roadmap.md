@@ -10,18 +10,18 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 ## Phases
 
 ### Phase 48: Plugin Distribution
-- **Status:** Planned — plan cycle not yet started; see `docs/phases/plugin-distribution.md`
-- **Description:** `tagteam setup` vendors the handoff contract into every project, and the copies have forked — 58 on the arbiter's machine, 6 live projects running a 155-line contract with no mention of the gatekeeper, the one-run rule, AMEND, interjections, GATE_BOUNCE or the panel. Ship the Claude-facing contract as an installable plugin (skill + agents + SessionStart hook), keep the engine in the package, and change `setup` from vendoring to removing the vendored copy once the plugin is present.
+- **Status:** Plan cycle in progress — round 1: direction approved, scope ruled B (skill + SessionStart hook; agents deferred), migration set ratified, four plan fixes requested; round 2 submitted 2026-08-29. See `docs/phases/plugin-distribution.md`
+- **Description:** `tagteam setup` vendors the handoff contract into every project, and the copies have forked — 58 on the arbiter's machine, 6 live projects running a 155-line contract with no mention of the gatekeeper, the one-run rule, AMEND, interjections, GATE_BOUNCE or the panel. Ship the Claude-facing contract as an installable plugin (skill + SessionStart hook), keep the engine in the package, and change `setup` from vendoring to removing the vendored copy once the plugin is present.
 - **Key Deliverables:**
-  - `.claude-plugin/plugin.json` + `marketplace.json`; handoff skill as the single source of truth
-  - `codex-brief` and reviewer agents; `SessionStart` hook surfacing phase/type/round/turn
-  - `setup.py` plugin detection + remove path; `scripts/release.py` bumps `plugin.json` in lockstep
-  - Runtime `tagteam --version` skew warning against a declared minimum
-- **Seam:** if Claude reads it → plugin; if the CLI reads it or a human edits it after seeding → package
+  - `plugin/` tree (`.claude-plugin/plugin.json`, `skills/handoff/SKILL.md`, `hooks/hooks.json`) + repo-root `marketplace.json`; plugin and packaged contract copies pinned byte-identical by test
+  - `headless.py` contract resolution: explicit → project-local → packaged; prompt header names the source
+  - `setup.py` fail-closed plugin detection (installed-and-enabled for *this* project, from Claude Code's own records) + hash-gated remove path (content provenance from git history, never pathname)
+  - `tagteam hook session-start`: cycle banner + version-skew warning, silent exit 0 on every failure — the hook body and the skew emitter
+  - `scripts/release.py` bumps `plugin.json`, regenerates the vendored-hash file, refuses on contract-copy mismatch; publish guard extended
+- **Seam:** if only Claude reads it → plugin; if the CLI reads it or a human edits it after seeding → package. The contract is read by both, so it exists in both, pinned identical.
 - **Decided:** plugin ships from this repo (lockstep versioning with `pyproject.toml`)
-- **Referred to the plan review:** (a) v1 scope — skill only / skill + SessionStart hook / skill + hook + agents (lead recommends the middle); (b) confirm the migration set — migrate `bugalizer`, `northstar/ns-wip-tests`, `harmonic`; skip three archived snapshots; `archive/handoff-test` gets a contract-version note rather than a migration
-- **Deferred:** public marketplace publication — revisit at release, nothing structural depends on it
-- **Depends on:** Phase 47 (merged)
+- **Ruled in plan review (r1):** v1 = B; migrate `bugalizer`, `northstar/ns-wip-tests`, `harmonic`; skip three archived snapshots; `archive/handoff-test` gets a contract-version note (no fixture consumes it)
+- **Deferred:** `codex-brief` / reviewer agents (own phase)
 
 ### Phase 47: Reviewer Context Parity
 - **Status:** ✅ Complete — impl approved round 2 (2026-08-29; no plan cycle by the arbiter's instruction — implementation reviewed directly; r1 fix: non-UTF-8 context file degrades to None). Merged 2026-08-29 via PR #27; released as **3.9.0** (tag `v3.9.0`, PyPI 2026-08-29).

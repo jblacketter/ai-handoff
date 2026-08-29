@@ -1,7 +1,7 @@
 # Phase 48: Plugin distribution — one contract, installed once, instead of 58 forks
 
 ## Status
-- [ ] Planning — plan cycle not yet started. This document is the plan submission.
+- [ ] Planning — plan cycle in progress. Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below).
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
@@ -54,24 +54,39 @@ per-project; it is a pure, versioned document.
 
 That yields a rule sharp enough to classify every shipped file:
 
-> **If Claude reads it, it can be a plugin asset.
-> If the tagteam CLI reads it, or a human edits it after seeding, it stays.**
+> **If only Claude reads it, it is a plugin asset.
+> If the tagteam CLI reads it, or a human edits it after seeding, the package keeps it.**
+
+*(r2)* The contract is read by **both**: Claude discovers it as a skill, and the
+CLI reads it into every headless prompt (`headless.py` `SKILL_RELPATH`). So the
+contract is the one file that lives in both halves — the plugin tree delivers it
+to Claude, the package delivers it to tagteam-composed prompts — and a test pins
+the two copies byte-identical. The plugin is still the only thing Claude reads
+*from*; it is not the only place the bytes exist. The original "if Claude reads
+it → plugin" wording overstated the seam and is withdrawn.
 
 ### Moves to the plugin
 
 - `.claude/skills/handoff/` — the contract. Versioned once, installed once.
-- *(new)* `agents/` — a `codex-brief` agent that drafts a submission payload
-  without ever making the cycle-writing call, and a reviewer-side counterpart.
-- *(new)* `hooks/hooks.json` — a `SessionStart` hook printing phase / type /
+- *(new)* `hooks/hooks.json` — a `SessionStart` hook that surfaces phase / type /
   round / turn when the project has a `handoff-state.json`. Today the cycle state
-  is learned by running `/handoff`; the hook makes it ambient.
+  is learned by running `/handoff`; the hook makes it ambient. *(r2)* The hook is
+  a one-liner that delegates to a new CLI subcommand (see *The hook*); all logic
+  and all tests are on the Python side.
+- ~~`agents/`~~ — *(r2)* **deferred to a later phase** by round-1 ruling.
+  `codex-brief` is the agent forbidden from making the cycle-writing call — a
+  contract of its own that deserves its own review.
 
 ### Stays with the package
 
 `templates/`, `checklists/`, `workflows.md`, seeded `roadmap.md` and
 `decision_log.md` (per-project, substituted, human-edited); `data/panels/*.md`
-(read by `panel.py`, never by Claude directly); and the entire CLI — state
-machine, cycle store, watcher, gatekeeper, roadmap DAG, registry, cockpit, hub.
+(read by `panel.py`, never by Claude directly); *(r2)* the **packaged copy of the
+contract** at `tagteam/data/.claude/skills/handoff/SKILL.md` (read by
+`headless.py`, and still what `setup` vendors when the plugin is absent); and the
+entire CLI — state machine, cycle store, watcher, gatekeeper, roadmap DAG,
+registry, cockpit, hub — plus *(r2)* one new subcommand, `tagteam hook
+session-start`, which is the hook's body and the skew warning's emitter.
 
 The plugin is the **contract surface**. The package stays the **engine**.
 
@@ -87,13 +102,176 @@ tagteam-plugin/
 │   ├── plugin.json          # name, version, description, author, repo, license
 │   └── marketplace.json     # single-plugin marketplace manifest
 ├── skills/
-│   └── handoff/SKILL.md     # the single source of truth
-├── agents/
-│   ├── codex-brief.md
-│   └── handoff-reviewer.md
+│   └── handoff/SKILL.md     # what Claude discovers; byte-identical to the packaged copy (tested)
 └── hooks/
-    └── hooks.json           # SessionStart: surface cycle state
+    └── hooks.json           # SessionStart: `tagteam hook session-start` (see below)
 ```
+
+*(r2)* `agents/` is out of v1. The tree lives at `plugin/` in this repo; the
+repo-root `.claude-plugin/marketplace.json` points at it so `/plugin marketplace
+add jblacketter/tagteam` resolves.
+
+## The headless contract source *(r2 — round-1 fix 1)*
+
+`tagteam/headless.py` today hard-codes `SKILL_RELPATH = .claude/skills/handoff/
+SKILL.md` relative to the project, `HeadlessTurn.validate()` errors when it is
+absent, and the file is read into every headless prompt. Removing the vendored
+copy would therefore break every headless turn — criterion 4 as written was
+unachievable and "CLI behavior is out of scope" was false. Both are corrected.
+
+**Canonical source for tagteam-composed prompts:** the packaged copy,
+`tagteam/data/.claude/skills/handoff/SKILL.md`, resolved with
+`importlib.resources` — it already ships as package data and is exactly what
+`setup` vendors, so the engine and the prompt can never disagree on the contract
+version. Claude's plugin cache (`~/.claude/plugins/cache/…`) is **never** read
+for prompt composition: it is Claude's discovery mechanism, not tagteam's, and
+its layout is not a contract tagteam owns.
+
+**Resolution order** (`headless.resolve_skill_path(project_root, explicit) ->
+(Path, source)`):
+
+1. an explicit `skill_path` (existing `HeadlessTurn` kwarg / `--skill-path`) —
+   error if missing, exactly as today;
+2. the project-local `.claude/skills/handoff/SKILL.md` **if it exists** — a
+   project that deliberately keeps or customizes a vendored copy keeps winning,
+   so nothing changes for the 43 un-migrated projects;
+3. the packaged copy — the new normal for a migrated project.
+
+`validate()` only errors when *none* resolves (a broken install). The prompt
+header changes from the fixed `=== HANDOFF CONTRACT (.claude/skills/handoff/
+SKILL.md) ===` to `=== HANDOFF CONTRACT (<source>) ===` where `<source>` is
+`project` or `packaged`, so a turn log shows which path it took. That is the
+only prompt change, and it is outside the contract text.
+
+**Single source of truth in the repo:** `plugin/skills/handoff/SKILL.md` and
+`tagteam/data/.claude/skills/handoff/SKILL.md` are the same bytes, enforced by
+`tests/test_plugin.py::test_plugin_skill_matches_packaged_copy` and by
+`scripts/release.py`, which refuses to bump when they differ. Two files, one
+content, one guard — a symlink was rejected because setuptools package data
+does not carry symlinks reliably across sdist/wheel.
+
+**Tests in scope:** `tests/test_headless.py` — resolution picks project when
+present, packaged when absent, explicit always; `validate()` passes with no
+project-local skill; header names the source. Existing tests that create a
+project-local skill fixture keep passing unchanged (rule 2).
+
+## Plugin detection *(r2 — round-1 fix 2)*
+
+Presence of a directory under the plugin cache proves nothing — a cached plugin
+can be uninstalled, project-scoped to another path, or disabled. Detection reads
+Claude Code's own records and **fails closed**: any doubt → "not installed" →
+`setup` vendors exactly as today.
+
+`setup.plugin_status(project_root) -> PluginStatus(installed: bool, reason:
+str, install_path: Path | None)` decides **installed-and-enabled** for *this*
+project as follows:
+
+1. Config dir: `$CLAUDE_CONFIG_DIR` if set, else `~/.claude`.
+2. `<config>/plugins/installed_plugins.json` must exist, parse, and have
+   `version == 2` (the schema observed on the arbiter's machine; any other
+   version → not installed, reason names it).
+3. Key `tagteam@tagteam` (`<plugin name>@<marketplace name>`, both declared in
+   the manifests this repo ships). Its value is a list of install records; a
+   record **applies** to this project iff `scope == "user"`, or `scope ==
+   "project"` and `realpath(projectPath) == realpath(project_root)`. Any other
+   scope (or a missing/unknown one) does not apply.
+4. Enabled state: `enabledPlugins[key]` is consulted in `<config>/settings.json`,
+   `<project>/.claude/settings.json` and `<project>/.claude/settings.local.json`.
+   An explicit `false` in **any** of them → disabled. The plugin must be
+   explicitly `true` in at least one, or absent from all with an applicable
+   install record — whichever Claude Code's default is, the test fixture pins
+   the rule tagteam applies and the reason string says which file decided.
+5. The applying record's `installPath` must exist and contain
+   `skills/handoff/SKILL.md`; otherwise the install is broken → not installed.
+
+Malformed JSON, missing files, unexpected types, unreadable paths: all → not
+installed with a one-line reason. `tagteam setup` prints the verdict and reason
+before acting (`plugin: installed (user scope, enabled by ~/.claude/settings.json)`
+/ `plugin: not installed (…)`). `tagteam setup --no-plugin` forces the vendoring
+path regardless. There is **no** flag that forces the remove path.
+
+## Ownership-safe removal *(r2 — round-1 fix 3)*
+
+`setup` may only delete what `setup` wrote. Pathname is not provenance;
+**content** is. The repo's git history holds every version of the vendored
+contract ever shipped — 26 distinct blobs of
+`tagteam/data/.claude/skills/handoff/SKILL.md` as of 3.9.0 — and each has a
+stable sha256.
+
+- `scripts/contract_hashes.py` walks `git log --follow` over that path and writes
+  `tagteam/data/vendored_contract_hashes.json` (`{sha256: first_version_tag}`),
+  shipped as package data. `scripts/release.py` regenerates it on every bump;
+  a test asserts the current packaged contract's hash is present.
+- The remove path fires only when **all** of the following hold for
+  `<project>/.claude/skills/handoff/`:
+  - the directory contains exactly one entry, `SKILL.md` (no extra files, no
+    subdirectories, no symlinks — anything else is evidence of project ownership);
+  - `sha256(SKILL.md)` is in the known set.
+- Otherwise `setup` **keeps the directory untouched**, prints
+  `kept .claude/skills/handoff/: <reason>` (`SKILL.md modified — not a tagteam
+  vendored version` / `extra files present: …`), and does not vendor over it
+  either. The project stays on rule 2 of the headless resolution order (its
+  local copy wins), which is the correct outcome for a project that customized
+  its contract.
+- A removed directory is reported with the contract version it matched
+  (`removed vendored handoff skill (3.8.2 contract) — served by the plugin`), and
+  the registry entry records `contract: plugin`.
+
+**Unchanged and worth stating:** when the plugin is *not* detected, `setup` still
+does today's `rmtree` + `copytree` over `.claude/skills/handoff/`. That path
+already overwrites customizations and always has; the migration depends on it
+(the six stale projects must be overwritten). Tightening it is a separate
+question and out of scope here — this phase makes the *new* path safe, it does
+not audit the old one.
+
+**Tests (`tests/test_setup.py`):** known-hash SKILL.md alone → removed, message
+names the version; modified SKILL.md → kept, message says modified; known
+SKILL.md + extra file → kept, message lists the file; empty directory → left
+alone; plugin not installed → vendored as today; `--no-plugin` with plugin
+installed → vendored.
+
+## The hook and the skew warning *(r2 — round-1 fix 4)*
+
+The version-skew warning has to be emitted by *something*, and the round-1 plan
+said both the contract text and the CLI were untouchable. Resolution: the
+component is the **CLI**. The contract text stays byte-for-byte; the hook is
+inert JSON.
+
+`plugin/hooks/hooks.json`:
+
+```json
+{ "hooks": { "SessionStart": [ { "hooks": [ { "type": "command",
+  "command": "command -v tagteam >/dev/null 2>&1 && tagteam hook session-start --plugin-root \"$CLAUDE_PLUGIN_ROOT\" || true" } ] } ] } }
+```
+
+`tagteam hook session-start [--plugin-root DIR]` (new subcommand, `hook.py`):
+
+- If the cwd has no `tagteam.yaml` **or** no `handoff-state.json`: print
+  nothing, exit 0. A non-tagteam project with the plugin installed sees nothing.
+- If `handoff-state.json` is unreadable or malformed (bad JSON, missing keys,
+  wrong types): print nothing, exit 0. Never fail a session start.
+- Otherwise print one line, the status-banner shape the contract already
+  defines: `tagteam: phase <p> | type <t> | round <n> | turn <who> | status <s>`.
+- Skew: read `<plugin-root>/.claude-plugin/plugin.json`; if it declares
+  `tagteam.minVersion` (custom key, ignored by Claude Code) greater than
+  `tagteam.__version__`, append `warning: plugin <pv> expects tagteam >= <min>,
+  installed <iv> — run: uv tool upgrade tagteam`. Missing/malformed plugin.json,
+  missing flag, unparsable versions → no warning, still exit 0.
+- Every exit is 0; every failure is silent; nothing is written.
+
+The `command -v … || true` guard means a machine without `tagteam` on PATH is
+also silent. The falsifier from round 1 — "B carries no more migration risk than
+A iff the hook is inert without `handoff-state.json`" — becomes a test rather
+than an argument.
+
+**Tests (`tests/test_hook.py`, subprocess against `python -m tagteam`):** no
+`tagteam.yaml` → exit 0, empty stdout; `tagteam.yaml` but no state → exit 0,
+empty; malformed state (`{`, `[]`, `{"phase": 1}`) → exit 0, empty; valid state →
+one banner line; `minVersion` above installed → warning line, exit 0;
+`minVersion` at/below → no warning; no `--plugin-root` / bad plugin.json → no
+warning, exit 0. Plus a test that `hooks.json` parses and its command string
+contains exactly the subcommand invocation (so a hand edit to the JSON cannot
+silently drift from the CLI).
 
 ## The hard problem: version coupling
 
@@ -109,9 +287,10 @@ Options considered:
    `plugin.json` alongside `pyproject.toml` and `CITATION.cff`. Precedent
    exists — that script already keeps `CITATION.cff` in sync, and
    `.github/workflows/publish.yml` fails a tag build on a version mismatch.
-2. **Declared minimum.** `plugin.json` records a minimum tagteam version; the
-   skill checks `tagteam --version` on its first turn and **warns** rather than
-   failing.
+2. **Declared minimum.** `plugin.json` records a minimum tagteam version
+   (`tagteam.minVersion`); *(r2)* the `SessionStart` hook — via `tagteam hook
+   session-start`, never the skill text — compares it to the installed
+   `tagteam.__version__` and **warns** rather than failing.
 3. **Independent versioning.** Rejected — it is the current bug with the arrow
    reversed.
 
@@ -135,6 +314,17 @@ Staged so no project breaks mid-flight:
 2. Migrate **aegis alone**. Run a full cycle on it. Confirm the reviewer still
    receives the contract, and that Phase 47's `PROJECT CONTEXT` injection still
    resolves with the skill coming from a plugin rather than the project tree.
+   *(r2)* The two resolution paths are different code and are verified
+   separately, and the impl submission records the exact aegis phase and cycle
+   used as the canary:
+   - **interactive discovery** — with `.claude/skills/handoff/` removed from
+     aegis, a fresh Claude session lists `handoff` under plugin skills
+     (`/skills`, or the skill fires on `/handoff`) and the SessionStart banner
+     line appears;
+   - **headless composition** — a `tagteam watch --mode headless` turn on aegis
+     whose prompt header reads `=== HANDOFF CONTRACT (packaged) ===` (the turn
+     log carries the header), with the `PROJECT CONTEXT` and `CHANGE SURFACE`
+     blocks present.
 3. Flip `setup` to remove-instead-of-write when the plugin is detected, printing
    what it removed and why.
 4. Sweep the registry. The six stale projects get the current contract the moment
@@ -142,17 +332,26 @@ Staged so no project breaks mid-flight:
 
 ## Scope
 
-**In:** a new plugin tree in this repo; `.claude-plugin/plugin.json` and
-`marketplace.json`; the handoff skill relocated (single source of truth, not a
-second copy); two agent definitions; a `SessionStart` hook; `setup.py` gaining
-plugin detection plus the remove path; `scripts/release.py` version-bumping
-`plugin.json`; the publish workflow's version guard extended; tests for
-detection, the remove path, and version-skew warning; README install section.
+**In** *(r2 — scope B)*: a new plugin tree `plugin/` in this repo with
+`.claude-plugin/plugin.json`, `skills/handoff/SKILL.md` and `hooks/hooks.json`;
+a repo-root `.claude-plugin/marketplace.json`; the packaged contract copy kept
+and pinned byte-identical to the plugin copy by test; `headless.py` contract
+resolution (explicit → project-local → packaged) and the `(<source>)` prompt
+header; `setup.py` plugin detection (`plugin_status`) and the hash-gated remove
+path; `scripts/contract_hashes.py` + shipped `vendored_contract_hashes.json`;
+new `tagteam hook session-start` subcommand (banner + skew warning);
+`scripts/release.py` bumping `plugin.json` and regenerating the hash file, and
+refusing on a plugin/packaged contract mismatch; the publish workflow's version
+guard extended to `plugin.json`; tests for all of the above; README install
+section.
 
-**Out:** the CLI's behavior, the state machine, the cycle store, the watcher, the
-gatekeeper, the panel, the roadmap DAG, the cockpit and hub. No change to
-`tagteam.yaml` schema. No change to the contract's *text* — this phase moves it,
-it does not edit it (a text change would confound the migration).
+**Out:** agent definitions (deferred); the state machine, cycle store, watcher,
+gatekeeper, panel, roadmap DAG, cockpit and hub; the vendoring path's existing
+overwrite behavior when the plugin is absent; `tagteam.yaml` schema. **No change
+to the contract's text** — this phase moves it, it does not edit it (a text
+change would confound the migration). The CLI *does* change, in exactly the
+three places named above (headless resolution, setup, the hook subcommand);
+the round-1 claim that it would not was wrong.
 
 ## Deliberately not done
 
@@ -245,6 +444,12 @@ add a one-line note at its head recording which contract version it captures and
 that it is not current. Reviewer: challenge this if the fixture is load-bearing
 for a test that would break.
 
+*(r2)* Ratified in round 1, subject to confirming no byte-exact assertion
+consumes the fixture. Checked: `grep -rn handoff-test tests/` in this repo is
+empty, and `archive/handoff-test` is not a git repo, so nothing in tagteam's
+suite reads it. The impl will grep that directory itself for anything asserting
+on `SKILL.md` before adding the note, and record the result in the submission.
+
 ## Deferred — not blocking this phase
 
 **Publish to a public marketplace?** Arbiter's answer as of 2026-08-29: *maybe*.
@@ -263,15 +468,27 @@ install is worse for the project than no plugin.
 2. `tagteam setup` run in a project where the plugin is installed **removes** the
    vendored `.claude/skills/handoff/` and says so; run where it is not installed,
    it vendors exactly as today.
-3. `setup` never removes a skill the project owns — only the vendored handoff skill.
+3. `setup` never removes a skill the project owns: removal requires the
+   directory to hold only a `SKILL.md` whose sha256 is a known vendored version;
+   anything else is kept, reported, and not vendored over. *(r2)*
 4. A full plan+impl cycle completes on aegis with the skill served from the
-   plugin, and the reviewer's turn still carries both the contract and Phase 47's
-   `PROJECT CONTEXT` / `CHANGE SURFACE` blocks.
+   plugin — interactive turns discover it as a plugin skill, headless turns
+   compose the prompt from the **packaged** copy (header says so) — and the
+   reviewer's turn still carries both the contract and Phase 47's `PROJECT
+   CONTEXT` / `CHANGE SURFACE` blocks. The submission names the aegis phase and
+   cycle used. *(r2)*
 5. `scripts/release.py` bumps `plugin.json` in the same commit as
-   `pyproject.toml`, and the publish workflow fails a tag where they disagree.
-6. A project with a tagteam CLI older than the plugin's declared minimum gets a
-   warning naming both versions — and still takes its turn.
-7. Full suite green.
+   `pyproject.toml`, refuses when the plugin and packaged contract copies
+   differ, and the publish workflow fails a tag where any of the three versions
+   disagree.
+6. `tagteam hook session-start` prints the banner line when there is a valid
+   cycle, warns (naming both versions) when the CLI is below the plugin's
+   declared minimum, and is silent with exit 0 everywhere else — no
+   `tagteam.yaml`, no state, malformed state, no plugin root. A session start
+   never fails because of tagteam. *(r2)*
+7. `headless.py` composes a prompt with no project-local skill present, and a
+   project-local copy still wins when it is present. *(r2)*
+8. Full suite green.
 
 **Dependencies:** Phase 47 (merged, PR #27) — its `PROJECT CONTEXT` block reads
 the *project's* context file while this phase moves the *skill* out of the
@@ -279,10 +496,15 @@ project tree. They should not interact; criterion 4 is what proves it.
 
 ## Verification plan
 
-- Unit: plugin detection true/false, `setup` remove path (removes only the
-  vendored skill, never a project's own skills), version-skew warning fires below
-  the declared minimum and stays silent at or above it.
+- Unit *(r2)*: `plugin_status` matrix — missing/malformed registry, wrong
+  schema version, user scope, project scope matching/not matching, disabled in
+  any settings file, broken `installPath`; `setup` remove path — known hash
+  removed, modified kept, extra file kept, `--no-plugin`; `hook session-start`
+  matrix (subprocess) — silent/exit-0 cases and the banner + skew lines;
+  headless resolution order and header; plugin/packaged contract byte-equality;
+  current contract hash present in the shipped hash file; `hooks.json` command
+  string pinned to the subcommand.
 - Integration: a full plan+impl cycle on aegis with the skill served from the
-  plugin, confirming the reviewer's turn still carries the contract and Phase 47's
-  context blocks.
+  plugin — both resolution paths checked as described in migration step 2, the
+  phase/cycle recorded in the submission.
 - Manual: fresh install on a machine with no vendored copy anywhere.
