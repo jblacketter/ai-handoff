@@ -10,7 +10,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 ## Phases
 
 ### Phase 48: Plugin Distribution
-- **Status:** Plan cycle in progress — round 1: direction approved, scope ruled B (skill + SessionStart hook; agents deferred), migration set ratified, four plan fixes requested; round 2: one blocking caller contract (`needs_setup()` vs migrated projects — worktree rollback); **plan approved round 3** (2026-08-29, dc80017); implemented, impl cycle opened 2026-08-29. See `docs/phases/plugin-distribution.md`
+- **Status:** ✅ Complete — plan approved round 3, impl approved round 5 (2026-08-29); PR #28 awaiting merge; release 3.10.0 to follow. See `docs/phases/plugin-distribution.md`
 - **Description:** `tagteam setup` vendors the handoff contract into every project, and the copies have forked — 58 on the arbiter's machine, 6 live projects running a 155-line contract with no mention of the gatekeeper, the one-run rule, AMEND, interjections, GATE_BOUNCE or the panel. Ship the Claude-facing contract as an installable plugin (skill + SessionStart hook), keep the engine in the package, and change `setup` from vendoring to removing the vendored copy once the plugin is present.
 - **Key Deliverables:**
   - `plugin/` tree (`.claude-plugin/plugin.json`, `skills/handoff/SKILL.md`, `hooks/hooks.json`) + repo-root `marketplace.json`; plugin and packaged contract copies pinned byte-identical by test; public command **`/tagteam:handoff`** (arbiter, impl r2), `/handoff` where vendored, `tagteam contract` for agents without plugins (Codex)

@@ -1,7 +1,7 @@
 {
-  "state": "in-progress",
-  "ready_for": "lead",
-  "round": 4,
+  "state": "approved",
+  "ready_for": null,
+  "round": 5,
   "phase": "plugin-distribution",
   "type": "impl",
   "lead": "Claude",
