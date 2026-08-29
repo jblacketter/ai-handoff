@@ -1,7 +1,7 @@
 # Phase 48: Plugin distribution — one contract, installed once, instead of 58 forks
 
 ## Status
-- [ ] Planning — plan cycle in progress. Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below).
+- [ ] Planning — plan cycle in progress. Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below). Round 2: one blocking caller contract — `needs_setup()` — addressed in round 3 (marked *r3*).
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
@@ -230,6 +230,64 @@ SKILL.md + extra file → kept, message lists the file; empty directory → left
 alone; plugin not installed → vendored as today; `--no-plugin` with plugin
 installed → vendored.
 
+## Setup completeness *(r3 — round-2 fix)*
+
+`setup.needs_setup()` defines "setup is complete" as: local
+`.claude/skills/handoff/SKILL.md` exists, `templates/*.md` exists,
+`docs/checklists/*.md` exists. A migrated project intentionally lacks the first,
+so with no change every caller misbehaves. Audit of callers (all three, 3.9.0):
+
+| Caller | Today | After migration, unfixed |
+|---|---|---|
+| `setup.run_setup()` line 60 | early-return "already set up" | never early-returns; reruns and re-removes every time (idempotent, but noisy) |
+| `session.py:659` (`session start --launch`) | runs setup once when needed | reruns setup on **every** launch |
+| `worktree.py:318/326` (`_seed_project`) | runs setup, then re-checks; still-true → `WorktreeError`, worktree rolled back | setup removes/omits the skill (user-scoped plugin applies to any path) → post-check still true → **every worktree creation fails** |
+
+**Semantics.** `needs_setup(project_dir)` returns False iff templates and
+checklists are present **and** the skill requirement is met by **either**:
+
+- (a) a project-local `.claude/skills/handoff/SKILL.md`, or
+- (b) `plugin_status(project_dir).installed` is True.
+
+Fail-closed is preserved by construction: (b) is the same predicate the remove
+path uses, so a plugin that is uncertain, disabled, malformed, or scoped to a
+different path does not satisfy the requirement — the local skill is still
+required, and `setup` will vendor it. The predicate and the remove path can
+therefore never disagree: whatever `setup` decides to leave on disk is what
+`needs_setup` accepts. Templates and checklists remain required regardless.
+
+`needs_setup` grows an optional `plugin: PluginStatus | None = None` parameter so
+a caller that already computed the status (`run_setup`) passes it in instead of
+re-reading Claude Code's registry; callers that pass nothing get it computed.
+`plugin_status` reads two small JSON files and stats one path — cheap enough for
+every launch.
+
+**Worktrees specifically.** `_seed_project` checks `needs_setup` against the
+*worktree* path. A user-scoped plugin applies to any path → (b) satisfied → no
+skill is vendored into the worktree and no rollback fires. A **project-scoped**
+record's `projectPath` is the main checkout, which does not equal the worktree's
+realpath → (b) not satisfied → `setup` vendors the skill into the worktree, as
+today → post-check False → no rollback. Both outcomes are correct; neither
+stalls. `_seed_project` itself does not change unless the fixture work below
+requires it.
+
+**Files in scope (added):** `tagteam/setup.py` (`needs_setup`, `run_setup`
+guard); `tagteam/session.py` and `tagteam/worktree.py` only if a signature or
+fixture change forces it (the call sites should compile unchanged); their tests.
+
+**Tests.** `tests/test_quickstart.py`: `needs_setup` with no local skill and
+plugin installed+enabled (user scope) → False; installed but disabled → True;
+malformed registry → True; project scope matching the dir → False; project
+scope for another path → True; templates/checklists missing with plugin
+installed → True (the skill is not the only requirement). `tests/test_worktree.py`:
+regression — user-scoped plugin present, main repo has no local skill, worktree
+creation succeeds and the worktree has no `.claude/skills/handoff/`; project-scoped
+plugin → worktree creation succeeds and the worktree *does* get a vendored skill.
+`tests/test_session.py`: `--launch` on a migrated project does not invoke setup.
+Plugin status is injected in tests via the `CLAUDE_CONFIG_DIR` env var pointing at
+a tmp fixture (a real `installed_plugins.json` + `settings.json`), never by
+monkeypatching internals, so the tests exercise the same reader the CLI uses.
+
 ## The hook and the skew warning *(r2 — round-1 fix 4)*
 
 The version-skew warning has to be emitted by *something*, and the round-1 plan
@@ -295,8 +353,12 @@ Options considered:
    reversed.
 
 **Chosen: 1 + 2.** Lockstep makes disagreement rare; the runtime check makes it
-loud when it happens anyway. Someone who installs the plugin without the package
-gets a clear message instead of a confusing one.
+loud when it happens anyway. *(r3)* Someone who installs the plugin **without**
+the package gets no message at all: the hook is deliberately silent when
+`tagteam` is not on PATH (`command -v … || true`), because a session start must
+never fail or nag on tagteam's account. The skew warning covers the
+package-too-old case only; "plugin but no package" surfaces the first time the
+agent runs a `tagteam` command the contract tells it to, exactly as today.
 
 ## Migration
 
@@ -339,7 +401,11 @@ and pinned byte-identical to the plugin copy by test; `headless.py` contract
 resolution (explicit → project-local → packaged) and the `(<source>)` prompt
 header; `setup.py` plugin detection (`plugin_status`) and the hash-gated remove
 path; `scripts/contract_hashes.py` + shipped `vendored_contract_hashes.json`;
-new `tagteam hook session-start` subcommand (banner + skew warning);
+new `tagteam hook session-start` subcommand (banner + skew warning); *(r3)*
+plugin-aware `needs_setup()` (local skill **or** installed-and-enabled plugin;
+templates + checklists still required) with its three callers audited
+(`setup.run_setup`, `session start --launch`, `worktree._seed_project`) and
+regression tests for each;
 `scripts/release.py` bumping `plugin.json` and regenerating the hash file, and
 refusing on a plugin/packaged contract mismatch; the publish workflow's version
 guard extended to `plugin.json`; tests for all of the above; README install
@@ -488,7 +554,13 @@ install is worse for the project than no plugin.
    never fails because of tagteam. *(r2)*
 7. `headless.py` composes a prompt with no project-local skill present, and a
    project-local copy still wins when it is present. *(r2)*
-8. Full suite green.
+8. `needs_setup()` is False for a migrated project (plugin installed-and-enabled,
+   no local skill, templates + checklists present) and True for every uncertain
+   plugin state; `session start --launch` does not rerun setup on a migrated
+   project; `tagteam worktree` creation on a migrated project with a user-scoped
+   plugin succeeds without rollback, and with a project-scoped plugin succeeds
+   by vendoring into the worktree. *(r3)*
+9. Full suite green.
 
 **Dependencies:** Phase 47 (merged, PR #27) — its `PROJECT CONTEXT` block reads
 the *project's* context file while this phase moves the *skill* out of the
@@ -503,7 +575,9 @@ project tree. They should not interact; criterion 4 is what proves it.
   matrix (subprocess) — silent/exit-0 cases and the banner + skew lines;
   headless resolution order and header; plugin/packaged contract byte-equality;
   current contract hash present in the shipped hash file; `hooks.json` command
-  string pinned to the subcommand.
+  string pinned to the subcommand; *(r3)* `needs_setup` plugin matrix,
+  `_seed_project` no-rollback regression (user scope) and vendor-into-worktree
+  case (project scope), `--launch` no-rerun.
 - Integration: a full plan+impl cycle on aegis with the skill served from the
   plugin — both resolution paths checked as described in migration step 2, the
   phase/cycle recorded in the submission.
