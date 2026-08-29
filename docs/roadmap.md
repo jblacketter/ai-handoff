@@ -10,7 +10,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 ## Phases
 
 ### Phase 47: Reviewer Context Parity
-- **Status:** Implemented, awaiting impl review (2026-08-29)
+- **Status:** ✅ Complete — impl approved round 2 (2026-08-29; no plan cycle by the arbiter's instruction — implementation reviewed directly; r1 fix: non-UTF-8 context file degrades to None). PR pending merge; release to follow.
 - **Description:** The headless turn prompt carried the contract, the state and the round tail — and nothing about the project under review. Adds a provider-aware `PROJECT CONTEXT` block (the context file the provider's own CLI does *not* auto-load) and, for impl cycles, a `CHANGE SURFACE` block built from the existing `compute_scope_diff`, so the reviewer is handed the baseline sha and the attributable path list instead of guessing which diff to read.
 - **Key Deliverables:**
   - `select_context_file` / `read_project_context` / `render_project_context` in `headless.py`
