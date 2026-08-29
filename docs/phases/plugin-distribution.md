@@ -1,7 +1,7 @@
 # Phase 48: Plugin distribution — one contract, installed once, instead of 58 forks
 
 ## Status
-- [ ] Planning — plan cycle in progress. Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below). Round 2: one blocking caller contract — `needs_setup()` — addressed in round 3 (marked *r3*).
+- [x] Planning — plan approved round 3 (2026-08-29, commit dc80017). Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below). Round 2: one blocking caller contract — `needs_setup()` — addressed in round 3 (marked *r3*).
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
