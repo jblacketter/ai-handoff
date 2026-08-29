@@ -13,6 +13,9 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # Phase 48: contract_hashes.py walks the full history + tags
+          fetch-tags: true
 
       - uses: actions/setup-python@v5
         with:
