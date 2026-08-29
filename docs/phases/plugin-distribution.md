@@ -3,8 +3,8 @@
 ## Status
 - [x] Planning — plan approved round 3 (2026-08-29, commit dc80017). Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below). Round 2: one blocking caller contract — `needs_setup()` — addressed in round 3 (marked *r3*).
 - [x] Implementation — branch `phase-48-plugin-distribution`
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation Review — approved round 5 (2026-08-29, e868ece; 5 rounds: UnicodeDecodeError, namespace ruling + CLI detection + canary, hook/old-CLI, corpus, runtime strings + full aegis canary)
+- [x] Complete — PR #28, awaiting merge; release 3.10.0 to follow
 
 ## Roles
 - Lead: Claude
