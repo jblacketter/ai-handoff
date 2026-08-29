@@ -3,8 +3,8 @@
 ## Status
 - [x] Planning — plan approved round 3 (2026-08-29, bb2f433). Round 1: reviewer ruled **B (detect and report; no deletion, no flag)** and required four plan changes, applied in round 2 (marked *r2*).
 - [x] Implementation — branch `phase-49-legacy-skill-drift`
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation Review — approved round 3 (2026-08-29; r1 gate bounce on a roadmap reference, r2: run_setup early-return must still report)
+- [x] Complete — PR #29 merged (b3a7e50); released as 3.10.1
 
 ## Roles
 - Lead: Claude
