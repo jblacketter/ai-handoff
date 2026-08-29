@@ -540,3 +540,34 @@ class TestServeCommand:
         assert "--theme" in out and "--host" in out and "--max-sse" in out
         assert srv.serve_command(["--port", "x"]) == 1
         assert srv.serve_command(["--bogus"]) == 1
+
+
+class TestStartPhaseCommand:
+    """Phase 49: /api/start-phase writes the project-aware handoff command,
+    not the dead `/handoff-cycle`."""
+
+    def _migrate(self, project):
+        import pathlib, shutil
+        shutil.rmtree(pathlib.Path(project) / ".claude" / "skills" / "handoff", ignore_errors=True)
+
+    def test_migrated_project_gets_namespaced_command(self, project):
+        self._migrate(project)
+        with Served(project) as s:
+            r = s.client.post("/api/start-phase", {"phase": "gamma", "type": "plan"})
+            assert r["status"] == 200, r
+            assert r["json"]["command"] == "/tagteam:handoff start gamma"
+            assert r["json"]["turn"] == "lead" and r["json"]["round"] == 1
+
+    def test_impl_type_appends_impl(self, project):
+        self._migrate(project)
+        with Served(project) as s:
+            r = s.client.post("/api/start-phase", {"phase": "gamma", "type": "impl"})
+            assert r["status"] == 200 and r["json"]["command"] == "/tagteam:handoff start gamma impl"
+
+    def test_vendored_project_keeps_slash_handoff(self, project):
+        import pathlib
+        d = pathlib.Path(project) / ".claude" / "skills" / "handoff"; d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text("x")
+        with Served(project) as s:
+            r = s.client.post("/api/start-phase", {"phase": "gamma", "type": "plan"})
+            assert r["status"] == 200 and r["json"]["command"] == "/handoff start gamma"

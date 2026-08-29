@@ -322,3 +322,115 @@ class TestProvenance:
 
     def test_empty_known_set_never_removes(self, tmp_path):
         assert not pl.vendored_skill_provenance(self._dir(tmp_path), known={}).removable
+
+
+class TestClaudeConfigDir:
+    def test_unset(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert pl.claude_config_dir() == Path.home() / ".claude"
+
+    def test_empty_is_unset(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "   ")
+        assert pl.claude_config_dir() == Path.home() / ".claude"
+
+    def test_set_need_not_exist(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "nope"))
+        assert pl.claude_config_dir() == tmp_path / "nope"
+
+    def test_relative_and_tilde_become_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "cfg")
+        assert pl.claude_config_dir() == tmp_path / "cfg"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/x-cfg")
+        assert pl.claude_config_dir() == Path.home() / "x-cfg"
+
+    def test_symlinked_config_dir_is_not_resolved(self, tmp_path, monkeypatch):
+        real = tmp_path / "real"; real.mkdir()
+        link = tmp_path / "link"; link.symlink_to(real)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(link))
+        assert pl.claude_config_dir() == link
+
+
+class TestLegacySkillCandidates:
+    def _cfg(self, tmp_path, monkeypatch, names=(), files=(), broken=()):
+        cfg = tmp_path / "cfg"; (cfg / "skills").mkdir(parents=True)
+        for n in names:
+            (cfg / "skills" / n).mkdir(); (cfg / "skills" / n / "SKILL.md").write_text("old")
+        for n in broken:
+            (cfg / "skills" / n).mkdir()                    # no SKILL.md
+        for n in files:
+            (cfg / "skills" / n).write_text("not a dir")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+        return cfg
+
+    def test_none(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, names=["ux-design-guide"])
+        assert pl.legacy_handoff_skill_candidates() == []
+
+    def test_no_skills_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+        assert pl.legacy_handoff_skill_candidates() == []
+
+    def test_one_and_several_sorted(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, names=["handoff-sync", "handoff-cycle", "other"])
+        assert pl.legacy_handoff_skill_candidates() == [cfg / "skills" / "handoff-cycle",
+                                                        cfg / "skills" / "handoff-sync"]
+
+    def test_bare_handoff_counts(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, names=["handoff"])
+        assert pl.legacy_handoff_skill_candidates() == [cfg / "skills" / "handoff"]
+
+    def test_without_skill_md_and_files_ignored(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, broken=["handoff-foo"], files=["handoff-x"])
+        assert pl.legacy_handoff_skill_candidates() == []
+
+    def test_handoffish_but_not_prefix_ignored(self, tmp_path, monkeypatch):
+        self._cfg(tmp_path, monkeypatch, names=["my-handoff", "handoffs"])
+        assert pl.legacy_handoff_skill_candidates() == []
+
+    def test_symlink_outside_config_reported_by_link_path(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch)
+        outside = tmp_path / "elsewhere" / "skill"; outside.mkdir(parents=True)
+        (outside / "SKILL.md").write_text("old")
+        (cfg / "skills" / "handoff-old").symlink_to(outside)
+        got = pl.legacy_handoff_skill_candidates()
+        assert got == [cfg / "skills" / "handoff-old"]
+        note = pl.render_legacy_skill_note(got)
+        assert str(cfg / "skills" / "handoff-old") in note
+        assert str(outside) not in note
+
+    def test_explicit_config_dir_argument(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, names=["handoff-plan"])
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "unrelated"))
+        assert pl.legacy_handoff_skill_candidates(cfg) == [cfg / "skills" / "handoff-plan"]
+
+    def test_note_shape(self, tmp_path, monkeypatch):
+        cfg = self._cfg(tmp_path, monkeypatch, names=["handoff-a", "handoff-b"])
+        note = pl.render_legacy_skill_note(pl.legacy_handoff_skill_candidates())
+        lines = note.splitlines()
+        assert lines[0].startswith("note: 2 user-level skills under ") and "/tagteam:handoff" in lines[0]
+        assert lines[1:3] == [f"  {cfg / 'skills' / 'handoff-a'}", f"  {cfg / 'skills' / 'handoff-b'}"]
+        assert lines[3] == "tagteam did not modify them. Review each; remove confirmed pre-plugin copies yourself."
+        assert "rm " not in note and "rm -" not in note
+
+    def test_empty_note(self):
+        assert pl.render_legacy_skill_note([]) == ""
+
+
+class TestShippedDocsAudit:
+    """Phase 49: nothing tagteam ships or runs may mention the dead /handoff-* family."""
+
+    def test_no_legacy_command_family(self):
+        import re
+        pat = re.compile(r"/handoff-[a-z]+(?![\w-]*\.md)")   # a command, not a doc filename
+        hits = []
+        for f in list((REPO / "tagteam" / "data").rglob("*.md")) + list((REPO / "tagteam").rglob("*.py")):
+            for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                if pat.search(line):
+                    hits.append(f"{f.relative_to(REPO)}:{n}: {line.strip()[:100]}")
+        assert not hits, "\n".join(hits)
+
+    def test_workflows_md_describes_the_current_surface(self):
+        text = (REPO / "tagteam" / "data" / "workflows.md").read_text()
+        for needle in ("/tagteam:handoff", "`/handoff`", "tagteam contract", "cycle add", "one-run", "gatekeeper"):
+            assert needle in text, needle

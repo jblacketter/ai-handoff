@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning — plan approved round 3 (2026-08-29, bb2f433). Round 1: reviewer ruled **B (detect and report; no deletion, no flag)** and required four plan changes, applied in round 2 (marked *r2*).
-- [ ] Implementation
+- [x] Implementation — branch `phase-49-legacy-skill-drift`
 - [ ] Implementation Review
 - [ ] Complete
 

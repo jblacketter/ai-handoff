@@ -149,6 +149,68 @@ def plugin_status(project_root: str | Path) -> PluginStatus:
 
 
 # ---------------------------------------------------------------------------
+# Phase 49: legacy user-level handoff skills (read-only)
+# ---------------------------------------------------------------------------
+
+CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+
+
+def claude_config_dir() -> Path:
+    """Claude Code's config root for the read-only scans in this module:
+    ``$CLAUDE_CONFIG_DIR`` when set and non-empty (``~`` expanded, made
+    absolute lexically — no symlink resolution, need not exist), else
+    ``~/.claude``. (`plugin_status` does not use this: it delegates to the
+    Claude CLI, which resolves its own config.)"""
+    raw = os.environ.get(CONFIG_DIR_ENV, "").strip()
+    base = Path(raw) if raw else Path.home() / ".claude"
+    return base.expanduser().absolute()
+
+
+def legacy_handoff_skill_candidates(config_dir: str | Path | None = None) -> list[Path]:
+    """User-level skill directories that *may* be pre-plugin handoff
+    contracts: entries directly under ``<config>/skills/`` named ``handoff``
+    or ``handoff-*`` that are directories (a symlink to a directory counts)
+    and contain a ``SKILL.md``. A name match is a **candidate**, not a proven
+    superseded artifact — tagteam never shipped these and has no provenance
+    for them — so callers report and never delete.
+
+    Paths are the absolute *lexical* ``<config>/skills/<name>`` — never
+    realpath'd — so a symlinked entry is reported by its link path under the
+    config dir, not by its target. Sorted by name; read-only."""
+    root = Path(config_dir).expanduser().absolute() if config_dir is not None else claude_config_dir()
+    skills = root / "skills"
+    try:
+        names = sorted(p.name for p in skills.iterdir())
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if name != "handoff" and not name.startswith("handoff-"):
+            continue
+        entry = skills / name
+        try:
+            if entry.is_dir() and (entry / "SKILL.md").is_file():
+                out.append(entry)
+        except OSError:
+            continue
+    return out
+
+
+def render_legacy_skill_note(candidates: list[Path], config_dir: Path | None = None) -> str:
+    """The note `setup`/`upgrade` print. Lists paths; names the manual
+    action; never a shell command."""
+    if not candidates:
+        return ""
+    root = config_dir if config_dir is not None else claude_config_dir()
+    n = len(candidates)
+    lines = [f"note: {n} user-level skill{'s' if n != 1 else ''} under {root / 'skills'} may conflict "
+             f"with the tagteam plugin's /tagteam:handoff:"]
+    lines += [f"  {p}" for p in candidates]
+    lines.append("tagteam did not modify them. Review each; remove confirmed pre-plugin copies yourself.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Contract provenance
 # ---------------------------------------------------------------------------
 

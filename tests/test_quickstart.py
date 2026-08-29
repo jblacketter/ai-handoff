@@ -171,7 +171,7 @@ class TestRunSetup:
     @patch("tagteam.setup.main")
     def test_runs_when_needed(self, mock_main, tmp_path):
         run_setup(str(tmp_path))
-        mock_main.assert_called_once_with(str(tmp_path), no_plugin=False)
+        mock_main.assert_called_once_with(str(tmp_path), no_plugin=False, report_user_skills=True)
 
 
 # --- quickstart tests ---

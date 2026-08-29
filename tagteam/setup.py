@@ -12,7 +12,8 @@ from pathlib import Path
 
 from tagteam.config import read_config, validate_config
 from tagteam.plugin import (PluginStatus, plugin_status,   # noqa: F401 — re-exported
-                            vendored_skill_provenance)
+                            vendored_skill_provenance,
+                            legacy_handoff_skill_candidates, render_legacy_skill_note)
 from tagteam.templates import get_template_variables, render_template
 
 SKILL_RELDIR = Path(".claude") / "skills" / "handoff"
@@ -66,13 +67,25 @@ def needs_setup(project_dir: str = ".", plugin: PluginStatus | None = None) -> b
     return False
 
 
-def run_setup(project_dir: str = ".", *, no_plugin: bool = False) -> None:
+def run_setup(project_dir: str = ".", *, no_plugin: bool = False,
+              report_user_skills: bool = True) -> None:
     """Idempotent setup wrapper. Skips if setup is already complete."""
     plugin = PluginStatus(False, "--no-plugin") if no_plugin else plugin_status(project_dir)
     if not needs_setup(project_dir, plugin=plugin):
         print("Framework files already present — skipping setup.")
         return
-    main(project_dir, no_plugin=no_plugin)
+    main(project_dir, no_plugin=no_plugin, report_user_skills=report_user_skills)
+
+
+def report_legacy_user_skills() -> bool:
+    """Phase 49: print the read-only note about user-level `handoff*` skills
+    that may conflict with the plugin. Returns True if anything was printed.
+    Never modifies anything."""
+    note = render_legacy_skill_note(legacy_handoff_skill_candidates())
+    if note:
+        print(note)
+        return True
+    return False
 
 
 def _sync_handoff_skill(source: Path, target: Path, *, no_plugin: bool) -> None:
@@ -111,7 +124,8 @@ def _sync_handoff_skill(source: Path, target: Path, *, no_plugin: bool) -> None:
             print(f"  - {d.name}/ (directory skill)")
 
 
-def main(target_dir: str = ".", *, no_plugin: bool = False) -> None:
+def main(target_dir: str = ".", *, no_plugin: bool = False,
+         report_user_skills: bool = True) -> None:
     """
     Copy framework files to the target project directory.
 
@@ -119,6 +133,9 @@ def main(target_dir: str = ".", *, no_plugin: bool = False) -> None:
         target_dir: Target directory (defaults to current directory)
         no_plugin: force vendoring the handoff skill even when the plugin is
             installed (Phase 48). There is no flag that forces removal.
+        report_user_skills: print the Phase 49 note about user-level
+            `handoff*` skills that may conflict with the plugin. `upgrade`
+            passes False per project and prints one aggregate note itself.
     """
     source = get_data_dir()
     target = Path(target_dir).resolve()
@@ -189,6 +206,8 @@ def main(target_dir: str = ".", *, no_plugin: bool = False) -> None:
 
     # Handoff skill: vendor, or hand over to the plugin (Phase 48)
     _sync_handoff_skill(source, target, no_plugin=no_plugin)
+    if report_user_skills and not no_plugin:
+        report_legacy_user_skills()
 
     # Copy templates (with variable substitution)
     print("Copying templates...")

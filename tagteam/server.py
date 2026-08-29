@@ -35,6 +35,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from tagteam.config import read_config as _read_config_file, get_agent_names
+from tagteam.contract import handoff_command
 from tagteam.cycle import list_cycles, read_status as read_cycle_status, render_cycle
 from tagteam.parser import extract_all_rounds, format_rounds_html, read_cycle_rounds
 from tagteam.state import read_state, update_state
@@ -1432,7 +1433,8 @@ class CockpitRouter:
                 "turn": "lead",
                 "status": "ready",
                 "round": 1,
-                "command": f"/handoff-cycle {phase}",
+                "command": f"{handoff_command(self.project_dir)} start {phase}"
+                           + (" impl" if phase_type == "impl" else ""),
                 "result": None,
                 "reason": None,
             }, self.project_dir)

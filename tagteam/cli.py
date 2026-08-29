@@ -317,10 +317,15 @@ def upgrade_command() -> int:
         print(f"Project: {project_dir}")
         print("=" * 60)
         try:
-            setup_main(project_dir)
+            setup_main(project_dir, report_user_skills=False)
         except Exception as exc:
             print(f"  ERROR: {exc}")
             failed.append(project_dir)
+        print()
+
+    # Phase 49: one aggregate note for the whole run, never per project
+    from tagteam.setup import report_legacy_user_skills
+    if report_legacy_user_skills():
         print()
 
     if failed:
