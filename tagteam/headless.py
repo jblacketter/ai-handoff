@@ -786,7 +786,8 @@ def read_project_context(project_root: str | Path,
         return None
     try:
         text = path.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Unreadable or not valid UTF-8: skip the block, never fail the turn.
         return None
     if not text:
         return None

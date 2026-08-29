@@ -1163,6 +1163,11 @@ class TestProjectContextInjection:
         (tmp_path / "CLAUDE.md").write_text("   \n", encoding="utf-8")
         assert h.read_project_context(tmp_path, "codex") is None
 
+    def test_invalid_utf8_context_degrades_to_none(self, tmp_path):
+        # A non-UTF-8 CLAUDE.md must not abort the turn (impl review r1).
+        (tmp_path / "CLAUDE.md").write_bytes(b"\xff\xfe")
+        assert h.read_project_context(tmp_path, "codex") is None
+
     def test_oversized_context_is_truncated(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("x" * 40000, encoding="utf-8")
         source, text = h.read_project_context(tmp_path, "codex")
