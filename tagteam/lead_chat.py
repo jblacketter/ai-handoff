@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Callable
 
 from tagteam import headless as h
+from tagteam.contract import handoff_command
 from tagteam import procs
 from tagteam.config import get_headless_spec, validate_config
 
@@ -178,9 +179,9 @@ def _append_transcript(project_root, cid: str, n: int, who: str, text: str, ts: 
 
 FIRST_TURN_HEADER = """You are the Lead agent for the tagteam project at {root} ({name}).
 The human arbiter is talking to you from the tagteam cockpit. The handoff
-skill contract is .claude/skills/handoff/SKILL.md; you may run `tagteam …`
-commands (`/handoff start <phase>` / `/tagteam:handoff start <phase>` means: follow that skill). Current
-handoff state: {state_line}.
+skill contract is invoked as {handoff_cmd} (or read with `tagteam contract`);
+you may run `tagteam …` commands (`{handoff_cmd} start <phase>` means: follow
+that skill). Current handoff state: {state_line}.
 
 """
 
@@ -324,7 +325,8 @@ def start_turn(project_root: str | Path, cid: str, text: str, *, config: dict | 
                                          session_id=sid, resume=bool(session_id))
         continuity = "resumed session" if session_id else "new session"
         prompt_prefix = "" if session_id else FIRST_TURN_HEADER.format(
-            root=root, name=root.name, state_line=_state_line(root))
+            root=root, name=root.name, state_line=_state_line(root),
+            handoff_cmd=handoff_command(root))
     else:
         probe = resume_probe or h.codex_resume_supported
         can_resume = bool(session_id) and probe(spec.executable)
@@ -335,7 +337,8 @@ def start_turn(project_root: str | Path, cid: str, text: str, *, config: dict | 
         else:
             continuity = "transcript replay" if prior else "new session"
             prompt_prefix = ("" if prior else FIRST_TURN_HEADER.format(
-                root=root, name=root.name, state_line=_state_line(root))) + _replay_tail(root, cid, prior)
+                root=root, name=root.name, state_line=_state_line(root),
+                handoff_cmd=handoff_command(root))) + _replay_tail(root, cid, prior)
     prompt = prompt_prefix + text
 
     # -- claim the slot (fail closed)
