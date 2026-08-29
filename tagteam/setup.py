@@ -73,6 +73,10 @@ def run_setup(project_dir: str = ".", *, no_plugin: bool = False,
     plugin = PluginStatus(False, "--no-plugin") if no_plugin else plugin_status(project_dir)
     if not needs_setup(project_dir, plugin=plugin):
         print("Framework files already present — skipping setup.")
+        # Phase 49: an already-configured project (quickstart rerun) still
+        # gets the one read-only note per invocation.
+        if report_user_skills and not no_plugin:
+            report_legacy_user_skills()
         return
     main(project_dir, no_plugin=no_plugin, report_user_skills=report_user_skills)
 
