@@ -48,7 +48,7 @@ down — but nothing reaches `~/.claude/skills/`.
 | Option | For | Against |
 |---|---|---|
 | **A — do nothing** | A tool never writes outside the project. | The superseded skills keep loading in every project, contradicting the plugin: exactly the drift Phase 48 set out to end. |
-| **B — detect and report** *(recommended)* | Surfaces the drift where the user will see it, names the exact directories and the one command to run, changes nothing outside the project. | The user has to act; a report can be ignored. |
+| **B — detect and report** *(ruled)* | Surfaces the drift where the user will see it: names the candidate paths and the manual review action (review each; remove confirmed pre-plugin copies yourself), and changes nothing outside the project. *(r3: no shell command is emitted.)* | The user has to act; a report can be ignored. |
 | **C — remove** | Ends the drift without asking. | A project tool deleting from `~/.claude/` is invasive; the directories are the user's, not tagteam's (tagteam never wrote them — they came from an earlier install method); a false positive would delete a user's own skill. |
 
 **Ruled: B** (reviewer, round 1). The deciding argument is provenance, the
@@ -69,11 +69,17 @@ behavior and no removal flag in this phase.
   non-empty (expanded, not required to exist), else `~/.claude`. (Note: the
   Phase 48 `plugin_status` does *not* resolve this itself — it delegates
   discovery to the Claude CLI; the round-1 text claiming otherwise was wrong.)
-- *(r2)* `tagteam/plugin.py`: `legacy_handoff_skill_candidates(config_dir=None)
-  -> list[Path]` — resolved (`realpath`) directories under `<config>/skills/`
-  whose name is `handoff` or starts with `handoff-` and which contain a
-  `SKILL.md`. Read-only; sorted; symlinked entries are reported by their link
-  path. A name match is a candidate only (see above).
+- *(r2, r3)* `tagteam/plugin.py`: `legacy_handoff_skill_candidates(config_dir=None)
+  -> list[Path]` — entries directly under `<config>/skills/` whose name is
+  `handoff` or starts with `handoff-`, which are directories (a symlink to a
+  directory counts) and which contain a `SKILL.md`. Read-only; sorted by name.
+  **Path reporting, precisely:** the config root is expanded and absolutized
+  once (`Path(...).expanduser().absolute()` — lexical, no symlink
+  dereference); each candidate is reported as `<that root>/skills/<name>` —
+  the absolute *lexical* path, never `realpath`'d, so a symlinked entry is
+  reported by its link path under the config dir, not by its target. This is
+  the path the user would act on. A name match is a candidate only (see
+  above).
 - *(r2)* `tagteam setup` prints, after the plugin verdict, when candidates
   exist:
   ```
@@ -102,7 +108,11 @@ behavior and no removal flag in this phase.
   (expanded; nonexistent allowed); set to empty → `~/.claude`. Candidate
   matrix: none / one / several / bare `handoff` / `handoff-foo` without
   `SKILL.md` ignored / non-handoff sibling ignored / a file named `handoff-x`
-  ignored / symlinked dir reported once by link path. `setup`: note printed
+  ignored / symlinked entry whose **target lies outside the config dir**
+  (e.g. `<config>/skills/handoff-old -> <tmp>/elsewhere/skill`) reported
+  exactly once as `<config>/skills/handoff-old`, and the outside target path
+  never appears in the output; `$CLAUDE_CONFIG_DIR` given as a relative path
+  or with `~` → reported paths are absolute. `setup`: note printed
   once with resolved paths and the "did not modify" sentence, no `rm` token
   anywhere in the output, candidates still present afterwards (byte-identical);
   silent on a clean config dir. `upgrade` over **three** registered projects
