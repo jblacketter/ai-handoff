@@ -65,6 +65,70 @@ class TestNeedsSetup:
         assert needs_setup(str(tmp_path)) is True
 
 
+class TestNeedsSetupWithPlugin:
+    """Phase 48: the skill requirement is met by a local copy OR an
+    installed-and-enabled plugin; every uncertain plugin state still
+    requires the local copy (fail-closed)."""
+
+    def _project(self, tmp_path):
+        from tests._plugin_env import framework_files
+        p = tmp_path / "proj"; p.mkdir()
+        framework_files(p, skill=False)
+        return p
+
+    def test_installed_enabled_user_scope_is_complete(self, tmp_path, monkeypatch):
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch)
+        assert needs_setup(str(p)) is False
+
+    def test_disabled_requires_local_skill(self, tmp_path, monkeypatch):
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch, enabled=False)
+        assert needs_setup(str(p)) is True
+
+    def test_malformed_registry_requires_local_skill(self, tmp_path, monkeypatch):
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch, registry_text="{")
+        assert needs_setup(str(p)) is True
+
+    def test_project_scope_matching_is_complete(self, tmp_path, monkeypatch):
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path)
+        fake_plugin(tmp_path, monkeypatch, scope="project", project_path=p)
+        assert needs_setup(str(p)) is False
+
+    def test_project_scope_other_path_requires_local_skill(self, tmp_path, monkeypatch):
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path); other = tmp_path / "other"; other.mkdir()
+        fake_plugin(tmp_path, monkeypatch, scope="project", project_path=other)
+        assert needs_setup(str(p)) is True
+
+    def test_plugin_does_not_excuse_templates_or_checklists(self, tmp_path, monkeypatch):
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch)
+        for f in (p / "templates").glob("*.md"):
+            f.unlink()
+        assert needs_setup(str(p)) is True
+
+    def test_precomputed_status_is_honored(self, tmp_path, monkeypatch):
+        from tagteam.setup import PluginStatus
+        from tests._plugin_env import fake_plugin
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch)
+        assert needs_setup(str(p), plugin=PluginStatus(False, "forced")) is True
+
+    def test_launch_does_not_rerun_setup_on_migrated_project(self, tmp_path, monkeypatch):
+        """session start --launch uses the same predicate."""
+        from tests._plugin_env import fake_plugin
+        from tagteam.session import session_command
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch)
+        (p / "tagteam.yaml").write_text("agents:\n  lead: {name: A}\n  reviewer: {name: B}\n")
+        with patch("tagteam.setup.run_setup") as rs, \
+                patch("tagteam.session.ensure_session", return_value="created"), \
+                patch("tagteam.cli.needs_init", return_value=False):
+            assert session_command(["start", "--dir", str(p), "--launch", "--backend", "manual"]) == 0
+        rs.assert_not_called()
+
+
 # --- needs_init / run_init tests ---
 
 class TestNeedsInit:
@@ -107,7 +171,7 @@ class TestRunSetup:
     @patch("tagteam.setup.main")
     def test_runs_when_needed(self, mock_main, tmp_path):
         run_setup(str(tmp_path))
-        mock_main.assert_called_once_with(str(tmp_path))
+        mock_main.assert_called_once_with(str(tmp_path), no_plugin=False)
 
 
 # --- quickstart tests ---

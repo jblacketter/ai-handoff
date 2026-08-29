@@ -3,7 +3,8 @@ CLI for Tagteam.
 
 Usage:
     python -m tagteam init        - Initialize agent configuration
-    python -m tagteam setup [dir] - Copy framework files to a project
+    python -m tagteam setup [dir] [--no-plugin] - Copy framework files to a project
+    python -m tagteam hook session-start  - SessionStart hook body (plugin)
     python -m tagteam migrate     - Migrate legacy projects to use config
     python -m tagteam watch       - Start the watcher daemon
     python -m tagteam tail        - Follow the in-flight headless turn log
@@ -193,11 +194,11 @@ def init_command(show_explainer: bool = True) -> int:
     return 0
 
 
-def setup_command(target_dir: str = ".") -> int:
+def setup_command(target_dir: str = ".", *, no_plugin: bool = False) -> int:
     """Copy framework files to target directory."""
     from tagteam.setup import main as setup_main
 
-    setup_main(target_dir)
+    setup_main(target_dir, no_plugin=no_plugin)
     return 0
 
 
@@ -412,8 +413,12 @@ def main() -> int:
     if command == "init":
         return init_command()
     if command == "setup":
-        target = sys.argv[2] if len(sys.argv) > 2 else "."
-        return setup_command(target)
+        rest = [a for a in sys.argv[2:] if a != "--no-plugin"]
+        target = rest[0] if rest else "."
+        return setup_command(target, no_plugin="--no-plugin" in sys.argv[2:])
+    if command == "hook":
+        from tagteam.hook import hook_command
+        return hook_command(sys.argv[2:])
     if command == "migrate":
         from tagteam.migrate import migrate_command
 

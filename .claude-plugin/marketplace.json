@@ -1,0 +1,16 @@
+{
+  "name": "tagteam",
+  "metadata": {
+    "description": "tagteam — structured handoffs between a lead agent and a reviewer agent with a human arbiter"
+  },
+  "owner": {
+    "name": "Jack Blacketter"
+  },
+  "plugins": [
+    {
+      "name": "tagteam",
+      "source": "./plugin",
+      "description": "The /handoff contract and SessionStart cycle banner. Pair with the tagteam CLI."
+    }
+  ]
+}

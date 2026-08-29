@@ -4,8 +4,12 @@
     python scripts/release.py X.Y.Z [--date YYYY-MM-DD] [--root DIR] [--dry-run] [--no-lock]
 
 Edits `pyproject.toml` (`version = "…"`), `CITATION.cff` (`version:` and
-`date-released:`) and refreshes `uv.lock` (`uv lock`), then prints the
-commit/tag recipe. No git command is ever run.
+`date-released:`), `plugin/.claude-plugin/plugin.json` (`version` and
+`tagteam.minVersion`, Phase 48), regenerates
+`tagteam/data/vendored_contract_hashes.json` from git history, and refreshes
+`uv.lock` (`uv lock`), then prints the commit/tag recipe. Refuses to bump when
+`plugin/skills/handoff/SKILL.md` differs from the packaged contract. Only
+`contract_hashes.py` runs git (read-only).
 
 Transactional: the original bytes of all three files are snapshotted first;
 on ANY failure (a `uv lock` that exits non-zero, times out or is missing; a
@@ -17,6 +21,7 @@ nothing. Exit 1 = usage/validation error (nothing written).
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import re
 import shutil
@@ -30,7 +35,11 @@ _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 _PYPROJECT_VERSION = re.compile(r'^(version[ \t]*=[ \t]*")([^"]+)(")', re.M)
 _CFF_VERSION = re.compile(r"^(version:[ \t]*)(\S+)", re.M)
 _CFF_DATE = re.compile(r"^(date-released:[ \t]*)(\S+)", re.M)
-FILES = ("pyproject.toml", "CITATION.cff", "uv.lock")
+PLUGIN_JSON = "plugin/.claude-plugin/plugin.json"
+PLUGIN_SKILL = "plugin/skills/handoff/SKILL.md"
+PACKAGED_SKILL = "tagteam/data/.claude/skills/handoff/SKILL.md"
+HASHES_JSON = "tagteam/data/vendored_contract_hashes.json"
+FILES = ("pyproject.toml", "CITATION.cff", "uv.lock", PLUGIN_JSON, HASHES_JSON)
 UV_TIMEOUT_S = 600
 
 
@@ -72,6 +81,17 @@ def _run_uv_lock(root: Path) -> None:
         raise ReleaseError(f"`uv lock` failed (exit {r.returncode}):\n{(r.stdout + r.stderr).strip()}")
 
 
+def _regen_hashes(root: Path) -> None:
+    script = root / "scripts" / "contract_hashes.py"
+    if not script.is_file():
+        return   # a root without the generator (test fixtures) has nothing to regenerate
+    r = subprocess.run([sys.executable, str(script), "--root", str(root)],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise ReleaseError(f"contract_hashes.py failed (exit {r.returncode}):\n"
+                           f"{(r.stdout + r.stderr).strip()}")
+
+
 def plan(root: Path, new_version: str, date: str) -> dict:
     """Validate and compute the new contents. Raises ReleaseError; writes nothing."""
     new_t = _parse_semver(new_version)
@@ -98,8 +118,31 @@ def plan(root: Path, new_version: str, date: str) -> dict:
     new_py = _PYPROJECT_VERSION.sub(lambda mm: f"{mm.group(1)}{new_version}{mm.group(3)}", py_text, count=1)
     new_cff = _CFF_VERSION.sub(lambda mm: f"{mm.group(1)}{new_version}", cff_text, count=1)
     new_cff = _CFF_DATE.sub(lambda mm: f"{mm.group(1)}{date}", new_cff, count=1)
+    # Phase 48: plugin manifest in lockstep; plugin and packaged contract identical
+    pj = root / PLUGIN_JSON
+    if not pj.is_file():
+        raise ReleaseError(f"{pj} not found")
+    try:
+        manifest = json.loads(pj.read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise ReleaseError(f"{PLUGIN_JSON}: invalid JSON ({e})")
+    if not isinstance(manifest, dict) or "version" not in manifest:
+        raise ReleaseError(f"{PLUGIN_JSON}: no top-level version")
+    ps, ks = root / PLUGIN_SKILL, root / PACKAGED_SKILL
+    if not ps.is_file() or not ks.is_file():
+        raise ReleaseError(f"{PLUGIN_SKILL} and {PACKAGED_SKILL} must both exist")
+    if ps.read_bytes() != ks.read_bytes():
+        raise ReleaseError(f"{PLUGIN_SKILL} differs from {PACKAGED_SKILL} — the plugin and "
+                           f"packaged contract must be byte-identical (copy one over the other)")
+    manifest["version"] = new_version
+    manifest.setdefault("tagteam", {})
+    if not isinstance(manifest["tagteam"], dict):
+        raise ReleaseError(f"{PLUGIN_JSON}: 'tagteam' must be an object")
+    manifest["tagteam"]["minVersion"] = new_version
+    new_plugin = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     return {"current": cur, "new": new_version, "date": date,
-            "pyproject": new_py.encode("utf-8"), "citation": new_cff.encode("utf-8")}
+            "pyproject": new_py.encode("utf-8"), "citation": new_cff.encode("utf-8"),
+            "plugin": new_plugin}
 
 
 def apply(root: Path, p: dict, *, lock: bool, out) -> None:
@@ -126,6 +169,8 @@ def apply(root: Path, p: dict, *, lock: bool, out) -> None:
         if lock:
             _run_uv_lock(root)
         _write_atomic(paths["CITATION.cff"], p["citation"])
+        _write_atomic(paths[PLUGIN_JSON], p["plugin"])
+        _regen_hashes(root)
     except BaseException as e:
         restored = _restore()
         msg = str(e) if isinstance(e, ReleaseError) else f"{type(e).__name__}: {e}"
@@ -173,6 +218,8 @@ def main(argv: list[str] | None = None, out=None, err=None) -> int:
     print(f"  pyproject.toml   version = \"{p['new']}\"", file=out)
     print(f"  CITATION.cff     version: {p['new']} / date-released: {p['date']}", file=out)
     print(f"  uv.lock          {'uv lock' if lock else 'skipped (--no-lock)'}", file=out)
+    print(f"  {PLUGIN_JSON}  version + tagteam.minVersion = {p['new']}", file=out)
+    print(f"  {HASHES_JSON}  regenerated from git history", file=out)
     if dry:
         print("dry run — nothing written.", file=out)
         return 0
@@ -182,7 +229,7 @@ def main(argv: list[str] | None = None, out=None, err=None) -> int:
         print(f"release FAILED: {e}", file=err)
         return 2
     print("done. next:", file=out)
-    print(f"  git add pyproject.toml CITATION.cff uv.lock && git commit -m \"release: {p['new']}\"", file=out)
+    print(f"  git add {' '.join(FILES)} && git commit -m \"release: {p['new']}\"", file=out)
     print(f"  git tag v{p['new']} && git push && git push --tags", file=out)
     return 0
 
