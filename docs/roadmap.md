@@ -9,8 +9,22 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ## Phases
 
+### Phase 48: Plugin Distribution
+- **Status:** Planned — plan cycle not yet started; see `docs/phases/plugin-distribution.md`
+- **Description:** `tagteam setup` vendors the handoff contract into every project, and the copies have forked — 58 on the arbiter's machine, 6 live projects running a 155-line contract with no mention of the gatekeeper, the one-run rule, AMEND, interjections, GATE_BOUNCE or the panel. Ship the Claude-facing contract as an installable plugin (skill + agents + SessionStart hook), keep the engine in the package, and change `setup` from vendoring to removing the vendored copy once the plugin is present.
+- **Key Deliverables:**
+  - `.claude-plugin/plugin.json` + `marketplace.json`; handoff skill as the single source of truth
+  - `codex-brief` and reviewer agents; `SessionStart` hook surfacing phase/type/round/turn
+  - `setup.py` plugin detection + remove path; `scripts/release.py` bumps `plugin.json` in lockstep
+  - Runtime `tagteam --version` skew warning against a declared minimum
+- **Seam:** if Claude reads it → plugin; if the CLI reads it or a human edits it after seeding → package
+- **Decided:** plugin ships from this repo (lockstep versioning with `pyproject.toml`)
+- **Referred to the plan review:** (a) v1 scope — skill only / skill + SessionStart hook / skill + hook + agents (lead recommends the middle); (b) confirm the migration set — migrate `bugalizer`, `northstar/ns-wip-tests`, `harmonic`; skip three archived snapshots; `archive/handoff-test` gets a contract-version note rather than a migration
+- **Deferred:** public marketplace publication — revisit at release, nothing structural depends on it
+- **Depends on:** Phase 47 (merged)
+
 ### Phase 47: Reviewer Context Parity
-- **Status:** ✅ Complete — impl approved round 2 (2026-08-29; no plan cycle by the arbiter's instruction — implementation reviewed directly; r1 fix: non-UTF-8 context file degrades to None). PR pending merge; release to follow.
+- **Status:** ✅ Complete — impl approved round 2 (2026-08-29; no plan cycle by the arbiter's instruction — implementation reviewed directly; r1 fix: non-UTF-8 context file degrades to None). Merged 2026-08-29 via PR #27; released as **3.9.0** (tag `v3.9.0`, PyPI 2026-08-29).
 - **Description:** The headless turn prompt carried the contract, the state and the round tail — and nothing about the project under review. Adds a provider-aware `PROJECT CONTEXT` block (the context file the provider's own CLI does *not* auto-load) and, for impl cycles, a `CHANGE SURFACE` block built from the existing `compute_scope_diff`, so the reviewer is handed the baseline sha and the attributable path list instead of guessing which diff to read.
 - **Key Deliverables:**
   - `select_context_file` / `read_project_context` / `render_project_context` in `headless.py`
