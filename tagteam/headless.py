@@ -1710,6 +1710,7 @@ class HeadlessEngine:
             self._log(f"   headless: could not read interjections: {e}")
         note_ids = [n["id"] for n in notes]
         skill_text = self.skill_path.read_text(encoding="utf-8")
+        self._log(f"   headless: contract from {self.skill_source} ({self.skill_path})")
 
         # Phase 47: give this turn the project's own context and, on an impl
         # cycle, the file list attributable to the phase. Both degrade to None
