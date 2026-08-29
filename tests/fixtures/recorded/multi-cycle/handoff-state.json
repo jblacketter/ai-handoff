@@ -3,7 +3,7 @@
   "type": "impl",
   "round": 1,
   "status": "done",
-  "command": "Read .claude/skills/handoff/SKILL.md and handoff-state.json, then act on your turn",
+  "command": "Read the handoff contract (`tagteam contract`; in Claude Code: /tagteam:handoff) and handoff-state.json, then act on your turn",
   "result": "approved",
   "updated_by": "Reviewer",
   "run_mode": "single-phase",
