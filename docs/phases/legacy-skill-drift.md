@@ -1,7 +1,7 @@
 # Phase 49: Legacy skill drift — detect superseded contracts, retire the dead command family
 
 ## Status
-- [ ] Planning — plan cycle opened 2026-08-29. This document is the plan submission.
+- [ ] Planning — plan cycle opened 2026-08-29. Round 1: reviewer ruled **B (detect and report; no deletion, no flag)** and required four plan changes, applied in round 2 (marked *r2*).
 - [ ] Implementation
 - [ ] Implementation Review
 - [ ] Complete
@@ -51,22 +51,44 @@ down — but nothing reaches `~/.claude/skills/`.
 | **B — detect and report** *(recommended)* | Surfaces the drift where the user will see it, names the exact directories and the one command to run, changes nothing outside the project. | The user has to act; a report can be ignored. |
 | **C — remove** | Ends the drift without asking. | A project tool deleting from `~/.claude/` is invasive; the directories are the user's, not tagteam's (tagteam never wrote them — they came from an earlier install method); a false positive would delete a user's own skill. |
 
-**Recommendation: B.** The deciding argument is provenance, the same rule
-Phase 48 applied to vendored copies: `setup` may only delete what `setup`
-wrote, and it never wrote `~/.claude/skills/handoff-*`. Detection is cheap and
-exact; deletion is the user's. The reviewer is asked to rule on A/B/C.
+**Ruled: B** (reviewer, round 1). The deciding argument is provenance, the
+same rule Phase 48 applied to vendored copies: `setup` may only delete what
+`setup` wrote, and it never wrote `~/.claude/skills/handoff-*`. *(r2)* And
+detection is **not** exact: a name match is a *candidate*, not a proven
+superseded artifact — a user may own a custom `handoff` or `handoff-foo`
+skill, and tagteam has no provenance (no hash set, since it never shipped
+these) to tell the two apart. So the tool reports candidates, states it
+changed nothing, and leaves review and removal to the user. No deletion
+behavior and no removal flag in this phase.
 
 ## Scope
 
 **In:**
-- `tagteam/plugin.py`: `superseded_user_skills(config_dir) -> list[Path]` —
-  directories under `<config>/skills/` named `handoff` or `handoff-*` whose
-  `SKILL.md` exists. Read-only. `$CLAUDE_CONFIG_DIR` honored (as
-  `plugin_status` already does for the CLI).
-- `tagteam setup` and `tagteam upgrade` print, after the plugin verdict:
-  `note: N superseded user-level handoff skill(s) in ~/.claude/skills compete
-  with the plugin: <names> — remove with: rm -r ~/.claude/skills/{…}`. Once
-  per run (not per project in `upgrade`). Silent when there are none.
+- *(r2)* `tagteam/plugin.py`: `claude_config_dir() -> Path` — a dedicated,
+  tested resolver for the read-only scan: `$CLAUDE_CONFIG_DIR` when set and
+  non-empty (expanded, not required to exist), else `~/.claude`. (Note: the
+  Phase 48 `plugin_status` does *not* resolve this itself — it delegates
+  discovery to the Claude CLI; the round-1 text claiming otherwise was wrong.)
+- *(r2)* `tagteam/plugin.py`: `legacy_handoff_skill_candidates(config_dir=None)
+  -> list[Path]` — resolved (`realpath`) directories under `<config>/skills/`
+  whose name is `handoff` or starts with `handoff-` and which contain a
+  `SKILL.md`. Read-only; sorted; symlinked entries are reported by their link
+  path. A name match is a candidate only (see above).
+- *(r2)* `tagteam setup` prints, after the plugin verdict, when candidates
+  exist:
+  ```
+  note: N user-level skill(s) under <config>/skills may conflict with the tagteam plugin's /tagteam:handoff:
+    <resolved path 1>
+    <resolved path 2>
+  tagteam did not modify them. Review each; remove confirmed pre-plugin copies yourself.
+  ```
+  No shell command is printed — no `rm`, no brace expansion, nothing to paste.
+  Silent when there are none.
+- *(r2)* `tagteam upgrade` suppresses the per-project note (it calls
+  `setup.main(project, report_user_skills=False)`) and prints **one** aggregate
+  note at the end of the run, same shape, exactly once regardless of how many
+  projects were upgraded. `setup.main(..., report_user_skills=True)` is the
+  default so `tagteam setup` and `quickstart` report once per invocation.
 - `tagteam hook session-start`: **no change** — a session-start line must stay
   a one-liner; the note belongs to setup/upgrade.
 - `tagteam/data/workflows.md`: rewrite to describe the current contract
@@ -76,15 +98,22 @@ exact; deletion is the user's. The reviewer is asked to rule on A/B/C.
   file (setup/upgrade copy it; `docs/workflows.md` is a documented artifact).
 - `tagteam/server.py:1435`: `/handoff-cycle {phase}` → the project-aware
   `handoff_command(root)` form, consistent with launch intents.
-- Tests: detection matrix (none / one / several / `handoff` bare / a
-  non-handoff sibling ignored / `CLAUDE_CONFIG_DIR`), setup + upgrade print
-  the note once and never delete, workflows.md contains no `/handoff-` token,
-  server emits the current command; an audit test extends
-  `TestRuntimeStringsAudit` to shipped `data/*.md` for `/handoff-`.
+- Tests *(r2)*: `claude_config_dir` unset → `~/.claude`; set → that path
+  (expanded; nonexistent allowed); set to empty → `~/.claude`. Candidate
+  matrix: none / one / several / bare `handoff` / `handoff-foo` without
+  `SKILL.md` ignored / non-handoff sibling ignored / a file named `handoff-x`
+  ignored / symlinked dir reported once by link path. `setup`: note printed
+  once with resolved paths and the "did not modify" sentence, no `rm` token
+  anywhere in the output, candidates still present afterwards (byte-identical);
+  silent on a clean config dir. `upgrade` over **three** registered projects
+  with candidates present: the note appears exactly once in the whole output
+  and not inside any per-project block; candidates untouched. workflows.md
+  contains no `/handoff-` token; server emits the project-aware command; the
+  audit test extends `TestRuntimeStringsAudit` recursively over shipped
+  `tagteam/data/**/*.md` and runtime `tagteam/**/*.py` for `/handoff-`.
 
-**Out:** deleting anything outside the project (unless the reviewer rules C —
-then scope grows by a `--remove-superseded` flag that is explicit, never
-default); the ten directories on the arbiter's machine (already handled by
+**Out:** deleting anything outside the project — *(r2)* ruled out for this
+phase, including any removal flag; the ten directories on the arbiter's machine (already handled by
 hand); the Phase 36 upgrade harness's nested-project false positive (noted
 2026-08-29 during the sweep; separate).
 
@@ -95,10 +124,12 @@ hand); the Phase 36 upgrade harness's nested-project false positive (noted
 reference block needs a line.
 
 ## Done means
-1. On a machine with superseded user-level skills, `tagteam setup` and
-   `tagteam upgrade` print the note naming them and the removal command; on a
-   clean machine they print nothing extra. Nothing under `~/.claude/` is ever
-   modified by tagteam.
+1. *(r2)* On a machine with candidate user-level skills, `tagteam setup`
+   prints the note once with their resolved paths and states tagteam did not
+   modify them; `tagteam upgrade` prints it exactly once for the whole run,
+   never per project; neither prints a shell command; on a clean config dir
+   they print nothing extra. Nothing under the config dir is ever modified by
+   tagteam (tested byte-identical).
 2. `docs/workflows.md` as installed by `setup` mentions no `/handoff-*`
    command and describes the 3.10 contract surface.
 3. No runtime or shipped-doc string emits a `/handoff-*` command (audit test).
