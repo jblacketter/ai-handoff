@@ -47,6 +47,27 @@ INFLIGHT_NAME = "inflight.json"
 CANCEL_NAME = "cancel-requested.json"
 PAUSE_RELPATH = Path(".tagteam") / "headless-paused.json"
 SKILL_RELPATH = Path(".claude") / "skills" / "handoff" / "SKILL.md"
+# Phase 48: the packaged contract — what `setup` vendors and what a headless
+# prompt falls back to when the project carries no local copy (the plugin
+# serves it to Claude; tagteam composes its own prompts from this file).
+PACKAGED_SKILL_PATH = Path(__file__).parent / "data" / SKILL_RELPATH
+
+
+def resolve_skill_path(project_root: str | Path,
+                       explicit: Path | None = None) -> tuple[Path, str]:
+    """Where the contract for a tagteam-composed prompt comes from.
+
+    Order: an explicit path (``--skill-path``) → the project-local copy when
+    it exists → the packaged copy. Returns ``(path, source)`` with source one
+    of ``explicit`` / ``project`` / ``packaged``; the path may not exist
+    (``validate`` reports that). Claude's plugin cache is never consulted.
+    """
+    if explicit is not None:
+        return Path(explicit), "explicit"
+    local = Path(project_root) / SKILL_RELPATH
+    if local.is_file():
+        return local, "project"
+    return PACKAGED_SKILL_PATH, "packaged"
 
 DEFAULT_TURN_TIMEOUT_MINUTES = 60
 DEFAULT_TAIL_ROUNDS = 3
@@ -855,7 +876,8 @@ def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
                    state: dict, skill_text: str, tail_entries: list[dict],
                    tail_n: int, interjections: list[dict] | None = None,
                    project_context: tuple[str, str] | None = None,
-                   change_surface: dict | None = None) -> str:
+                   change_surface: dict | None = None,
+                   skill_source: str = "project") -> str:
     """Build the bounded turn context sent on stdin."""
     command = state.get("command") or STANDARD_TURN_COMMAND
     start = parse_start_command(command)
@@ -878,7 +900,7 @@ def compose_prompt(*, role: str, agent_name: str, project_root: str | Path,
         f"{ctx}"
         f"{surface}"
         f"=== COMMAND ===\n{command}\n\n"
-        f"=== HANDOFF CONTRACT (.claude/skills/handoff/SKILL.md) ===\n"
+        f"=== HANDOFF CONTRACT ({skill_source}) ===\n"
         f"{skill_text.rstrip()}\n\n"
         f"=== CURRENT STATE (handoff-state.json) ===\n"
         f"{json.dumps(state, indent=2)}\n\n"
@@ -1512,7 +1534,7 @@ class HeadlessEngine:
         self.slot_busy: dict | None = None   # Phase 37: last SlotBusy seen by run_owed_turn
         self._log = log or (lambda m: print(m, flush=True))
         self._notify = notify or (lambda t, m: None)
-        self.skill_path = skill_path or (Path(self.project_root) / SKILL_RELPATH)
+        self.skill_path, self.skill_source = resolve_skill_path(self.project_root, skill_path)
         self.roles: dict[str, RoleSpec] = {}
         self._last_pause_log = 0.0
 
@@ -1553,7 +1575,8 @@ class HeadlessEngine:
             self.roles[role] = RoleSpec(role, self.names[role], provider, exe, argv,
                                         timeout_s=(float(tmo) * 60.0) if tmo else None)
         if not self.skill_path.exists():
-            errors.append(f"handoff skill contract not found at {self.skill_path}")
+            errors.append(f"handoff skill contract not found at {self.skill_path} "
+                          f"({self.skill_source})")
         return errors
 
     # -- pause -------------------------------------------------------------
@@ -1710,6 +1733,7 @@ class HeadlessEngine:
                                 skill_text=skill_text, tail_entries=tail,
                                 tail_n=self.tail_n, interjections=notes,
                                 project_context=project_context,
+                                skill_source=self.skill_source,
                                 change_surface=change_surface)
 
         if self.confirm:

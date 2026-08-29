@@ -11,7 +11,11 @@ import sys
 from pathlib import Path
 
 from tagteam.config import read_config, validate_config
+from tagteam.plugin import (PluginStatus, plugin_status,   # noqa: F401 — re-exported
+                            vendored_skill_provenance)
 from tagteam.templates import get_template_variables, render_template
+
+SKILL_RELDIR = Path(".claude") / "skills" / "handoff"
 
 
 def copy_md_file(src: Path, dst: Path, variables: dict[str, str]) -> None:
@@ -27,22 +31,29 @@ def get_data_dir() -> Path:
     return Path(__file__).parent / "data"
 
 
-def needs_setup(project_dir: str = ".") -> bool:
+def needs_setup(project_dir: str = ".", plugin: PluginStatus | None = None) -> bool:
     """Check if framework setup is needed.
 
-    Setup is considered complete when all of these exist:
-    - .claude/skills/handoff/SKILL.md (skill directory)
+    Setup is considered complete when all of these hold:
+    - the handoff skill is available: a project-local
+      .claude/skills/handoff/SKILL.md, **or** (Phase 48) the tagteam plugin is
+      installed and enabled for this project (`plugin_status`, fail-closed —
+      an uncertain plugin still requires the local skill)
     - templates/ directory with at least one .md file
     - docs/checklists/ directory with at least one .md file
 
     Intentionally excludes project-specific docs (roadmap, decision_log,
-    workflows) which may be edited or removed by users.
+    workflows) which may be edited or removed by users. Pass ``plugin`` when
+    the caller already computed the status.
     """
     target = Path(project_dir)
 
-    skill = target / ".claude" / "skills" / "handoff" / "SKILL.md"
+    skill = target / SKILL_RELDIR / "SKILL.md"
     if not skill.exists():
-        return True
+        if plugin is None:
+            plugin = plugin_status(target)
+        if not plugin.installed:
+            return True
 
     templates = target / "templates"
     if not templates.exists() or not any(templates.glob("*.md")):
@@ -55,20 +66,59 @@ def needs_setup(project_dir: str = ".") -> bool:
     return False
 
 
-def run_setup(project_dir: str = ".") -> None:
+def run_setup(project_dir: str = ".", *, no_plugin: bool = False) -> None:
     """Idempotent setup wrapper. Skips if setup is already complete."""
-    if not needs_setup(project_dir):
+    plugin = PluginStatus(False, "--no-plugin") if no_plugin else plugin_status(project_dir)
+    if not needs_setup(project_dir, plugin=plugin):
         print("Framework files already present — skipping setup.")
         return
-    main(project_dir)
+    main(project_dir, no_plugin=no_plugin)
 
 
-def main(target_dir: str = ".") -> None:
+def _sync_handoff_skill(source: Path, target: Path, *, no_plugin: bool) -> None:
+    """Phase 48: vendor the handoff skill, or remove the vendored copy when
+    the plugin serves it. Removal is gated on content provenance — only a
+    directory holding exactly one known tagteam-vendored SKILL.md is deleted;
+    anything else is kept, reported, and not vendored over."""
+    skills_dst = target / ".claude" / "skills"
+    skill_dir = target / SKILL_RELDIR
+    status = PluginStatus(False, "--no-plugin") if no_plugin else plugin_status(target)
+    print(f"plugin: {status}")
+    if status.installed:
+        prov = vendored_skill_provenance(skill_dir)
+        if prov.removable:
+            shutil.rmtree(skill_dir)
+            print(f"  removed vendored handoff skill ({prov.reason}) — served by the plugin")
+        elif prov.reason == "absent":
+            print("  handoff skill served by the plugin — nothing to vendor")
+        else:
+            print(f"  kept {SKILL_RELDIR}/: {prov.reason}")
+        return
+    print("Copying skills...")
+    skills_src = source / ".claude" / "skills"
+    if not skills_src.exists():
+        print(f"  Warning: Skills not found at {skills_src}")
+        return
+    for f in skills_src.glob("*.md"):
+        shutil.copy2(f, skills_dst / f.name)
+        print(f"  - {f.name}")
+    for d in skills_src.iterdir():
+        if d.is_dir():
+            dst_dir = skills_dst / d.name
+            if dst_dir.exists():
+                shutil.rmtree(dst_dir)
+            shutil.copytree(d, dst_dir)
+            print(f"  - {d.name}/ (directory skill)")
+
+
+def main(target_dir: str = ".", *, no_plugin: bool = False) -> None:
     """
     Copy framework files to the target project directory.
 
     Args:
         target_dir: Target directory (defaults to current directory)
+        no_plugin: force vendoring the handoff skill even when the plugin is
+            installed (Phase 48). There is no flag that forces removal.
     """
     source = get_data_dir()
     target = Path(target_dir).resolve()
@@ -137,22 +187,8 @@ def main(target_dir: str = ".") -> None:
             print(f"  - {name}")
         print()
 
-    # Copy skills (directory-based skills)
-    print("Copying skills...")
-    skills_src = source / ".claude" / "skills"
-    if skills_src.exists():
-        for f in skills_src.glob("*.md"):
-            shutil.copy2(f, skills_dst / f.name)
-            print(f"  - {f.name}")
-        for d in skills_src.iterdir():
-            if d.is_dir():
-                dst_dir = skills_dst / d.name
-                if dst_dir.exists():
-                    shutil.rmtree(dst_dir)
-                shutil.copytree(d, dst_dir)
-                print(f"  - {d.name}/ (directory skill)")
-    else:
-        print(f"  Warning: Skills not found at {skills_src}")
+    # Handoff skill: vendor, or hand over to the plugin (Phase 48)
+    _sync_handoff_skill(source, target, no_plugin=no_plugin)
 
     # Copy templates (with variable substitution)
     print("Copying templates...")
@@ -218,8 +254,9 @@ def main(target_dir: str = ".") -> None:
 
 def cli():
     """Command-line entry point."""
-    target = sys.argv[1] if len(sys.argv) > 1 else "."
-    main(target)
+    args = [a for a in sys.argv[1:] if a != "--no-plugin"]
+    target = args[0] if args else "."
+    main(target, no_plugin="--no-plugin" in sys.argv[1:])
 
 
 if __name__ == "__main__":

@@ -35,6 +35,17 @@ jobs:
             exit 1
           fi
           echo "Tag matches CITATION.cff: ${CFF_VERSION}"
+          # Phase 48: the plugin ships from this repo in lockstep; a tag must
+          # not carry a plugin manifest at a different version, or a plugin
+          # contract that differs from the packaged one.
+          PLUGIN_VERSION=$(python -c "import json; print(json.load(open('plugin/.claude-plugin/plugin.json'))['version'])")
+          if [ "$TAG_VERSION" != "$PLUGIN_VERSION" ]; then
+            echo "Tag ${GITHUB_REF_NAME} (=${TAG_VERSION}) does not match plugin.json version ${PLUGIN_VERSION} — run scripts/release.py"
+            exit 1
+          fi
+          echo "Tag matches plugin.json: ${PLUGIN_VERSION}"
+          cmp plugin/skills/handoff/SKILL.md tagteam/data/.claude/skills/handoff/SKILL.md || { echo "plugin/skills/handoff/SKILL.md differs from the packaged contract"; exit 1; }
+          python scripts/contract_hashes.py --check
 
       - name: Install build
         run: python -m pip install --upgrade build

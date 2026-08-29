@@ -299,6 +299,26 @@ class TestImplRound2Fixes:
             wt.create_worktree(repo, "beta")
         self._nothing_remains(repo, path)
 
+    def test_user_scoped_plugin_does_not_trigger_rollback(self, repo, monkeypatch):
+        """Phase 48: a migrated project (plugin serves the skill) must still
+        create worktrees — setup leaves no local skill, and needs_setup
+        accepts that."""
+        from tests._plugin_env import fake_plugin
+        fake_plugin(repo.parent, monkeypatch)
+        info = wt.create_worktree(repo, "beta")
+        assert Path(info.path).exists()
+        assert not (Path(info.path) / ".claude" / "skills" / "handoff").exists()
+        assert (Path(info.path) / "templates").is_dir()
+
+    def test_project_scoped_plugin_vendors_into_worktree(self, repo, monkeypatch):
+        """A project-scope record names the main checkout, not the worktree,
+        so the worktree is vendored a skill as before — and still succeeds."""
+        from tests._plugin_env import fake_plugin
+        fake_plugin(repo.parent, monkeypatch, scope="project", project_path=repo,
+                    enabled_in="user")
+        info = wt.create_worktree(repo, "beta")
+        assert (Path(info.path) / ".claude" / "skills" / "handoff" / "SKILL.md").is_file()
+
     def test_sidecar_write_failure_rolls_back_including_registry(self, repo, monkeypatch):
         def fail(entries):
             raise OSError("read-only home")

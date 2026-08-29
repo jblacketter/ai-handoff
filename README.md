@@ -42,6 +42,15 @@ cd ~/projects/myproject
 tagteam quickstart
 ```
 
+**Claude Code plugin (3.10+).** The `/handoff` contract Claude follows can be installed once as a plugin instead of being copied into every project — one contract, kept in lockstep with the CLI, plus a `SessionStart` hook that prints the current cycle (`tagteam: phase … | round … | turn …`) when you open a tagteam project:
+
+```text
+/plugin marketplace add jblacketter/tagteam
+/plugin install tagteam@tagteam
+```
+
+With the plugin installed and enabled, `tagteam setup` (and `tagteam upgrade`) removes the vendored `.claude/skills/handoff/` from a project — only when it is byte-for-byte a contract tagteam shipped; a customized copy or extra files are kept and reported — and headless turns compose their prompt from the packaged contract. Without the plugin, `setup` vendors the skill exactly as before; `tagteam setup --no-plugin` forces that. The hook is silent outside tagteam projects and never fails a session start.
+
 You'll be prompted for your two agent names, then quickstart sets up the workspace and starts a session. It auto-detects the best terminal backend available on your machine:
 
 - **iTerm2** (macOS, default when iTerm2 is installed) — opens three labeled tabs in a single window, auto-launching iTerm2 if it isn't already running.

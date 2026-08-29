@@ -1124,6 +1124,49 @@ class TestRateLimitCapture:
 
 # --- Phase 47: reviewer context parity -------------------------------------
 
+class TestSkillResolution:
+    """Phase 48: explicit → project-local → packaged; plugin cache never."""
+
+    CFG = {"agents": {"lead": {"name": "A", "headless": {"provider": "claude"}},
+                      "reviewer": {"name": "B", "headless": {"provider": "codex"}}}}
+
+    def test_project_local_wins_when_present(self, tmp_path):
+        skill = tmp_path / h.SKILL_RELPATH
+        skill.parent.mkdir(parents=True); skill.write_text("local")
+        path, source = h.resolve_skill_path(tmp_path)
+        assert path == skill and source == "project"
+
+    def test_packaged_when_absent(self, tmp_path):
+        path, source = h.resolve_skill_path(tmp_path)
+        assert path == h.PACKAGED_SKILL_PATH and source == "packaged"
+        assert path.is_file()
+
+    def test_explicit_always(self, tmp_path):
+        skill = tmp_path / h.SKILL_RELPATH
+        skill.parent.mkdir(parents=True); skill.write_text("local")
+        path, source = h.resolve_skill_path(tmp_path, tmp_path / "elsewhere.md")
+        assert path == tmp_path / "elsewhere.md" and source == "explicit"
+
+    def test_validate_passes_without_project_skill(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "resolve_executable", lambda p, e: "/bin/true")
+        t = h.HeadlessEngine(tmp_path, self.CFG, lead_name="A", reviewer_name="B")
+        assert t.skill_source == "packaged"
+        assert not [e for e in t.validate() if "skill contract" in e]
+
+    def test_validate_reports_missing_explicit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(h, "resolve_executable", lambda p, e: "/bin/true")
+        t = h.HeadlessEngine(tmp_path, self.CFG, lead_name="A", reviewer_name="B",
+                           skill_path=tmp_path / "nope.md")
+        assert any("skill contract not found" in e and "(explicit)" in e for e in t.validate())
+
+    def test_header_names_the_source(self):
+        base = dict(role="reviewer", agent_name="B", project_root="/p",
+                    state={"phase": "x", "type": "plan"}, skill_text="S",
+                    tail_entries=[], tail_n=1)
+        assert "=== HANDOFF CONTRACT (packaged) ===" in h.compose_prompt(**base, skill_source="packaged")
+        assert "=== HANDOFF CONTRACT (project) ===" in h.compose_prompt(**base)
+
+
 class TestProjectContextInjection:
     """The context file a provider does NOT auto-load is the one worth sending."""
 

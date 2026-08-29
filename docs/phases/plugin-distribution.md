@@ -2,7 +2,7 @@
 
 ## Status
 - [x] Planning — plan approved round 3 (2026-08-29, commit dc80017). Round 1: direction approved, v1 scope ruled **B** (skill + SessionStart hook; agents deferred), migration set ratified; four required plan fixes, addressed in round 2 (marked *r2* below). Round 2: one blocking caller contract — `needs_setup()` — addressed in round 3 (marked *r3*).
-- [ ] Implementation
+- [x] Implementation — branch `phase-48-plugin-distribution`
 - [ ] Implementation Review
 - [ ] Complete
 
@@ -130,7 +130,7 @@ its layout is not a contract tagteam owns.
 **Resolution order** (`headless.resolve_skill_path(project_root, explicit) ->
 (Path, source)`):
 
-1. an explicit `skill_path` (existing `HeadlessTurn` kwarg / `--skill-path`) —
+1. an explicit `skill_path` (existing `HeadlessEngine` kwarg) —
    error if missing, exactly as today;
 2. the project-local `.claude/skills/handoff/SKILL.md` **if it exists** — a
    project that deliberately keeps or customizes a vendored copy keeps winning,

@@ -1,0 +1,20 @@
+{
+  "name": "tagteam",
+  "description": "The tagteam handoff contract for Claude — the /handoff skill and a SessionStart hook that surfaces the current cycle. The engine is the tagteam CLI (uv tool install tagteam).",
+  "version": "3.9.0",
+  "author": {
+    "name": "Jack Blacketter"
+  },
+  "homepage": "https://github.com/jblacketter/tagteam",
+  "repository": "https://github.com/jblacketter/tagteam",
+  "license": "Apache-2.0",
+  "keywords": [
+    "handoff",
+    "code-review",
+    "multi-agent",
+    "workflow"
+  ],
+  "tagteam": {
+    "minVersion": "3.9.0"
+  }
+}

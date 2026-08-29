@@ -25,17 +25,60 @@ def _load():
     return mod
 
 
+PLUGIN_JSON = '{\n  "name": "tagteam",\n  "version": "3.4.0",\n  "tagteam": {\n    "minVersion": "3.4.0"\n  }\n}\n'
+SKILL = b"# the contract\n"
+
+
 @pytest.fixture
 def root(tmp_path):
     (tmp_path / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
     (tmp_path / "CITATION.cff").write_text(CITATION, encoding="utf-8")
     (tmp_path / "uv.lock").write_text(UVLOCK, encoding="utf-8")
+    # Phase 48: the plugin manifest + both contract copies
+    (tmp_path / "plugin" / ".claude-plugin").mkdir(parents=True)
+    (tmp_path / "plugin" / ".claude-plugin" / "plugin.json").write_text(PLUGIN_JSON, encoding="utf-8")
+    (tmp_path / "plugin" / "skills" / "handoff").mkdir(parents=True)
+    (tmp_path / "plugin" / "skills" / "handoff" / "SKILL.md").write_bytes(SKILL)
+    (tmp_path / "tagteam" / "data" / ".claude" / "skills" / "handoff").mkdir(parents=True)
+    (tmp_path / "tagteam" / "data" / ".claude" / "skills" / "handoff" / "SKILL.md").write_bytes(SKILL)
     assert not (tmp_path / ".git").exists()          # the script needs no git
     return tmp_path
 
 
 def _bytes(root):
-    return {n: (root / n).read_bytes() for n in ("pyproject.toml", "CITATION.cff", "uv.lock")}
+    return {n: (root / n).read_bytes() for n in ("pyproject.toml", "CITATION.cff", "uv.lock",
+                                                 "plugin/.claude-plugin/plugin.json")}
+
+
+class TestPluginLockstep:
+    """Phase 48: plugin.json bumps with pyproject; contract copies must agree."""
+
+    def test_plugin_json_bumped_version_and_min(self, root, capsys):
+        import json
+        assert _load().main(["3.5.0", "--no-lock", "--root", str(root)]) == 0
+        m = json.loads((root / "plugin" / ".claude-plugin" / "plugin.json").read_text())
+        assert m["version"] == "3.5.0" and m["tagteam"]["minVersion"] == "3.5.0"
+        assert m["name"] == "tagteam"
+        out = capsys.readouterr().out
+        assert "plugin.json  version + tagteam.minVersion = 3.5.0" in out
+        assert "plugin/.claude-plugin/plugin.json" in out.splitlines()[-2]   # in the git add recipe
+
+    def test_refuses_when_contract_copies_differ(self, root, capsys):
+        (root / "plugin" / "skills" / "handoff" / "SKILL.md").write_bytes(SKILL + b"drift\n")
+        before = _bytes(root)
+        assert _load().main(["3.5.0", "--no-lock", "--root", str(root)]) == 1
+        assert "byte-identical" in capsys.readouterr().err
+        assert _bytes(root) == before
+
+    def test_refuses_without_plugin_json(self, root, capsys):
+        (root / "plugin" / ".claude-plugin" / "plugin.json").unlink()
+        assert _load().main(["3.5.0", "--no-lock", "--root", str(root)]) == 1
+        assert "plugin.json" in capsys.readouterr().err
+
+    def test_dry_run_leaves_plugin_json(self, root):
+        before = _bytes(root)
+        assert _load().main(["3.5.0", "--dry-run", "--root", str(root)]) == 0
+        assert _bytes(root) == before
 
 
 def _fake_uv(tmp_path, monkeypatch, body: str) -> Path:
