@@ -10,8 +10,8 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 ## Phases
 
 ### Phase 49: Legacy Skill Drift
-- **Status:** Plan cycle opened 2026-08-29; see `docs/phases/legacy-skill-drift.md`
-- **Description:** After Phase 48, superseded pre-plugin artifacts still describe the old contract: ten user-level `~/.claude/skills/handoff-*` skills competed with `tagteam:handoff` in every project (removed by hand on the arbiter's machine), the shipped `data/workflows.md` documents the dead `/handoff-*` command family into every project, and `server.py` still emits `/handoff-cycle`. Retire the dead family from what tagteam ships; **detect and report** superseded user-level skills from `setup`/`upgrade` rather than delete them (a project tool never writes to `~/.claude/` — provenance rule from Phase 48). Reviewer rules on detect-vs-remove.
+- **Status:** Plan cycle — round 1 ruled B (detect and report; no deletion, no flag), four plan changes applied in round 2 (2026-08-29); see `docs/phases/legacy-skill-drift.md`
+- **Description:** After Phase 48, superseded pre-plugin artifacts still describe the old contract: ten user-level `~/.claude/skills/handoff-*` skills competed with `tagteam:handoff` in every project (removed by hand on the arbiter's machine), the shipped `data/workflows.md` documents the dead `/handoff-*` command family into every project, and `server.py` still emits `/handoff-cycle`. Retire the dead family from what tagteam ships; **detect and report** superseded user-level skills from `setup`/`upgrade` rather than delete them (a project tool never writes to `~/.claude/` — provenance rule from Phase 48). Ruled: detect-and-report only; name matches are *candidates* (no provenance), reported by resolved path with no shell command; `upgrade` reports once per run.
 - **Depends on:** Phase 48 (released 3.10.0)
 
 ### Phase 48: Plugin Distribution
