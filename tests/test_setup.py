@@ -116,3 +116,81 @@ class TestUpgradeSweep:
         registry_mod.register_project(str(project))
         assert upgrade_command() == 0
         assert not skill_dir(project).exists()
+
+
+class TestLegacyUserSkillNote:
+    """Phase 49: setup reports candidate user-level skills once; upgrade once
+    per run; nothing under the config dir is ever modified."""
+
+    def _legacy(self, tmp_path, monkeypatch, names=("handoff-cycle", "handoff-plan")):
+        cfg = tmp_path / "cfg"; (cfg / "skills").mkdir(parents=True)
+        for n in names:
+            (cfg / "skills" / n).mkdir(); (cfg / "skills" / n / "SKILL.md").write_text(f"legacy {n}")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+        return cfg
+
+    def _snapshot(self, cfg):
+        return {str(p.relative_to(cfg)): (p.read_bytes() if p.is_file() else None)
+                for p in sorted(cfg.rglob("*"))}
+
+    def test_setup_reports_once_and_modifies_nothing(self, project, tmp_path, monkeypatch, capsys):
+        no_plugin(tmp_path, monkeypatch)
+        cfg = self._legacy(tmp_path, monkeypatch)
+        before = self._snapshot(cfg)
+        su.main(str(project))
+        out = capsys.readouterr().out
+        assert out.count("may conflict with the tagteam plugin") == 1
+        assert str(cfg / "skills" / "handoff-cycle") in out and str(cfg / "skills" / "handoff-plan") in out
+        assert "tagteam did not modify them" in out
+        assert "rm " not in out and "rm -" not in out
+        assert self._snapshot(cfg) == before
+
+    def test_setup_silent_on_clean_config(self, project, tmp_path, monkeypatch, capsys):
+        no_plugin(tmp_path, monkeypatch)
+        cfg = tmp_path / "cfg"; (cfg / "skills" / "ux-design-guide").mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+        su.main(str(project))
+        assert "may conflict" not in capsys.readouterr().out
+
+    def test_no_plugin_flag_skips_the_note(self, project, tmp_path, monkeypatch, capsys):
+        no_plugin(tmp_path, monkeypatch)
+        self._legacy(tmp_path, monkeypatch)
+        su.main(str(project), no_plugin=True)
+        assert "may conflict" not in capsys.readouterr().out
+
+    def test_report_flag_off(self, project, tmp_path, monkeypatch, capsys):
+        no_plugin(tmp_path, monkeypatch)
+        self._legacy(tmp_path, monkeypatch)
+        su.main(str(project), report_user_skills=False)
+        assert "may conflict" not in capsys.readouterr().out
+
+    def test_upgrade_reports_exactly_once_for_three_projects(self, tmp_path, monkeypatch, capsys):
+        from tagteam.cli import upgrade_command
+        home = tmp_path / "home"; home.mkdir()
+        monkeypatch.setattr(registry_mod, "REGISTRY_DIR", home)
+        monkeypatch.setattr(registry_mod, "REGISTRY_FILE", home / "projects.json")
+        no_plugin(tmp_path, monkeypatch)
+        cfg = self._legacy(tmp_path, monkeypatch)
+        before = self._snapshot(cfg)
+        for i in range(3):
+            p = tmp_path / f"proj{i}"; p.mkdir()
+            (p / "tagteam.yaml").write_text("agents:\n  lead: {name: A}\n  reviewer: {name: B}\n")
+            registry_mod.register_project(str(p))
+        assert upgrade_command() == 0
+        out = capsys.readouterr().out
+        assert out.count("may conflict with the tagteam plugin") == 1
+        # the note comes after the last per-project block, never inside one
+        assert out.rindex("may conflict") > out.rindex("Project: ")
+        assert out.rindex("may conflict") > out.rindex("Setup complete!")
+        assert self._snapshot(cfg) == before
+
+    def test_upgrade_silent_on_clean_config(self, tmp_path, monkeypatch, capsys):
+        from tagteam.cli import upgrade_command
+        home = tmp_path / "home"; home.mkdir()
+        monkeypatch.setattr(registry_mod, "REGISTRY_DIR", home)
+        monkeypatch.setattr(registry_mod, "REGISTRY_FILE", home / "projects.json")
+        no_plugin(tmp_path, monkeypatch)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg-clean"))
+        p = tmp_path / "proj"; p.mkdir(); registry_mod.register_project(str(p))
+        assert upgrade_command() == 0
+        assert "may conflict" not in capsys.readouterr().out
