@@ -549,67 +549,81 @@ on `SKILL.md` before adding the note, and record the result in the submission.
 
 ## Canary record (criterion 4)
 
-**Headless path — done (2026-08-29, commit a9ea5b1 + the log line).** A
-throwaway project with `tagteam.yaml` (both roles `headless: {provider:
-claude}`), no `.claude/skills/handoff/` (setup ran against a plugin reported
-installed, printed `handoff skill served by the plugin — nothing to vendor`),
-plan cycle `canary_plan` round 1. `tagteam watch --mode headless` picked up
-the reviewer turn; its log:
+**Full plan + impl cycle on the aegis tree — done (2026-08-29).** Run in a
+disposable git worktree of aegis (`~/projects/QA`, branch
+`canary/phase-48-plugin` from `ac13d14`) so the arbiter's working tree was
+never touched. Setup there: `tagteam.yaml` with both real providers headless
+(`lead: claude`, `reviewer: codex`; the panel off so the reviewer turn is a
+plain codex turn); `tagteam setup` printed `plugin: installed (user scope,
+enabled — per claude plugin list)` / `removed vendored handoff skill (3.8.2
+contract) — served by the plugin`; a doc-only phase `phase-48-canary` (add
+`docs/canary-phase-48.md`, one paragraph). aegis has no root `CLAUDE.md` or
+`AGENTS.md` on `main`, so the branch carries a small, labeled `CLAUDE.md` — the
+file Phase 47 injects for a codex reviewer — otherwise the block would be
+absent by design. `tagteam watch --mode headless` drove every turn; its log:
 
 ```
->> Codex's turn (phase: canary, round: 1)
-   Command: Read the handoff contract (`tagteam contract`; in Claude Code: /tagteam:handoff) and handoff-state.json, then act on your turn
-   headless: contract from packaged (/Users/jackblacketter/projects/tagteam/tagteam/data/.claude/skills/handoff/SKILL.md)
-   headless: spawning claude for Codex (reviewer) — log: …/canary_plan_r1_reviewer_20260829T204910Z.log
-   headless: turn ok — reviewer APPROVE at round 1 (13645 ms)
+>> codex's turn (phase: phase-48-canary, round: 1)            # plan
+   headless: contract from packaged (…/tagteam/data/.claude/skills/handoff/SKILL.md)
+   headless: project context from CLAUDE.md
+   headless: turn ok — reviewer REQUEST_CHANGES at round 1 (30072 ms)
+>> claude's turn (phase: phase-48-canary, round: 1)
+   headless: contract from packaged (…)
+   headless: turn ok — lead SUBMIT_FOR_REVIEW at round 2 (17610 ms)
+>> codex's turn (phase: phase-48-canary, round: 2)
+   headless: contract from packaged (…)
+   headless: project context from CLAUDE.md
+   headless: turn ok — reviewer APPROVE at round 2 (25969 ms)
+** Cycle complete: approved
+>> claude's turn (phase: phase-48-canary, round: 1)            # impl
+   Command: /tagteam:handoff start phase-48-canary impl
+   headless: contract from packaged (…)
+   headless: turn ok — lead SUBMIT_FOR_REVIEW at round 1 (32143 ms)
+>> codex's turn (phase: phase-48-canary, round: 1)
+   headless: contract from packaged (…)
+   headless: project context from CLAUDE.md
+   headless: change surface 2 path(s)
+   headless: turn ok — reviewer APPROVE at round 1 (42538 ms)
 ** Cycle complete: approved
 ```
 
-One cycle-writing call, `APPROVE`, `updated_by: Codex`. The `headless:
-contract from <source> (<path>)` line was added for exactly this
-observability.
+Plan: REQUEST_CHANGES → revised → APPROVE. Impl: the lead created
+`docs/canary-phase-48.md` and committed (`428928e`), one `cycle init --type
+impl`; the reviewer's impl turn carried the contract (packaged), **PROJECT
+CONTEXT** (CLAUDE.md) and **CHANGE SURFACE** (2 paths), and approved. Single-
+phase mode does not auto-advance after plan approval, so the impl was started
+exactly as the contract prescribes: `tagteam state set … --command
+"/tagteam:handoff start phase-48-canary impl"`. Every turn made exactly one
+cycle-writing call. Also observed: codex's sandboxed turns ran the arbiter's
+PATH `tagteam` (uv tool 3.9.0), not this checkout — so their `cycle add`
+wrote the *old* standard command into the state. Harmless here; it is the
+mixed-version window that closes with the 3.10 release and `uv tool upgrade`.
 
-**Interactive path — done (2026-08-29, on aegis).** Plugin installed from this
-checkout (`claude plugin marketplace add /Users/jackblacketter/projects/tagteam`,
-`claude plugin install tagteam@tagteam --scope user`); `claude plugin list
---json` → `tagteam@tagteam`, scope user, enabled, installPath
-`~/.claude/plugins/cache/tagteam/tagteam/3.9.0`. Then in `~/projects/QA`:
-
-```
-$ tagteam setup .
-plugin: installed (user scope, enabled — per claude plugin list)
-  removed vendored handoff skill (3.8.2 contract) — served by the plugin
-$ needs_setup('.') → False   handoff_command('.') → /tagteam:handoff
-$ tagteam hook session-start --plugin-root ~/.claude/plugins/cache/tagteam/tagteam/3.9.0
-tagteam: phase engine-single-sign-on | type impl | round 3 | turn — | status done
-$ claude -p "/tagteam:handoff status"
-Phase: engine-single-sign-on | Type: impl | Round: 3 | Turn: — | Status: done
- Cycle complete — approved! …
-│ NEXT: Lead (claude) runs:  /tagteam:handoff start [phase]│
-```
-
-The skill was discovered and executed from the plugin with no vendored copy
-present. Only `docs/workflows.md` was rewritten by `setup` (verified by
-mtime; the other modified files in that tree were the arbiter's own edits).
+**Interactive discovery — done (2026-08-29, on aegis itself).** Plugin
+installed from this checkout (`claude plugin marketplace add
+/Users/jackblacketter/projects/tagteam`; `claude plugin install tagteam@tagteam
+--scope user`); `claude plugin list --json` → scope user, enabled. In
+`~/projects/QA`: `tagteam setup` removed the vendored 3.8.2 contract;
+`needs_setup('.')` → False; `handoff_command('.')` → `/tagteam:handoff`; the hook
+printed the banner; `claude -p "/tagteam:handoff status"` with no vendored copy
+present executed the plugin skill and produced the status banner and a NEXT box
+naming `/tagteam:handoff`. Only `docs/workflows.md` was rewritten by `setup`
+(verified by mtime; the other modified files there were the arbiter's edits).
 
 **Finding from the canary, fixed in round 3.** The session's PATH `tagteam`
 was the 3.9.0 uv tool, which has no `hook` subcommand and prints `Unknown
 command: hook` to **stdout** with exit 1 — the first hook command relayed that
 text into Claude's context. The hook now captures the subcommand's stdout and
-prints it only when the command succeeds and produced something:
-`out="$(tagteam hook session-start … 2>/dev/null)" && [ -n "$out" ] && printf
-'%s\n' "$out" || true`. `tests/test_hook.py::TestHookCommandShell` runs the
-literal hooks.json command under `sh` against no `tagteam`, an old one, and the
-current one. Note the consequence: with a CLI older than 3.10 the skew warning
-cannot fire (the subcommand does not exist), so the hook is simply silent —
-"plugin newer than CLI" is announced only from 3.10 on, which is the version
-that ships the hook.
+prints it only when the command succeeds and produced something;
+`tests/test_hook.py::TestHookCommandShell` runs the literal hooks.json command
+under `/bin/sh` against no `tagteam`, an old one, and the current one. Below
+3.10 the skew warning cannot fire (the subcommand does not exist), so the hook
+is silent — "plugin newer than CLI" is announced only from 3.10 on.
 
 **Until 3.10 is released and `uv tool upgrade tagteam` runs**, aegis is
 migrated ahead of its own CLI: the 3.9.0 `needs_setup` still wants a local
-skill, so a `session start --launch` there would re-vendor it. Harmless
-(the vendored copy just comes back) and expected — the sweep (step 4) is
-gated on the release.
+skill, so a `session start --launch` there would re-vendor it. Harmless and
+expected — the sweep (step 4) is gated on the release.
 
 ## Deferred — not blocking this phase
 
