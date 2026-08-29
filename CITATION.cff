@@ -9,8 +9,8 @@ authors:
 repository-code: "https://github.com/jblacketter/tagteam"
 url: "https://github.com/jblacketter/tagteam"
 license: Apache-2.0
-version: 3.8.2
-date-released: 2026-08-22
+version: 3.9.0
+date-released: 2026-08-29
 keywords:
   - ai-agents
   - multi-agent
