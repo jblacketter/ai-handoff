@@ -336,7 +336,7 @@ class TestRoadmapAdvance:
         assert new_state["turn"] == "lead"
         assert new_state["status"] == "ready"
         assert new_state["result"] is None
-        assert new_state["command"] == "/handoff start api-gateway impl"
+        assert new_state["command"] == "/tagteam:handoff start api-gateway impl"
 
     def test_impl_approved_hands_to_lead_for_next_phase(self, tmp_path):
         write_state({
@@ -362,7 +362,7 @@ class TestRoadmapAdvance:
         assert new_state["round"] == 1
         # Lead must create plan/cycle docs via `/handoff start [phase]`
         assert new_state["turn"] == "lead"
-        assert new_state["command"] == "/handoff start dashboard"
+        assert new_state["command"] == "/tagteam:handoff start dashboard"
         assert new_state["roadmap"]["current_index"] == 1
         assert "api-gateway" in new_state["roadmap"]["completed"]
 
@@ -772,7 +772,7 @@ class TestDynamicAdvance:
                                index=0, completed=[])
         new = _try_roadmap_advance(state, str(tmp_path))
         assert new["phase"] == "gamma" and new["roadmap"]["current_index"] == 1
-        assert new["command"] == "/handoff start gamma"
+        assert new["command"] == "/tagteam:handoff start gamma"
         assert new["roadmap"]["completed"] == ["beta"]
         assert new["roadmap"]["pause_reason"] is None
 

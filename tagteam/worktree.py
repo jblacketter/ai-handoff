@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tagteam import registry
+from tagteam.contract import handoff_command
 from tagteam import roadmap as _rm
 
 
@@ -338,7 +339,7 @@ def kickoff_text(info: WorktreeInfo) -> str:
         f"Next:\n"
         f"  cd {info.path}\n"
         f"  tagteam session start        # or: tagteam serve\n"
-        f"  then tell the lead:  /handoff start {info.phase}\n"
+        f"  then tell the lead:  {handoff_command(info.path)} start {info.phase}\n"
         f"\n"
         f"When the phase is done: commit a terminal `- **Status:**` for it in docs/roadmap.md\n"
         f"on {info.branch}, merge into {info.target or 'the integration branch'}, then\n"

@@ -1,9 +1,11 @@
-"""Phase 48 test helper: a fake Claude Code config dir with the tagteam
-plugin recorded the way `installed_plugins.json` / `settings.json` do it.
-Injected through CLAUDE_CONFIG_DIR so tests exercise the real reader."""
+"""Phase 48 test helper: a fake `claude` CLI whose `plugin list --json`
+prints the records a test wants. Injected through TAGTEAM_CLAUDE_BIN so
+tests exercise the real reader (subprocess, cwd, parsing, scope rules)."""
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 from tagteam.plugin import PLUGIN_KEY
@@ -12,16 +14,9 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGIN_SRC = REPO / "plugin"
 
 
-def fake_plugin(tmp_path: Path, monkeypatch, *, scope: str = "user",
-                project_path: Path | None = None, enabled: bool | None = True,
-                enabled_in: str = "user", broken: bool = False,
-                schema_version: int = 2, registry_text: str | None = None,
-                settings_text: str | None = None) -> Path:
-    """Build `<tmp>/claude/` and point CLAUDE_CONFIG_DIR at it. Returns the
-    plugin install path (a copy of this repo's `plugin/` tree)."""
-    cfg = tmp_path / "claude"
-    (cfg / "plugins").mkdir(parents=True, exist_ok=True)
-    install = cfg / "plugins" / "cache" / "tagteam" / "tagteam" / "9.9.9"
+def install_tree(tmp_path: Path, *, broken: bool = False) -> Path:
+    """A copy of this repo's plugin tree, as Claude Code would cache it."""
+    install = tmp_path / "claude" / "plugins" / "cache" / "tagteam" / "tagteam" / "9.9.9"
     (install / "skills" / "handoff").mkdir(parents=True, exist_ok=True)
     if not broken:
         (install / "skills" / "handoff" / "SKILL.md").write_bytes(
@@ -29,32 +24,52 @@ def fake_plugin(tmp_path: Path, monkeypatch, *, scope: str = "user",
     (install / ".claude-plugin").mkdir(exist_ok=True)
     (install / ".claude-plugin" / "plugin.json").write_bytes(
         (PLUGIN_SRC / ".claude-plugin" / "plugin.json").read_bytes())
-    record = {"scope": scope, "installPath": str(install), "version": "9.9.9"}
-    if scope == "project":
-        record["projectPath"] = str(project_path)
-    reg = {"version": schema_version, "plugins": {PLUGIN_KEY: [record]}}
-    (cfg / "plugins" / "installed_plugins.json").write_text(
-        registry_text if registry_text is not None else json.dumps(reg), encoding="utf-8")
-    if settings_text is not None:
-        (cfg / "settings.json").write_text(settings_text, encoding="utf-8")
-    elif enabled is not None:
-        target = cfg / "settings.json"
-        if enabled_in == "project" and project_path is not None:
-            target = project_path / ".claude" / "settings.json"
-        elif enabled_in == "local" and project_path is not None:
-            target = project_path / ".claude" / "settings.local.json"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"enabledPlugins": {PLUGIN_KEY: enabled}}), encoding="utf-8")
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
     return install
 
 
-def no_plugin(tmp_path: Path, monkeypatch) -> Path:
-    """An empty config dir: nothing installed."""
-    cfg = tmp_path / "claude-empty"
-    cfg.mkdir(exist_ok=True)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
-    return cfg
+def fake_claude(tmp_path: Path, monkeypatch, *, stdout: str, exit_code: int = 0,
+                sleep: float = 0.0) -> Path:
+    """Write a fake `claude` executable and point TAGTEAM_CLAUDE_BIN at it."""
+    bin_dir = tmp_path / "fakebin"; bin_dir.mkdir(exist_ok=True)
+    payload = bin_dir / "plugin-list.json"
+    payload.write_text(stdout, encoding="utf-8")
+    exe = bin_dir / "claude"
+    exe.write_text("#!/bin/sh\n"
+                   f"[ \"$1\" = plugin ] && [ \"$2\" = list ] || exit 64\n"
+                   f"sleep {sleep}\n"
+                   f"cat {payload}\n"
+                   f"exit {exit_code}\n", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("TAGTEAM_CLAUDE_BIN", str(exe))
+    return exe
+
+
+def fake_plugin(tmp_path: Path, monkeypatch, *, scope: str = "user",
+                project_path: Path | None = None, enabled: bool | None = True,
+                broken: bool = False, extra_records: list | None = None,
+                exit_code: int = 0, stdout: str | None = None) -> Path:
+    """The tagteam plugin as `claude plugin list --json` would report it.
+    Returns the install path."""
+    install = install_tree(tmp_path, broken=broken)
+    rec = {"id": PLUGIN_KEY, "version": "9.9.9", "scope": scope, "enabled": enabled,
+           "installPath": str(install)}
+    if scope in ("project", "local"):
+        rec["projectPath"] = str(project_path)
+    records = [{"id": "other@somewhere", "scope": "user", "enabled": True,
+                "installPath": str(tmp_path / "nope")}, rec] + (extra_records or [])
+    fake_claude(tmp_path, monkeypatch, stdout=json.dumps(records) if stdout is None else stdout,
+                exit_code=exit_code)
+    return install
+
+
+def no_plugin(tmp_path: Path, monkeypatch) -> None:
+    """A CLI that lists other plugins only."""
+    fake_claude(tmp_path, monkeypatch, stdout=json.dumps(
+        [{"id": "other@somewhere", "scope": "user", "enabled": True, "installPath": "/x"}]))
+
+
+def no_cli(monkeypatch) -> None:
+    monkeypatch.setenv("TAGTEAM_CLAUDE_BIN", "")
 
 
 def framework_files(project: Path, *, skill: bool = True) -> None:

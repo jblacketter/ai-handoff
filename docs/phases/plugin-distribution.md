@@ -434,6 +434,37 @@ the round-1 claim that it would not was wrong.
 
 ## Decided by the arbiter
 
+**The public command is `/tagteam:handoff`** (2026-08-29, impl review round 2).
+Claude Code namespaces plugin skills by plugin name, so the plugin serves the
+contract as `/tagteam:handoff`, not `/handoff`. The arbiter chose to migrate
+the workflow to the namespaced name rather than keep a vendored `/handoff`
+shim. Consequences, all in this phase: the contract text changes (the "no
+text change" rule below is superseded for this one rename plus a
+compatibility paragraph); the engine picks the name per project with
+`contract.handoff_command()` — `/handoff` while a project vendors the skill,
+`/tagteam:handoff` once only the plugin serves it — in every generated state
+command, watcher nudge, launch intent, worktree kickoff and gate message;
+`parse_start_command` accepts both.
+
+**The contract must stay readable without the plugin** (found during the
+same round). The reviewer is Codex, which has no Claude Code plugins;
+interactively it reads the contract from the path in the state command. A
+migrated project would have left Codex with no contract at all. So the
+standard turn command no longer names a file: *"Read the handoff contract
+(`tagteam contract`; in Claude Code: /tagteam:handoff) and handoff-state.json,
+then act on your turn"* — `tagteam contract` (new) prints the packaged
+contract for any agent with a shell. Same bytes as the plugin skill.
+
+**Plugin detection asks Claude Code, not its files** (round 2). `claude plugin
+list --json` reports effective state (managed policy, settings precedence,
+`local` scope) that raw-file parsing cannot model safely; the implementation
+now runs it with the project as cwd and fails closed on a missing CLI,
+timeout, non-zero exit, malformed output, unsupported scope or an ambiguous
+answer. The raw-file reader described under *Plugin detection* was removed
+rather than kept as a fallback. `TAGTEAM_CLAUDE_BIN` overrides the executable
+(empty = none; the test suite sets it so it never touches the real CLI).
+
+
 **The plugin ships from this repo** (2026-08-29). Version coupling is the
 principal risk in this phase, and lockstep release only works if `plugin.json`
 sits beside `pyproject.toml` where `scripts/release.py` can bump both and

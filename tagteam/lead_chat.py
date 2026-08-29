@@ -179,7 +179,7 @@ def _append_transcript(project_root, cid: str, n: int, who: str, text: str, ts: 
 FIRST_TURN_HEADER = """You are the Lead agent for the tagteam project at {root} ({name}).
 The human arbiter is talking to you from the tagteam cockpit. The handoff
 skill contract is .claude/skills/handoff/SKILL.md; you may run `tagteam …`
-commands (`/handoff start <phase>` means: follow that skill). Current
+commands (`/handoff start <phase>` / `/tagteam:handoff start <phase>` means: follow that skill). Current
 handoff state: {state_line}.
 
 """

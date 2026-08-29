@@ -69,7 +69,7 @@ _TRANSITIONS = {
     "NEED_HUMAN":        {"state": "needs-human",  "ready_for": "human"},
 }
 
-_STATE_COMMAND = "Read .claude/skills/handoff/SKILL.md and handoff-state.json, then act on your turn"
+from tagteam.contract import STANDARD_TURN_COMMAND as _STATE_COMMAND   # noqa: E402
 
 
 def _resolve(project_dir: str) -> str:

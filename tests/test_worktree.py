@@ -314,8 +314,7 @@ class TestImplRound2Fixes:
         """A project-scope record names the main checkout, not the worktree,
         so the worktree is vendored a skill as before — and still succeeds."""
         from tests._plugin_env import fake_plugin
-        fake_plugin(repo.parent, monkeypatch, scope="project", project_path=repo,
-                    enabled_in="user")
+        fake_plugin(repo.parent, monkeypatch, scope="project", project_path=repo)
         info = wt.create_worktree(repo, "beta")
         assert (Path(info.path) / ".claude" / "skills" / "handoff" / "SKILL.md").is_file()
 

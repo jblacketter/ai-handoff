@@ -42,14 +42,14 @@ cd ~/projects/myproject
 tagteam quickstart
 ```
 
-**Claude Code plugin (3.10+).** The `/handoff` contract Claude follows can be installed once as a plugin instead of being copied into every project — one contract, kept in lockstep with the CLI, plus a `SessionStart` hook that prints the current cycle (`tagteam: phase … | round … | turn …`) when you open a tagteam project:
+**Claude Code plugin (3.10+).** The handoff contract Claude follows can be installed once as a plugin — invoked as `/tagteam:handoff` — instead of being copied into every project — one contract, kept in lockstep with the CLI, plus a `SessionStart` hook that prints the current cycle (`tagteam: phase … | round … | turn …`) when you open a tagteam project:
 
 ```text
 /plugin marketplace add jblacketter/tagteam
 /plugin install tagteam@tagteam
 ```
 
-With the plugin installed and enabled, `tagteam setup` (and `tagteam upgrade`) removes the vendored `.claude/skills/handoff/` from a project — only when it is byte-for-byte a contract tagteam shipped; a customized copy or extra files are kept and reported — and headless turns compose their prompt from the packaged contract. Without the plugin, `setup` vendors the skill exactly as before; `tagteam setup --no-plugin` forces that. The hook is silent outside tagteam projects and never fails a session start.
+With the plugin installed and enabled, `tagteam setup` (and `tagteam upgrade`) removes the vendored `.claude/skills/handoff/` from a project — only when it is byte-for-byte a contract tagteam shipped; a customized copy or extra files are kept and reported — and headless turns compose their prompt from the packaged contract. Without the plugin, `setup` vendors the skill exactly as before; `tagteam setup --no-plugin` forces that. The hook is silent outside tagteam projects and never fails a session start. A project that still vendors the skill invokes the same contract as `/handoff`; agents without Claude Code's plugin skills (Codex) read it with `tagteam contract`.
 
 You'll be prompted for your two agent names, then quickstart sets up the workspace and starts a session. It auto-detects the best terminal backend available on your machine:
 
@@ -63,22 +63,22 @@ When quickstart finishes it prints what to paste into the Lead and Reviewer agen
 **Single phase** — start a plan cycle, let the watcher handle the back-and-forth, and stop when the phase completes:
 
 ```text
-/handoff start my-phase
+/tagteam:handoff start my-phase
 ```
 
 **Full roadmap** — run all incomplete phases end-to-end:
 
 ```text
-/handoff start --roadmap
-/handoff start --roadmap api-gateway
+/tagteam:handoff start --roadmap
+/tagteam:handoff start --roadmap api-gateway
 ```
 
 | Command                         | Purpose                                         | Who  |
 | ------------------------------- | ----------------------------------------------- | ---- |
-| `/handoff`                      | Auto-detects role + state, does the right thing | Both |
-| `/handoff start [phase]`        | Begin a new phase (plan cycle)                  | Lead |
-| `/handoff start [phase] impl`   | Begin the implementation cycle for a phase      | Lead |
-| `/handoff status`               | Orientation, status check, drift reset          | Both |
+| `/tagteam:handoff`                      | Auto-detects role + state, does the right thing | Both |
+| `/tagteam:handoff start [phase]`        | Begin a new phase (plan cycle)                  | Lead |
+| `/tagteam:handoff start [phase] impl`   | Begin the implementation cycle for a phase      | Lead |
+| `/tagteam:handoff status`               | Orientation, status check, drift reset          | Both |
 
 **Human-in-the-loop** — add `--confirm` to pause for approval before each automatic send: `tagteam watch --mode notify --confirm`.
 
@@ -131,7 +131,7 @@ Options:
 - `tagteam session start --backend <name>` — force a specific backend
 - `tagteam session kill` — close the current session
 
-> **Manual mode:** you can always run the loop without any automation by pasting `/handoff` output between agents yourself.
+> **Manual mode:** you can always run the loop without any automation by pasting `/tagteam:handoff` output between agents yourself.
 
 </details>
 
@@ -248,10 +248,10 @@ tagteam serve                    # http://127.0.0.1:8080 — the cockpit for the
 tagteam serve --dir ~/projects/myproject --port 8081
 ```
 
-- **Start card** — when nothing is in progress, *Needs you* shows the exact next step derived from the recorded state and your roadmap (a new phase's plan; after a plan is approved, that phase's implementation; after an implementation, the next open phase) and one **Start**: it turns the watcher on (if it is off) and tells the lead `/handoff start …` as the first message of a chat; every turn from then on runs from the page. Prefer to talk first? Chat with the lead, then say the command yourself. (Terminal people start from the terminal — `tagteam session start` — and the cockpit still watches.)
-- **Chat with the lead** — the left lane, named after your lead agent: brainstorm, plan, say `/handoff start <phase>`, and after implementation give feedback or close the phase. Each message is one turn of the lead's own CLI (`claude -p` / `codex exec`, resumed across messages, streamed live, transcript under `.tagteam/conversations/`), with the same permissions as its handoff turns. It never runs on top of the watcher's lead turn — Send is refused while the lead is working on its turn (leave a note instead), and a chat blocks the watcher's lead dispatch until it ends. `tagteam lead "message"` is the same thing from the terminal.
+- **Start card** — when nothing is in progress, *Needs you* shows the exact next step derived from the recorded state and your roadmap (a new phase's plan; after a plan is approved, that phase's implementation; after an implementation, the next open phase) and one **Start**: it turns the watcher on (if it is off) and tells the lead `/tagteam:handoff start …` as the first message of a chat; every turn from then on runs from the page. Prefer to talk first? Chat with the lead, then say the command yourself. (Terminal people start from the terminal — `tagteam session start` — and the cockpit still watches.)
+- **Chat with the lead** — the left lane, named after your lead agent: brainstorm, plan, say `/tagteam:handoff start <phase>`, and after implementation give feedback or close the phase. Each message is one turn of the lead's own CLI (`claude -p` / `codex exec`, resumed across messages, streamed live, transcript under `.tagteam/conversations/`), with the same permissions as its handoff turns. It never runs on top of the watcher's lead turn — Send is refused while the lead is working on its turn (leave a note instead), and a chat blocks the watcher's lead dispatch until it ends. `tagteam lead "message"` is the same thing from the terminal.
 
-<p align="center"><img src="docs/media/screenshots/cockpit-lead.png" alt="Cockpit on an idle project: the Start card showing the next step derived from the roadmap (/handoff start csv-export) with Copy command, Launch terminals and Start headless, the watcher chip's Start, and the Lead panel with a two-turn conversation and the composer" width="100%"></p>
+<p align="center"><img src="docs/media/screenshots/cockpit-lead.png" alt="Cockpit on an idle project: the Start card showing the next step derived from the roadmap (/tagteam:handoff start csv-export) with Copy command, Launch terminals and Start headless, the watcher chip's Start, and the Lead panel with a two-turn conversation and the composer" width="100%"></p>
 
 <p align="center"><img src="docs/media/screenshots/cockpit-needs-you.png" alt="Cockpit: the Now strip (phase, turn, watcher, connection), a Needs-you card for an escalated plan cycle with its decision brief and Approve / Request changes buttons, and the Watch tabs" width="100%"></p>
 
@@ -300,6 +300,7 @@ tagteam init
 tagteam setup                          # vendor the framework files — or, with the plugin installed, hand the skill over to it
 tagteam setup --no-plugin              # force vendoring the handoff skill
 tagteam hook session-start             # the plugin's SessionStart hook body: cycle banner + version-skew warning
+tagteam contract                       # print the handoff contract (for agents without the plugin, e.g. Codex); --path
 tagteam migrate                        # migrate a legacy project to tagteam.yaml
 tagteam state
 tagteam state diagnose
