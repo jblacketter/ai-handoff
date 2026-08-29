@@ -547,6 +547,33 @@ empty, and `archive/handoff-test` is not a git repo, so nothing in tagteam's
 suite reads it. The impl will grep that directory itself for anything asserting
 on `SKILL.md` before adding the note, and record the result in the submission.
 
+## Canary record (criterion 4)
+
+**Headless path — done (2026-08-29, commit a9ea5b1 + the log line).** A
+throwaway project with `tagteam.yaml` (both roles `headless: {provider:
+claude}`), no `.claude/skills/handoff/` (setup ran against a plugin reported
+installed, printed `handoff skill served by the plugin — nothing to vendor`),
+plan cycle `canary_plan` round 1. `tagteam watch --mode headless` picked up
+the reviewer turn; its log:
+
+```
+>> Codex's turn (phase: canary, round: 1)
+   Command: Read the handoff contract (`tagteam contract`; in Claude Code: /tagteam:handoff) and handoff-state.json, then act on your turn
+   headless: contract from packaged (/Users/jackblacketter/projects/tagteam/tagteam/data/.claude/skills/handoff/SKILL.md)
+   headless: spawning claude for Codex (reviewer) — log: …/canary_plan_r1_reviewer_20260829T204910Z.log
+   headless: turn ok — reviewer APPROVE at round 1 (13645 ms)
+** Cycle complete: approved
+```
+
+One cycle-writing call, `APPROVE`, `updated_by: Codex`. The `headless:
+contract from <source> (<path>)` line was added for exactly this
+observability.
+
+**Interactive path — pending the arbiter's plugin install.** To record: on
+aegis, `tagteam setup` removing the vendored 3.8.2 contract, then
+`/tagteam:handoff status` in a Claude Code session producing the status
+banner, with `claude plugin list --json` showing `tagteam@tagteam` enabled.
+
 ## Deferred — not blocking this phase
 
 **Publish to a public marketplace?** Arbiter's answer as of 2026-08-29: *maybe*.
