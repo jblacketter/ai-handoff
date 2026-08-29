@@ -628,7 +628,8 @@ def diagnose_state(project_dir: str | None = None,
                    - datetime.fromisoformat(updated_at)).total_seconds()
             if age > 300:
                 lines.append(f"Recommendation: Re-send command to {turn},"
-                             " or run /handoff status in their terminal.")
+                             " or run the handoff skill (/tagteam:handoff status,"
+                             " or /handoff status where vendored) in their terminal.")
         except (ValueError, TypeError):
             pass
 

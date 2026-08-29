@@ -3,7 +3,7 @@ name: handoff
 description: Unified command for the AI handoff workflow. Auto-detects role and state, then executes the appropriate action.
 ---
 
-# Skill: /handoff
+# Skill: /tagteam:handoff
 
 Unified command for the AI handoff workflow. Reads your role and current state, then does the right thing.
 
@@ -12,20 +12,22 @@ Unified command for the AI handoff workflow. Reads your role and current state, 
 2. Read `handoff-state.json` → determine current state
 3. Follow the instructions for your situation below
 
+**One contract, three ways in (3.10).** This document is served by the `tagteam` Claude Code plugin as `/tagteam:handoff`. A project that still carries a vendored copy at `.claude/skills/handoff/SKILL.md` invokes the same contract as `/handoff` — either name, same rules. An agent without Claude Code's plugin skills (Codex, or any shell) reads it with `tagteam contract`. Wherever this document says `/tagteam:handoff`, substitute the name that exists in your session.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/handoff` | Main command — auto-detects role + state, does the right thing |
-| `/handoff start [phase]` | Lead starts a plan review cycle (single-phase mode) |
-| `/handoff start [phase] impl` | Lead starts an implementation review cycle |
-| `/handoff start --roadmap` | Lead starts full-roadmap mode (all incomplete phases) |
-| `/handoff start --roadmap [phase]` | Lead starts full-roadmap mode from a specific phase |
-| `/handoff status` | Show current state and orientation for both agents |
+| `/tagteam:handoff` | Main command — auto-detects role + state, does the right thing |
+| `/tagteam:handoff start [phase]` | Lead starts a plan review cycle (single-phase mode) |
+| `/tagteam:handoff start [phase] impl` | Lead starts an implementation review cycle |
+| `/tagteam:handoff start --roadmap` | Lead starts full-roadmap mode (all incomplete phases) |
+| `/tagteam:handoff start --roadmap [phase]` | Lead starts full-roadmap mode from a specific phase |
+| `/tagteam:handoff status` | Show current state and orientation for both agents |
 
 ---
 
-## `/handoff` — Main Command
+## `/tagteam:handoff` — Main Command
 
 **Step 1:** Read `tagteam.yaml` (your role) and `handoff-state.json` (state). To read the active cycle, run `tagteam cycle rounds --phase [phase] --type [type]` (works for both JSONL and legacy markdown cycles). Add `--tail N` to read only the last N entries when you just need the latest feedback — it saves context tokens on long cycles.
 
@@ -33,7 +35,7 @@ Unified command for the AI handoff workflow. Reads your role and current state, 
 
 **Arbiter interjections.** The human arbiter can leave notes with `tagteam interject`. In a headless turn they appear in your prompt under `=== ARBITER INTERJECTIONS (unconsumed) ===`; interactively they appear as an `interjections` list on the round in `tagteam cycle rounds` output. Treat them as authoritative instructions for this cycle (they may already have been addressed in earlier rounds — verify before acting), and mention in your submission how you handled them.
 
-**Step 2 — CRITICAL: You MUST begin every `/handoff` response with this status banner:**
+**Step 2 — CRITICAL: You MUST begin every `/tagteam:handoff` response with this status banner:**
 
 ```
 Phase: [phase] | Type: [plan/impl] | Round: [N] | Turn: [agent] | Status: [status]
@@ -52,16 +54,16 @@ If there is no state file, show: `Phase: — | Type: — | Round: — | Turn: �
 
 **Step 3:** Check state and act:
 
-- **No state file or empty:** "No active cycle. Lead should run `/handoff start [phase]`."
+- **No state file or empty:** "No active cycle. Lead should run `/tagteam:handoff start [phase]`."
 - **Approved / done:** Check `run_mode` and `result` in state:
   - If `result == "roadmap-complete"`: "Roadmap complete — all phases finished!"
-  - If plan → "Plan approved! Implement, then `/handoff start [phase] impl`."
-  - If impl and `run_mode == "full-roadmap"` → "Implementation approved! Watcher will auto-advance to next phase." (The watcher sets `turn: lead` for the next phase — lead runs `/handoff start [next-phase]`.)
+  - If plan → "Plan approved! Implement, then `/tagteam:handoff start [phase] impl`."
+  - If impl and `run_mode == "full-roadmap"` → "Implementation approved! Watcher will auto-advance to next phase." (The watcher sets `turn: lead` for the next phase — lead runs `/tagteam:handoff start [next-phase]`.)
   - If impl (single-phase) → "Implementation approved! Start next phase."
 - **Escalated:** "Escalated to human arbiter." (If `roadmap.pause_reason` is set instead — `blocked: …` / `roadmap invalid: …` / `stale queue: …` — this is a full-roadmap pause, not a ruling: the arbiter unblocks and runs `tagteam roadmap resume`.) The arbiter reads `tagteam brief` (a decision brief, if the escalation briefer is enabled) and rules with `tagteam rule approve|request-changes --content "…"` — or from the cockpit's Needs-you card (`tagteam serve --theme cockpit`), which runs the same command.
 - **Needs-human:** "Paused for human input." The arbiter answers with `tagteam rule answer --to lead|reviewer --content "…"` (the answer arrives as an interjection and the cycle is re-armed for that role). Do not hand-edit cycle files.
 - **Aborted:** "Cycle was aborted. See cycle file for reason."
-- **Not your turn:** "Waiting for [other agent]. Tell them to run `/handoff`."
+- **Not your turn:** "Waiting for [other agent]. Tell them to run `/tagteam:handoff`."
 - **Your turn:** See below.
 
 #### As Lead (your turn)
@@ -84,9 +86,9 @@ When `TAGTEAM_STEP_B=1`, `docs/handoffs/<phase>_<type>.md` is auto-rendered on e
 tagteam cycle add --phase [phase] --type [plan|impl] --role lead --action AMEND --round [N] --updated-by [your-agent-name] --content "<what changed and why>"
 ```
 
-This appends an amendment to the active round without bumping the round number or returning the turn. The reviewer sees the amendment in the `tagteam cycle rounds` output on their next `/handoff`. AMEND only works when the cycle is mid-review (`ready_for: reviewer`) and the `--round` matches the active round; mismatches error.
+This appends an amendment to the active round without bumping the round number or returning the turn. The reviewer sees the amendment in the `tagteam cycle rounds` output on their next `/tagteam:handoff`. AMEND only works when the cycle is mid-review (`ready_for: reviewer`) and the `--round` matches the active round; mismatches error.
 
-**Gatekeeper pre-checks (when `gatekeeper.enabled: true` in `tagteam.yaml`).** A deterministic gate runs between your `SUBMIT_FOR_REVIEW` and the reviewer's turn: the project's test command, the implementation-work scope check (an impl submission must contain real changes since the plan was approved) and a plan-doc check. Before you submit, run `tagteam gate check` (`--skip-tests` when `on_submit` is on) — if it fails, fix first; the gate will bounce you otherwise. With `gatekeeper.on_submit: true` the gate runs **inside your `cycle add`/`cycle init` call** (no watcher needed) and the command tells you the outcome: `gate: pass … tell <Reviewer> to run /handoff`, or `gate: bounce … the turn is already back with you`. A bounce hands the turn straight back to you as a `GATE_BOUNCE` entry on your round (the failing output is in it; `tagteam gate status` shows the full report) — address it and re-submit with `--round [N+1]` exactly like a REQUEST_CHANGES.
+**Gatekeeper pre-checks (when `gatekeeper.enabled: true` in `tagteam.yaml`).** A deterministic gate runs between your `SUBMIT_FOR_REVIEW` and the reviewer's turn: the project's test command, the implementation-work scope check (an impl submission must contain real changes since the plan was approved) and a plan-doc check. Before you submit, run `tagteam gate check` (`--skip-tests` when `on_submit` is on) — if it fails, fix first; the gate will bounce you otherwise. With `gatekeeper.on_submit: true` the gate runs **inside your `cycle add`/`cycle init` call** (no watcher needed) and the command tells you the outcome: `gate: pass … tell <Reviewer> to run /tagteam:handoff`, or `gate: bounce … the turn is already back with you`. A bounce hands the turn straight back to you as a `GATE_BOUNCE` entry on your round (the failing output is in it; `tagteam gate status` shows the full report) — address it and re-submit with `--round [N+1]` exactly like a REQUEST_CHANGES.
 
 **Reviewer panel (when `panel.enabled: true` in `tagteam.yaml`).** The reviewer's turn on the paneled cycle types may be taken by a panel of 2–3 lens reviews (correctness / scope / verification by default) whose verdicts are merged into ONE reviewer entry — its content starts `PANEL: APPROVE — …` or `PANEL: REQUEST_CHANGES — …` with findings grouped by lens (`## correctness`, `## scope`, …), written as `updated_by: <Reviewer> panel`. Treat it exactly like a reviewer response: address every group, then re-submit with `--round [N+1]`. If a lens failed, the entry says so (`<lens>: lens failed (…)`) — that axis was not assessed. When the panel could not decide (a lens failed and none objected) the ordinary reviewer turn happens instead, so a plain reviewer entry is also possible on a paneled cycle.
 
@@ -107,19 +109,19 @@ This appends an amendment to the active round without bumping the round number o
    - **ESCALATE:** `tagteam cycle add --phase [phase] --type [plan|impl] --role reviewer --action ESCALATE --round [N] --updated-by [your-agent-name] --content "Reason."`
    - **NEED_HUMAN:** `tagteam cycle add --phase [phase] --type [plan|impl] --role reviewer --action NEED_HUMAN --round [N] --updated-by [your-agent-name] --content "Question for human."`
 
-**Step 4 — CRITICAL: You MUST end every `/handoff` response with this exact box:**
+**Step 4 — CRITICAL: You MUST end every `/tagteam:handoff` response with this exact box:**
 
 ```
-┌──────────────────────────────────────────────────┐
-│ NEXT: Tell [agent name] to run:  /handoff        │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ NEXT: Tell [agent name] to run:  /tagteam:handoff        │
+└──────────────────────────────────────────────────────────┘
 ```
 
 Replace `[agent name]` with the next agent's name. For completed/escalated/needs-human states, replace with the appropriate next action.
 
 ---
 
-## `/handoff start [phase]` — Start a New Phase
+## `/tagteam:handoff start [phase]` — Start a New Phase
 
 **Lead only.** Append `impl` to start an implementation review instead of a plan review.
 
@@ -130,15 +132,15 @@ Replace `[agent name]` with the next agent's name. For completed/escalated/needs
 4. Begin your response with the status banner (showing the newly created state).
 5. End with the NEXT COMMAND box.
 
-**`/handoff start [phase] impl` means implement first.** This command is what you run (or are handed by the watcher after plan approval) when the *plan* cycle is approved and the implementation review must begin. Before step 3:
+**`/tagteam:handoff start [phase] impl` means implement first.** This command is what you run (or are handed by the watcher after plan approval) when the *plan* cycle is approved and the implementation review must begin. Before step 3:
 - Read the approved plan at `docs/phases/[phase].md` and the plan cycle's history (`tagteam cycle rounds --phase [phase] --type plan`).
 - Implement the plan in full and run the project's verification (tests) until it passes.
-- Only then run `tagteam cycle init --type impl` — **exactly once**, with a submission that summarizes what was implemented. If an impl cycle for this phase already exists, do not create another; act on it with `/handoff` instead.
+- Only then run `tagteam cycle init --type impl` — **exactly once**, with a submission that summarizes what was implemented. If an impl cycle for this phase already exists, do not create another; act on it with `/tagteam:handoff` instead.
 An impl cycle opened over an unchanged tree is a contract violation, not a formality.
 
 ---
 
-## `/handoff start --roadmap [phase?]` — Start Full-Roadmap Mode
+## `/tagteam:handoff start --roadmap [phase?]` — Start Full-Roadmap Mode
 
 **Lead only.** Runs all remaining roadmap phases end-to-end with review gates.
 
@@ -157,19 +159,19 @@ An impl cycle opened over an unchanged tree is a contract violation, not a forma
      --run-mode full-roadmap \
      --roadmap-queue [comma-separated-slugs-from-step-2] \
      --roadmap-index 0 \
-     --command "Read .claude/skills/handoff/SKILL.md and handoff-state.json, then act on your turn" \
+     --command "Read the handoff contract (\`tagteam contract\`; in Claude Code: /tagteam:handoff) and handoff-state.json, then act on your turn" \
      --updated-by [your-agent-name]
    ```
 7. Begin with the status banner. End with the NEXT COMMAND box.
 
 **Lifecycle in full-roadmap mode:**
 - Each phase goes through: plan cycle → (lead implements) → impl cycle → (advance)
-- After plan approval, watcher sets `turn: lead` — lead implements and runs `/handoff start [phase] impl`
-- After impl approval, watcher advances to the next **ready** phase (re-reading the roadmap: phases completed elsewhere are skipped, a phase whose dependencies are not yet satisfied is never started) and sets `turn: lead` — lead runs `/handoff start [next-phase]`
+- After plan approval, watcher sets `turn: lead` — lead implements and runs `/tagteam:handoff start [phase] impl`
+- After impl approval, watcher advances to the next **ready** phase (re-reading the roadmap: phases completed elsewhere are skipped, a phase whose dependencies are not yet satisfied is never started) and sets `turn: lead` — lead runs `/tagteam:handoff start [next-phase]`
 - If everything left is blocked, the run pauses (`status: escalated`, `roadmap.pause_reason: "blocked: …"`); the arbiter merges the dependency / fixes the roadmap and runs `tagteam roadmap resume`
 - After the last phase's impl approval, state is set to `result: "roadmap-complete"`
 
-**`/handoff status` in roadmap mode shows:**
+**`/tagteam:handoff status` in roadmap mode shows:**
 ```
 Phase: phase-name | Type: plan | Round: 2 | Turn: lead | Status: ready
  Mode: full-roadmap | Progress: 3/7 | Next: next-phase-name
@@ -177,7 +179,7 @@ Phase: phase-name | Type: plan | Round: 2 | Turn: lead | Status: ready
 
 ---
 
-## `/handoff status` — Orientation & Reset
+## `/tagteam:handoff status` — Orientation & Reset
 
 For both agents. Re-reads everything and gives a full orientation.
 

@@ -86,9 +86,9 @@ class TestNeedsSetupWithPlugin:
         p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch, enabled=False)
         assert needs_setup(str(p)) is True
 
-    def test_malformed_registry_requires_local_skill(self, tmp_path, monkeypatch):
+    def test_malformed_cli_output_requires_local_skill(self, tmp_path, monkeypatch):
         from tests._plugin_env import fake_plugin
-        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch, registry_text="{")
+        p = self._project(tmp_path); fake_plugin(tmp_path, monkeypatch, stdout="{")
         assert needs_setup(str(p)) is True
 
     def test_project_scope_matching_is_complete(self, tmp_path, monkeypatch):

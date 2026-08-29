@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tagteam import procs
+from tagteam.contract import handoff_command
 
 TERMINAL_CYCLE_STATES = ("approved", "done")
 BLOCKING_CYCLE_STATES = ("in-progress", "ready", "escalated", "needs-human", "working")
@@ -137,14 +138,14 @@ def launch_intent(project_dir: str | Path, *, state: dict | None = None,
         return {"phase": phase, "type": ctype, "command": None, "observed": observed,
                 "reason": f"a cycle is in progress ({phase} · {ctype} · {cstate}; turn: {turn})"}
     if phase and cstate in TERMINAL_CYCLE_STATES and ctype == "plan":
-        return {"phase": phase, "type": "impl", "command": f"/handoff start {phase} impl",
+        return {"phase": phase, "type": "impl", "command": f"{handoff_command(root)} start {phase} impl",
                 "observed": observed, "reason": "plan approved — implement it"}
     if phase and cstate in TERMINAL_CYCLE_STATES and ctype == "impl":
         nxt, present = _next_after(root, phase)
         if nxt is None:
             return {"phase": None, "type": None, "command": None, "observed": observed,
                     "reason": "no actionable phase left in docs/roadmap.md"}
-        return {"phase": nxt.slug, "type": "plan", "command": f"/handoff start {nxt.slug}",
+        return {"phase": nxt.slug, "type": "plan", "command": f"{handoff_command(root)} start {nxt.slug}",
                 "observed": observed, "reason": f"{phase} approved — next phase"}
     if phase and cs is None and st.get("status") in ("ready", "working"):
         return {"phase": phase, "type": ctype, "command": None, "observed": observed,
@@ -154,7 +155,7 @@ def launch_intent(project_dir: str | Path, *, state: dict | None = None,
     if nxt is None:
         return {"phase": None, "type": None, "command": None, "observed": observed,
                 "reason": "no actionable phase in docs/roadmap.md"}
-    return {"phase": nxt.slug, "type": "plan", "command": f"/handoff start {nxt.slug}",
+    return {"phase": nxt.slug, "type": "plan", "command": f"{handoff_command(root)} start {nxt.slug}",
             "observed": observed, "reason": "no cycle in progress"}
 
 

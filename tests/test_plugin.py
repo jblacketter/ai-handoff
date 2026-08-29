@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from tagteam import plugin as pl
-from tests._plugin_env import REPO, PLUGIN_SRC, fake_plugin, no_plugin
+from tests._plugin_env import (REPO, PLUGIN_SRC, fake_plugin, fake_claude, no_plugin,
+                               no_cli, install_tree)
 
 PACKAGED = REPO / "tagteam" / "data" / ".claude" / "skills" / "handoff" / "SKILL.md"
 
@@ -56,77 +57,175 @@ class TestPluginTree:
 
 
 class TestPluginStatus:
+    """Detection asks `claude plugin list --json` (effective state) and fails
+    closed on every doubt."""
+
+    def test_no_cli(self, tmp_path, monkeypatch):
+        no_cli(monkeypatch)
+        st = pl.plugin_status(tmp_path)
+        assert not st.installed and "claude CLI not found" in st.reason
+
     def test_nothing_installed(self, tmp_path, monkeypatch):
         no_plugin(tmp_path, monkeypatch)
         st = pl.plugin_status(tmp_path)
-        assert not st.installed and "missing" in st.reason
+        assert not st.installed and "not installed for" in st.reason
 
     def test_user_scope_enabled(self, tmp_path, monkeypatch):
         install = fake_plugin(tmp_path, monkeypatch)
+        (tmp_path / "proj").mkdir()
         st = pl.plugin_status(tmp_path / "proj")
         assert st.installed and st.scope == "user" and st.install_path == install
-        assert "enabled by" in st.reason
+        assert "per claude plugin list" in st.reason
 
-    def test_disabled_in_user_settings(self, tmp_path, monkeypatch):
+    def test_effective_disabled(self, tmp_path, monkeypatch):
+        """Managed policy or any settings layer disabling it shows up as
+        enabled=false from the CLI — that is the only signal we trust."""
         fake_plugin(tmp_path, monkeypatch, enabled=False)
         st = pl.plugin_status(tmp_path)
-        assert not st.installed and "disabled by" in st.reason
+        assert not st.installed and "not enabled" in st.reason
 
-    def test_not_explicitly_enabled_is_not_installed(self, tmp_path, monkeypatch):
+    def test_enabled_missing_is_not_enabled(self, tmp_path, monkeypatch):
         fake_plugin(tmp_path, monkeypatch, enabled=None)
-        st = pl.plugin_status(tmp_path)
-        assert not st.installed and "not explicitly enabled" in st.reason
-
-    def test_project_local_false_overrides_user_true(self, tmp_path, monkeypatch):
-        proj = tmp_path / "proj"; proj.mkdir()
-        fake_plugin(tmp_path, monkeypatch, enabled=True)
-        (proj / ".claude").mkdir()
-        (proj / ".claude" / "settings.local.json").write_text(
-            json.dumps({"enabledPlugins": {pl.PLUGIN_KEY: False}}))
-        st = pl.plugin_status(proj)
-        assert not st.installed and "settings.local.json" in st.reason
-
-    def test_project_scope_matching(self, tmp_path, monkeypatch):
-        proj = tmp_path / "proj"; proj.mkdir()
-        fake_plugin(tmp_path, monkeypatch, scope="project", project_path=proj,
-                    enabled_in="project")
-        assert pl.plugin_status(proj).installed
-
-    def test_project_scope_other_path(self, tmp_path, monkeypatch):
-        proj = tmp_path / "proj"; proj.mkdir()
-        other = tmp_path / "other"; other.mkdir()
-        fake_plugin(tmp_path, monkeypatch, scope="project", project_path=other)
-        st = pl.plugin_status(proj)
-        assert not st.installed and "no user-scope or matching project-scope" in st.reason
-
-    def test_unknown_scope(self, tmp_path, monkeypatch):
-        fake_plugin(tmp_path, monkeypatch, scope="galaxy")
         assert not pl.plugin_status(tmp_path).installed
 
-    def test_malformed_registry(self, tmp_path, monkeypatch):
-        fake_plugin(tmp_path, monkeypatch, registry_text="{not json")
-        st = pl.plugin_status(tmp_path)
-        assert not st.installed and "unreadable" in st.reason
+    @pytest.mark.parametrize("scope", ["project", "local"])
+    def test_project_and_local_scope_matching(self, tmp_path, monkeypatch, scope):
+        proj = tmp_path / "proj"; proj.mkdir()
+        fake_plugin(tmp_path, monkeypatch, scope=scope, project_path=proj)
+        st = pl.plugin_status(proj)
+        assert st.installed and st.scope == scope
 
-    def test_wrong_schema_version(self, tmp_path, monkeypatch):
-        fake_plugin(tmp_path, monkeypatch, schema_version=3)
-        st = pl.plugin_status(tmp_path)
-        assert not st.installed and "unsupported schema" in st.reason
+    @pytest.mark.parametrize("scope", ["project", "local"])
+    def test_project_and_local_scope_other_path(self, tmp_path, monkeypatch, scope):
+        proj = tmp_path / "proj"; proj.mkdir()
+        other = tmp_path / "other"; other.mkdir()
+        fake_plugin(tmp_path, monkeypatch, scope=scope, project_path=other)
+        st = pl.plugin_status(proj)
+        assert not st.installed and "not installed for" in st.reason
 
-    def test_malformed_settings_fails_closed(self, tmp_path, monkeypatch):
-        fake_plugin(tmp_path, monkeypatch, settings_text="[1,2")
+    def test_realpath_comparison(self, tmp_path, monkeypatch):
+        proj = tmp_path / "proj"; proj.mkdir()
+        link = tmp_path / "link"; link.symlink_to(proj)
+        fake_plugin(tmp_path, monkeypatch, scope="project", project_path=link)
+        assert pl.plugin_status(proj).installed
+
+    def test_unsupported_scope(self, tmp_path, monkeypatch):
+        fake_plugin(tmp_path, monkeypatch, scope="managed")
         st = pl.plugin_status(tmp_path)
-        assert not st.installed and "malformed" in st.reason
+        assert not st.installed and "unsupported scope" in st.reason
+
+    def test_ambiguous_records(self, tmp_path, monkeypatch):
+        extra = {"id": pl.PLUGIN_KEY, "scope": "user", "enabled": False, "installPath": "/x"}
+        fake_plugin(tmp_path, monkeypatch, enabled=True, extra_records=[extra])
+        st = pl.plugin_status(tmp_path)
+        assert not st.installed and "ambiguous" in st.reason
+
+    def test_cli_nonzero_exit(self, tmp_path, monkeypatch):
+        fake_plugin(tmp_path, monkeypatch, exit_code=3)
+        st = pl.plugin_status(tmp_path)
+        assert not st.installed and "exited 3" in st.reason
+
+    def test_cli_malformed_json(self, tmp_path, monkeypatch):
+        fake_plugin(tmp_path, monkeypatch, stdout="{not json")
+        st = pl.plugin_status(tmp_path)
+        assert not st.installed and "invalid JSON" in st.reason
+
+    def test_cli_not_an_array(self, tmp_path, monkeypatch):
+        fake_plugin(tmp_path, monkeypatch, stdout='{"plugins": []}')
+        assert "not a JSON array" in pl.plugin_status(tmp_path).reason
+
+    def test_cli_timeout(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pl, "PLUGIN_LIST_TIMEOUT_S", 0.2)
+        fake_claude(tmp_path, monkeypatch, stdout="[]", sleep=2)
+        st = pl.plugin_status(tmp_path)
+        assert not st.installed and "timed out" in st.reason
+
+    def test_missing_project_dir_fails_closed(self, tmp_path, monkeypatch):
+        fake_plugin(tmp_path, monkeypatch)
+        st = pl.plugin_status(tmp_path / "does-not-exist")
+        assert not st.installed and "could not run" in st.reason
+
+    def test_cli_not_executable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TAGTEAM_CLAUDE_BIN", str(tmp_path / "missing-claude"))
+        st = pl.plugin_status(tmp_path)
+        assert not st.installed and "could not run" in st.reason
 
     def test_broken_install_missing_skill(self, tmp_path, monkeypatch):
         fake_plugin(tmp_path, monkeypatch, broken=True)
         st = pl.plugin_status(tmp_path)
         assert not st.installed and "broken install" in st.reason
 
-    def test_respects_claude_config_dir(self, tmp_path, monkeypatch):
-        fake_plugin(tmp_path, monkeypatch)
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
-        assert not pl.plugin_status(tmp_path).installed
+    def test_runs_with_project_as_cwd(self, tmp_path, monkeypatch):
+        """project/local scope are resolved by the CLI against its cwd."""
+        proj = tmp_path / "proj"; proj.mkdir()
+        exe = fake_claude(tmp_path, monkeypatch, stdout="[]")
+        exe.write_text("#!/bin/sh\npwd > " + str(tmp_path / "cwd.txt") + "\necho []\n")
+        pl.plugin_status(proj)
+        assert Path((tmp_path / "cwd.txt").read_text().strip()).resolve() == proj.resolve()
+
+    def test_real_cli_shape_parses(self, tmp_path, monkeypatch):
+        """The exact record shape `claude plugin list --json` printed on the
+        arbiter's machine (2.1.251), with tagteam added."""
+        install = install_tree(tmp_path)
+        records = [
+            {"id": "swift-lsp@claude-plugins-official", "version": "1.0.0", "scope": "user",
+             "enabled": False, "installPath": "/x", "installedAt": "2025-12-23T02:08:06.479Z",
+             "lastUpdated": "2025-12-23T02:08:06.479Z"},
+            {"id": "frontend-design@claude-plugins-official", "version": "unknown",
+             "scope": "project", "enabled": False, "installPath": "/y",
+             "projectPath": "/Users/someone/projects/tokenbench"},
+            {"id": pl.PLUGIN_KEY, "version": "3.10.0", "scope": "user", "enabled": True,
+             "installPath": str(install), "installedAt": "x", "lastUpdated": "y"},
+        ]
+        fake_claude(tmp_path, monkeypatch, stdout=json.dumps(records))
+        assert pl.plugin_status(tmp_path).installed
+
+
+class TestHandoffCommand:
+    def test_vendored_project_uses_slash_handoff(self, tmp_path):
+        from tagteam.contract import handoff_command
+        d = tmp_path / ".claude" / "skills" / "handoff"; d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("x")
+        assert handoff_command(tmp_path) == "/handoff"
+
+    def test_migrated_project_uses_namespaced(self, tmp_path):
+        from tagteam.contract import handoff_command
+        assert handoff_command(tmp_path) == "/tagteam:handoff"
+
+    def test_plugin_name_and_skill_dir_compose_the_command(self):
+        from tagteam.contract import PLUGIN_SKILL_COMMAND
+        manifest = json.loads((PLUGIN_SRC / ".claude-plugin" / "plugin.json").read_text())
+        skill_dirs = [p.name for p in (PLUGIN_SRC / "skills").iterdir() if p.is_dir()]
+        assert skill_dirs == ["handoff"]
+        assert PLUGIN_SKILL_COMMAND == f"/{manifest['name']}:{skill_dirs[0]}"
+
+    def test_contract_uses_the_namespaced_command_and_explains_fallbacks(self):
+        text = PACKAGED.read_text()
+        assert "NEXT: Tell [agent name] to run:  /tagteam:handoff" in text
+        assert "`/handoff`" in text and "`tagteam contract`" in text
+        assert "/handoff start" not in text.replace("/tagteam:handoff start", "")
+
+    def test_standard_turn_command_names_both_routes(self):
+        from tagteam.contract import STANDARD_TURN_COMMAND
+        assert "tagteam contract" in STANDARD_TURN_COMMAND and "/tagteam:handoff" in STANDARD_TURN_COMMAND
+        assert ".claude/skills" not in STANDARD_TURN_COMMAND
+
+    def test_start_parser_accepts_both_names(self):
+        from tagteam import headless as h
+        assert h.parse_start_command("/tagteam:handoff start feat-x impl") == ("feat-x", "impl")
+        assert h.parse_start_command("/handoff start feat-x") == ("feat-x", "plan")
+
+
+class TestContractCommand:
+    def test_prints_packaged_contract(self, tmp_path):
+        r = subprocess.run([sys.executable, "-m", "tagteam", "contract"], cwd=str(tmp_path),
+                           capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout == PACKAGED.read_text()
+
+    def test_path(self, tmp_path):
+        r = subprocess.run([sys.executable, "-m", "tagteam", "contract", "--path"], cwd=str(tmp_path),
+                           capture_output=True, text=True)
+        assert r.returncode == 0 and Path(r.stdout.strip()) == PACKAGED.resolve() or r.stdout.strip().endswith("SKILL.md")
 
 
 class TestProvenance:

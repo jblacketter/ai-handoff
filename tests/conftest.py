@@ -33,3 +33,12 @@ def _isolated_port_leases(tmp_path, monkeypatch):
     ~/.tagteam/ports/ — tests must never touch the real one."""
     monkeypatch.setenv("TAGTEAM_PORT_LEASE_DIR", str(tmp_path / "_port_leases"))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_cli(monkeypatch):
+    """Phase 48: plugin detection shells out to `claude plugin list --json`.
+    The suite must never ask the developer's real CLI — an empty override
+    means "no CLI" (→ plugin not installed); tests that want a plugin point
+    TAGTEAM_CLAUDE_BIN at a fake (tests/_plugin_env.py)."""
+    monkeypatch.setenv("TAGTEAM_CLAUDE_BIN", "")

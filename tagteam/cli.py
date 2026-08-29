@@ -5,6 +5,7 @@ Usage:
     python -m tagteam init        - Initialize agent configuration
     python -m tagteam setup [dir] [--no-plugin] - Copy framework files to a project
     python -m tagteam hook session-start  - SessionStart hook body (plugin)
+    python -m tagteam contract [--path]   - Print the handoff contract (for agents without the plugin)
     python -m tagteam migrate     - Migrate legacy projects to use config
     python -m tagteam watch       - Start the watcher daemon
     python -m tagteam tail        - Follow the in-flight headless turn log
@@ -213,8 +214,9 @@ _BACKEND_SURFACE = {
 def _print_priming_box(lead_name: str, reviewer_name: str, surface: str) -> None:
     """Print a boxed 'SESSION READY' message with backend-appropriate terminology."""
     prime_body = (
-        "Read tagteam.yaml and .claude/skills/handoff/"
-        "SKILL.md, then type /handoff"
+        "Read tagteam.yaml, then run the handoff contract: "
+        "/tagteam:handoff in Claude Code (/handoff if this project "
+        "vendors the skill); other agents: `tagteam contract`"
     )
     lines = [
         "SESSION READY",
@@ -419,6 +421,9 @@ def main() -> int:
     if command == "hook":
         from tagteam.hook import hook_command
         return hook_command(sys.argv[2:])
+    if command == "contract":
+        from tagteam.contract import contract_command
+        return contract_command(sys.argv[2:])
     if command == "migrate":
         from tagteam.migrate import migrate_command
 

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tagteam.tabs import TAB_BACKENDS
+from tagteam.contract import handoff_command
 from tagteam.config import read_config, get_agent_names
 from tagteam.state import read_state, update_state, get_state_path, normalize_phase_key
 
@@ -360,7 +361,7 @@ def _try_roadmap_advance(state: dict, project_dir: str = ".") -> dict | None:
             "turn": "lead",
             "status": "ready",
             "result": None,
-            "command": f"/handoff start {phase} impl",
+            "command": f"{handoff_command(project_dir)} start {phase} impl",
         }
         new_state = update_state(updates, project_dir, expected_seq=seq)
         if new_state is None:
@@ -536,7 +537,7 @@ def _select_next_phase(queue: list, idx: int, completed: list, seq: int,
             "status": "ready",
             "result": None,
             "roadmap": roadmap_update,
-            "command": f"/handoff start {slug}",
+            "command": f"{handoff_command(project_dir)} start {slug}",
         }
         new_state = update_state(updates, project_dir, expected_seq=seq)
         if new_state is None:
@@ -1052,7 +1053,7 @@ class _StateProcessor:
             self.idle_since = time.time()
             return
 
-        done_msg = "/handoff"
+        done_msg = handoff_command(self.project_dir)
         if result == "roadmap-complete":
             _log("** Roadmap complete: all phases finished!")
             notify_macos("Tagteam", "Roadmap complete!")

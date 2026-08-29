@@ -46,11 +46,11 @@ TURNS_RELDIR = Path(".tagteam") / "turns"
 INFLIGHT_NAME = "inflight.json"
 CANCEL_NAME = "cancel-requested.json"
 PAUSE_RELPATH = Path(".tagteam") / "headless-paused.json"
-SKILL_RELPATH = Path(".claude") / "skills" / "handoff" / "SKILL.md"
 # Phase 48: the packaged contract — what `setup` vendors and what a headless
 # prompt falls back to when the project carries no local copy (the plugin
 # serves it to Claude; tagteam composes its own prompts from this file).
-PACKAGED_SKILL_PATH = Path(__file__).parent / "data" / SKILL_RELPATH
+from tagteam.contract import (SKILL_RELPATH, PACKAGED_SKILL_PATH,   # noqa: E402,F401
+                              STANDARD_TURN_COMMAND)
 
 
 def resolve_skill_path(project_root: str | Path,
@@ -73,11 +73,6 @@ DEFAULT_TURN_TIMEOUT_MINUTES = 60
 DEFAULT_TAIL_ROUNDS = 3
 KEEP_TURN_LOGS = 50
 
-# The standard "act on your turn" command written by cycle add/init.
-STANDARD_TURN_COMMAND = (
-    "Read .claude/skills/handoff/SKILL.md and handoff-state.json, "
-    "then act on your turn"
-)
 
 OUTCOME_OK = "ok"
 OUTCOME_TIMEOUT = "timeout"
@@ -703,13 +698,14 @@ def _usage_codex(events: list[dict]) -> dict | None:
 # Start-command parsing + prompt composition
 # ---------------------------------------------------------------------------
 
-_START_RE = re.compile(r"^/handoff\s+start\s+([a-z0-9][a-z0-9-]*)(\s+impl)?\s*$")
+_START_RE = re.compile(r"^/(?:tagteam:)?handoff\s+start\s+([a-z0-9][a-z0-9-]*)(\s+impl)?\s*$")
 
 
 def parse_start_command(command: str | None) -> tuple[str, str] | None:
     """Narrow validator for cycle-init commands.
 
-    Accepts exactly ``/handoff start <slug>`` and ``/handoff start <slug>
+    Accepts exactly ``/handoff start <slug>`` (or ``/tagteam:handoff start
+    <slug>``) and ``/handoff start <slug>
     impl`` (slug alphabet ``[a-z0-9-]``) → ``(slug, "plan"|"impl")``.
     Anything else → None (verified as an ordinary turn).
     """

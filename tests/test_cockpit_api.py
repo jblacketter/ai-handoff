@@ -329,7 +329,7 @@ class TestScopeDiff:
         assert by["bin.dat"]["status"] == "untracked" and by["bin.dat"]["binary"] is True
         key = str(h.SKILL_RELPATH).replace(os.sep, "/")
         assert by[key]["status"] == "deleted" and by[key]["deletions"] == n_lines
-        assert "-# Skill: /handoff" in by[key]["patch"]
+        assert "-# Skill: /tagteam:handoff" in by[key]["patch"]
         # a staged deletion is still "deleted"
         _git(project, "add", "-A"); _git(project, "commit", "-qm", "rm skill")
         by = {f["path"]: f for f in capi.scope_diff_payload(project, "feat-x", "plan")["files"]}
