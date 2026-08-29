@@ -569,10 +569,47 @@ One cycle-writing call, `APPROVE`, `updated_by: Codex`. The `headless:
 contract from <source> (<path>)` line was added for exactly this
 observability.
 
-**Interactive path — pending the arbiter's plugin install.** To record: on
-aegis, `tagteam setup` removing the vendored 3.8.2 contract, then
-`/tagteam:handoff status` in a Claude Code session producing the status
-banner, with `claude plugin list --json` showing `tagteam@tagteam` enabled.
+**Interactive path — done (2026-08-29, on aegis).** Plugin installed from this
+checkout (`claude plugin marketplace add /Users/jackblacketter/projects/tagteam`,
+`claude plugin install tagteam@tagteam --scope user`); `claude plugin list
+--json` → `tagteam@tagteam`, scope user, enabled, installPath
+`~/.claude/plugins/cache/tagteam/tagteam/3.9.0`. Then in `~/projects/QA`:
+
+```
+$ tagteam setup .
+plugin: installed (user scope, enabled — per claude plugin list)
+  removed vendored handoff skill (3.8.2 contract) — served by the plugin
+$ needs_setup('.') → False   handoff_command('.') → /tagteam:handoff
+$ tagteam hook session-start --plugin-root ~/.claude/plugins/cache/tagteam/tagteam/3.9.0
+tagteam: phase engine-single-sign-on | type impl | round 3 | turn — | status done
+$ claude -p "/tagteam:handoff status"
+Phase: engine-single-sign-on | Type: impl | Round: 3 | Turn: — | Status: done
+ Cycle complete — approved! …
+│ NEXT: Lead (claude) runs:  /tagteam:handoff start [phase]│
+```
+
+The skill was discovered and executed from the plugin with no vendored copy
+present. Only `docs/workflows.md` was rewritten by `setup` (verified by
+mtime; the other modified files in that tree were the arbiter's own edits).
+
+**Finding from the canary, fixed in round 3.** The session's PATH `tagteam`
+was the 3.9.0 uv tool, which has no `hook` subcommand and prints `Unknown
+command: hook` to **stdout** with exit 1 — the first hook command relayed that
+text into Claude's context. The hook now captures the subcommand's stdout and
+prints it only when the command succeeds and produced something:
+`out="$(tagteam hook session-start … 2>/dev/null)" && [ -n "$out" ] && printf
+'%s\n' "$out" || true`. `tests/test_hook.py::TestHookCommandShell` runs the
+literal hooks.json command under `sh` against no `tagteam`, an old one, and the
+current one. Note the consequence: with a CLI older than 3.10 the skew warning
+cannot fire (the subcommand does not exist), so the hook is simply silent —
+"plugin newer than CLI" is announced only from 3.10 on, which is the version
+that ships the hook.
+
+**Until 3.10 is released and `uv tool upgrade tagteam` runs**, aegis is
+migrated ahead of its own CLI: the 3.9.0 `needs_setup` still wants a local
+skill, so a `session start --launch` there would re-vendor it. Harmless
+(the vendored copy just comes back) and expected — the sweep (step 4) is
+gated on the release.
 
 ## Deferred — not blocking this phase
 
