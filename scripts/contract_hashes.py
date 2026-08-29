@@ -76,13 +76,27 @@ def main(argv: list[str] | None = None) -> int:
     if check and _is_shallow(root):
         print(f"{OUT}: check skipped — shallow clone (history incomplete); fetch-depth 0 to verify")
         return 0
-    text = render(compute(root))
+    data = compute(root)
+    text = render(data)
     if check:
-        current = out.read_text(encoding="utf-8") if out.exists() else ""
-        if current != text:
-            print(f"{OUT} is stale — run scripts/contract_hashes.py", file=sys.stderr)
+        # Compare the hash SET only. Labels (first release tag containing the
+        # blob) legitimately change when a tag is created after the file was
+        # generated — the release commit is tagged after release.py ran — and
+        # only the set gates removal in `tagteam setup`.
+        try:
+            current = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            print(f"{OUT} missing or unreadable — run scripts/contract_hashes.py", file=sys.stderr)
             return 1
-        print(f"{OUT} up to date")
+        have = set((current.get("hashes") or {}).keys())
+        want = set(data["hashes"].keys())
+        if have != want:
+            print(f"{OUT} is stale — run scripts/contract_hashes.py "
+                  f"(missing {len(want - have)}, extra {len(have - want)})", file=sys.stderr)
+            return 1
+        drift = sum(1 for k in want if current["hashes"].get(k) != data["hashes"][k])
+        print(f"{OUT} up to date ({len(want)} hashes"
+              + (f"; {drift} label(s) would change on regeneration)" if drift else ")"))
         return 0
     out.write_text(text, encoding="utf-8")
     print(f"wrote {OUT}: {len(json.loads(text)['hashes'])} contract version(s)")
