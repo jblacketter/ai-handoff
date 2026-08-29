@@ -297,7 +297,9 @@ tagteam session start --backend manual # Force manual backend
 tagteam session start --no-launch      # Create terminals, skip agent launch
 tagteam session kill
 tagteam init
-tagteam setup
+tagteam setup                          # vendor the framework files — or, with the plugin installed, hand the skill over to it
+tagteam setup --no-plugin              # force vendoring the handoff skill
+tagteam hook session-start             # the plugin's SessionStart hook body: cycle banner + version-skew warning
 tagteam migrate                        # migrate a legacy project to tagteam.yaml
 tagteam state
 tagteam state diagnose
