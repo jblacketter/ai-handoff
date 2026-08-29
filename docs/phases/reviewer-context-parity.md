@@ -4,9 +4,9 @@
 - [x] Planning — no plan cycle: the arbiter asked for the change directly
       ("can you make the updates to tagteam? I will go with your suggestions",
       2026-08-29). The design is this document, written alongside the code.
-- [x] Implementation (working tree, not yet committed or branched)
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation — branch `phase-47-reviewer-context-parity`
+- [x] Implementation Review — approved round 2 (2026-08-29; r1 asked for `UnicodeDecodeError` handling in `read_project_context`, fixed in 5375be4 with a regression test)
+- [x] Complete — awaiting merge/release
 
 ## Roles
 - Lead: Claude
