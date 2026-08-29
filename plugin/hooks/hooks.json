@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v tagteam >/dev/null 2>&1 && tagteam hook session-start --plugin-root \"$CLAUDE_PLUGIN_ROOT\" || true"
+            "command": "command -v tagteam >/dev/null 2>&1 && out=\"$(tagteam hook session-start --plugin-root \"$CLAUDE_PLUGIN_ROOT\" 2>/dev/null)\" && [ -n \"$out\" ] && printf '%s\\n' \"$out\" || true"
           }
         ]
       }

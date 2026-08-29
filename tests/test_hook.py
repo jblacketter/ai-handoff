@@ -107,3 +107,55 @@ class TestCli:
         r = subprocess.run([sys.executable, "-m", "tagteam", "hook", "nope"], cwd=str(tmp_path),
                            capture_output=True, text=True)
         assert r.returncode == 1 and "unknown hook" in r.stderr
+
+
+HOOK_CMD = json.loads((PLUGIN_SRC / "hooks" / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+
+def _run_hook_cmd(cwd: Path, bin_dir: Path, plugin_root: Path) -> subprocess.CompletedProcess:
+    env = {**__import__("os").environ, "PATH": f"{bin_dir}:{__import__('os').environ.get('PATH', '')}",
+           "CLAUDE_PLUGIN_ROOT": str(plugin_root)}
+    return subprocess.run(["sh", "-c", HOOK_CMD], cwd=str(cwd), env=env, capture_output=True,
+                          text=True, timeout=60)
+
+
+class TestHookCommandShell:
+    """The literal hooks.json command, run by sh, against three `tagteam`
+    binaries: none, an old one (no `hook` subcommand), and the real one."""
+
+    def _bin(self, tmp_path: Path, script: str | None) -> Path:
+        bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+        if script is not None:
+            exe = bin_dir / "tagteam"
+            exe.write_text(script, encoding="utf-8")
+            exe.chmod(0o755)
+        return bin_dir
+
+    def test_no_tagteam_on_path_is_silent(self, tmp_path):
+        p = _project(tmp_path)
+        env_path = tmp_path / "emptybin"; env_path.mkdir()
+        r = subprocess.run(["/bin/sh", "-c", HOOK_CMD], cwd=str(p), capture_output=True, text=True,
+                           env={"PATH": str(env_path), "CLAUDE_PLUGIN_ROOT": str(tmp_path)})
+        assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
+
+    def test_old_cli_without_hook_subcommand_is_silent(self, tmp_path):
+        """Seen on the arbiter's machine: the 3.9.0 uv tool prints
+        'Unknown command: hook' to stdout and exits 1 — that text must not
+        reach the session."""
+        p = _project(tmp_path)
+        bin_dir = self._bin(tmp_path, "#!/bin/sh\necho 'Unknown command: hook'\necho \"Run 'tagteam --help' for usage.\"\nexit 1\n")
+        r = _run_hook_cmd(p, bin_dir, tmp_path)
+        assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
+
+    def test_current_cli_prints_banner(self, tmp_path):
+        p = _project(tmp_path)
+        bin_dir = self._bin(tmp_path, f"#!/bin/sh\nexec {sys.executable} -m tagteam \"$@\"\n")
+        r = _run_hook_cmd(p, bin_dir, _plugin_root(tmp_path, "0.0.1"))
+        assert r.returncode == 0
+        assert r.stdout.splitlines() == ["tagteam: phase alpha | type impl | round 2 | turn reviewer | status ready"]
+
+    def test_current_cli_no_state_prints_nothing(self, tmp_path):
+        p = _project(tmp_path, None)
+        bin_dir = self._bin(tmp_path, f"#!/bin/sh\nexec {sys.executable} -m tagteam \"$@\"\n")
+        r = _run_hook_cmd(p, bin_dir, _plugin_root(tmp_path, "0.0.1"))
+        assert r.returncode == 0 and r.stdout == ""
