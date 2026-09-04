@@ -1,7 +1,7 @@
 # Phase 50: Read-only mode — helper processes cannot write the cycle
 
 ## Status
-- [ ] Planning — round 1 submitted (2026-09-03); round 2: reviewer blocker on `db.connect` mutating (mkdir / create / WAL pragma / migrate) — design revised, marked *(r2)*
+- [ ] Planning — round 1 submitted (2026-09-03); round 2: reviewer blocker on `db.connect` mutating (mkdir / create / WAL pragma / migrate) — design revised, marked *(r2)*; round 3: reviewer gap on the WAL-only sidecar state — fail-closed rule, all four combinations measured, marked *(r3)*
 - [ ] Implementation — branch `phase-50-read-only-mode`
 - [ ] Implementation Review
 - [ ] Complete
@@ -79,23 +79,32 @@ function on a connection from `db.connect`. So:
   without edits:
   1. `tagteam.db` absent → raise `DatabaseMissing(ReadOnlyError)`. No mkdir,
      no file, nothing.
-  2. Open with a SQLite URI chosen by what is on disk (**measured on this
-     machine, SQLite 3.51, 2026-09-03**):
-     - `-wal` or `-shm` sidecar present → `file:…?mode=ro`. Honours WAL
-       content, so committed-but-uncheckpointed rows from an open writer are
-       seen (measured: reads `[(7,), (8,)]` with a writer holding row 8 in
-       the WAL). `.db` and `-wal` bytes unchanged; the pre-existing `-shm`
-       (the WAL *index*, not data) is rewritten on open (measured).
-     - No sidecars → `file:…?mode=ro&immutable=1`. Plain `mode=ro` **cannot
-       open** a cleanly closed WAL database without sidecars ("unable to
-       open database file", measured — this is also a latent bug in the
-       existing `hub_api.read_only_connect`, which uses plain `mode=ro`; see
-       Scope). `immutable=1` opens it, reads correctly, and creates no
-       sidecar: the tree is byte-identical after (measured). `immutable=1`
-       is *only* safe when no `-wal` exists — it ignores WAL content
-       (measured: a table living entirely in an un-checkpointed WAL is
-       invisible) — which is exactly the case where we use it.
-     Both real states occur: this repo keeps `tagteam.db-shm`/`-wal` on
+  2. Open with a SQLite URI chosen by **which sidecars exist** — *(r3)* all
+     four combinations measured on this machine (SQLite 3.51, 2026-09-03),
+     including a genuine crash state (DB + WAL copied out from under an
+     open writer holding committed frames in the WAL, no SHM):
+
+     | on disk | `mode=ro` | `mode=ro&immutable=1` | **rule** |
+     |---|---|---|---|
+     | neither | cannot open ("unable to open database file") | reads; creates nothing | `immutable=1` |
+     | WAL + SHM | reads, **sees WAL frames**; rewrites the existing `-shm` | opens but **misses WAL frames** | `mode=ro` |
+     | WAL only | reads WAL frames but **creates `-shm`** | **misses WAL frames** | **refuse** — `WalWithoutIndex(ReadOnlyError)` |
+     | SHM only | cannot open | reads the main file; creates/changes nothing | `immutable=1` |
+
+     Fail-closed on WAL-only: neither URI is acceptable there (one creates a
+     file, the other can hide committed data), so `read_only_connect`
+     closes nothing, creates nothing and raises; the message says any normal
+     tagteam command (a writer) repairs the state by checkpointing. A
+     refinement — treat a **0-byte** WAL-only as safe for `immutable=1`
+     (no frames to miss) — is deliberately *not* taken: one more branch for
+     a rare state whose remedy is one ordinary command.
+     `immutable=1` is used only when **no `-wal` exists**, so its
+     ignore-the-WAL property can never hide data (a stale `-shm` without a
+     WAL is inert: measured). The **only** file that may change under any
+     read-only open is a *pre-existing* `-shm` in the WAL+SHM state (it is
+     the WAL index, not data); `.db` and `-wal` bytes never change, and no
+     file is ever created or removed.
+     Both common states occur in the wild: this repo keeps `-shm`/`-wal` on
      disk between commands; `~/projects/QA` has only `tagteam.db`.
   3. `PRAGMA query_only=ON` on the connection (second net under `mode=ro`).
   4. `PRAGMA user_version` **<** `SCHEMA_VERSION` → close and raise
@@ -106,11 +115,11 @@ function on a connection from `db.connect`. So:
 
   Callers: the cycle / state / gate-status / panel-status readers already
   wrap `db.connect` in `try/except Exception` with a canonical-file
-  fallback, so `DatabaseMissing` and `SchemaBehind` make them fall back —
-  no edits. The three DB-only readers (`usage`, `brief` show/list,
+  fallback, so `DatabaseMissing`, `SchemaBehind` and *(r3)* `WalWithoutIndex`
+  make them fall back — no edits. The three DB-only readers (`usage`, `brief` show/list,
   `interject --list`) get explicit handling: `DatabaseMissing` → empty
   results, exit 0 (an absent DB truthfully holds no usage/briefs/notes);
-  `SchemaBehind` → the CLI refusal line, exit 2.
+  `SchemaBehind` and *(r3)* `WalWithoutIndex` → the CLI refusal line, exit 2.
 
 - **`db` writer functions** additionally carry a `@_writes` decorator that
   raises `ReadOnlyError` — kept as the *clear refusal* for the DB writer API
@@ -181,9 +190,10 @@ vendored-hash check from Phase 48 are the guard.
 - `tagteam/dualwrite.py`: `ReadOnlyError(RuntimeError)`, `read_only() -> bool`
   (the env parse, one place), and the `writer_lock` entry check.
 - *(r2)* `tagteam/db.py`: `read_only_connect()` per §2 (absent → `DatabaseMissing`;
-  sidecar-aware URI; `query_only`; `SchemaBehind` on an old schema); `connect()`
+  sidecar rule per the §2 table incl. *(r3)* `WalWithoutIndex`; `query_only`;
+  `SchemaBehind` on an old schema); `connect()`
   delegates to it under the switch; `_writes` decorator on every
-  INSERT/UPDATE/DELETE function. `ReadOnlyError` and the two subclasses live in
+  INSERT/UPDATE/DELETE function. `ReadOnlyError` and the three subclasses live in
   `dualwrite.py` (imported by `db.py`; no new module).
 - *(r2)* `tagteam/hub_api.py`: `read_only_connect` delegates to the `db` one
   (keeps its `None`-on-absent / `ProjectDataError`-on-corrupt contract) — fixes
@@ -226,9 +236,11 @@ vendored-hash check from Phase 48 are the guard.
   the status files and the DB are byte-identical before and after.
 - *(r2)* Under the switch, read-only commands **create or remove no file**
   anywhere under the project (including `.tagteam/`), never migrate, and leave
-  every file byte-identical — with one measured, documented exception: a
-  pre-existing `tagteam.db-shm` may be rewritten by a `mode=ro` open (it is
-  the WAL index; `.db` and `-wal` bytes are asserted unchanged).
+  every file byte-identical — with one measured, documented exception, *(r3)* **applying only to the
+  WAL+SHM state**: the pre-existing `tagteam.db-shm` may be rewritten by the
+  `mode=ro` open (it is the WAL index; `.db` and `-wal` bytes are asserted
+  unchanged). In every other state every file is byte-identical, and in no
+  state is a file created or removed. WAL-only is refused, not read.
 - With the switch unset, behaviour is unchanged (the existing suite is the
   proof; no existing test is modified except to add the env cases).
 - A panel lens child receives the switch; a headless turn child does not.
@@ -255,18 +267,27 @@ Focused tests while working; the on-submit gate makes the one full-suite run.
     1. fresh project — `tagteam.yaml` only, no `.tagteam/`, no DB: every
        command exits 0 (file-derived or empty results); snapshot identical;
        `.tagteam/` does not exist afterwards.
-    2. current-schema DB, **no** `-wal`/`-shm` on disk: every command exits 0;
-       snapshot identical (so `immutable=1` created no sidecar); plus the same
-       fixture *with* sidecars: `.db` and `-wal` identical, no file created or
-       removed, `-shm` allowed to differ.
+    2. *(r3)* current-schema DB in each of the **four** sidecar states — the
+       WAL-bearing ones built as crash copies from an open writer with
+       `wal_autocheckpoint=0` so the WAL really holds committed frames:
+       - neither: every command exits 0; snapshot identical (nothing created).
+       - WAL+SHM: cycle readers return the WAL-held round; `.db` and `-wal`
+         identical, no file created or removed, `-shm` allowed to differ.
+       - WAL-only: cycle/state readers fall back to files and exit 0; DB-only
+         readers exit 2 with the `WalWithoutIndex` refusal; **no `-shm`
+         appears**; snapshot identical.
+       - SHM-only: every command exits 0; snapshot identical (stale `-shm`
+         untouched, nothing created).
     3. old-schema DB (built by running `_SCHEMA_V1` + `user_version=1` into a
        temp file): cycle/state readers fall back to files and exit 0; the
        DB-only readers exit 2 with the refusal; `user_version` still 1 and
        the file byte-identical afterwards.
-  - *(r2)* `db.read_only_connect`: absent → `DatabaseMissing`, nothing created;
-    sidecars present → sees a row committed by a still-open writer with
-    `wal_autocheckpoint=0` (the WAL-visibility property); no sidecars →
-    opens and reads; `query_only` refuses an INSERT through a raw connection.
+  - *(r2, r3)* `db.read_only_connect` unit tests, one per table row: absent →
+    `DatabaseMissing`, nothing created; WAL+SHM → sees a row committed by a
+    still-open writer with `wal_autocheckpoint=0` (the WAL-visibility
+    property); WAL-only → `WalWithoutIndex`, no `-shm` created; SHM-only and
+    neither → opens and reads, nothing created; `query_only` refuses an
+    INSERT through a raw connection.
   - *(r2)* `hub_api.read_only_connect` on a sidecar-less current DB returns a
     working connection (today: raises).
   - Env parse: `1`, `true`, `yes`, `anything` set; `0`, `false`, `no`, empty,
