@@ -439,7 +439,8 @@ READ_ONLY_COMMANDS: dict[str, "callable"] = {
     "tail": lambda rest: True,
     "hook": lambda rest: True,
 }
-# Never a helper's business: parents, humans and installers only.
+# Never a helper's business: parents, humans and installers only. Refused with
+# any arguments — `--help` included (see `read_only_refusal`).
 READ_ONLY_REFUSED = ("quickstart", "init", "setup", "migrate", "watch", "pause", "resume", "cancel-turn",
                      "rollback", "rule", "session", "serve", "lead", "tui", "upgrade")
 
@@ -447,10 +448,11 @@ READ_ONLY_REFUSED = ("quickstart", "init", "setup", "migrate", "watch", "pause",
 def read_only_refusal(argv: list[str]) -> str | None:
     """Detail line when `argv` (command + rest) is not a read invocation."""
     if not argv or argv[0].lower() in _HELP:
-        return None
+        return None          # top-level `tagteam --help` prints and exits
     command, rest = argv[0].lower(), argv[1:]
-    if set(rest) & _HELP:
-        return None
+    # No command-level help exception: not every subcommand consumes `--help`
+    # (e.g. `setup --help` would take it as the target directory). Help for a
+    # refused command is refused too — fail closed.
     allowed = READ_ONLY_COMMANDS.get(command)
     if allowed is not None and allowed(rest):
         return None

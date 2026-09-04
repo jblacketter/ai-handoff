@@ -680,7 +680,8 @@ class TestAllowlist:
         ["state", "diagnose"], ["gate", "status"], ["gate", "list"], ["panel", "status"], ["panel", "lenses"],
         ["roadmap", "queue"], ["roadmap", "ready"], ["roadmap", "check"], ["roadmap", "graph"],
         ["interject", "--list"], ["brief", "--list"], ["usage"], ["contract"], ["hook", "session-start"],
-        ["registry", "list"], ["hub", "list"], ["tail"], ["help"], ["--help"], ["cycle", "add", "--help"],
+        ["registry", "list"], ["hub", "list"], ["tail"], ["help"], ["--help"], ["-h"],
+        ["cycle", "rounds", "--help"],
     ])
     def test_reads_allowed(self, argv):
         assert cli.read_only_refusal(argv) is None, argv
@@ -694,10 +695,29 @@ class TestAllowlist:
         ["hub", "unregister", "x"], ["registry", "unregister", "x"], ["session", "start"], ["serve"],
         ["watch"], ["setup", "."], ["init"], ["quickstart"], ["upgrade"], ["lead"], ["tui"], ["rollback", "1.0"],
         ["no-such-command"],
+        # impl r3: no command-level help exception — fail closed
+        ["setup", "--help"], ["setup", ".", "--help"], ["setup", "-h"], ["cycle", "add", "--help"],
+        ["watch", "--help"], ["session", "start", "-h"], ["migrate", "help"],
     ])
     def test_writes_refused(self, argv):
         detail = cli.read_only_refusal(argv)
         assert detail is not None and "is not a read command" in detail, argv
+
+    @pytest.mark.parametrize("command", cli.READ_ONLY_REFUSED)
+    @pytest.mark.parametrize("args", [(), ("--help",), ("-h",), (".", "--help"), ("--help", "."), ("help",)])
+    def test_every_refused_command_fails_closed_with_help_variants(self, tmp_path, monkeypatch, capsys,
+                                                                    command, args):
+        """Through the real CLI: refused BEFORE dispatch, so nothing blocks,
+        prompts, installs or writes — `setup --help` would otherwise treat
+        `--help` as its target directory."""
+        d = _with_cycle(_proj(tmp_path))
+        _checkpoint(_dbp(d)); _drop_sidecars(_dbp(d))
+        monkeypatch.setenv(RO, "1")
+        before = _snapshot(d)
+        rc, out, err = _cli(monkeypatch, capsys, d, command, *args)
+        assert rc == 2 and "tagteam: refused" in err and "is not a read command" in err, (command, args, out, err)
+        assert _diff(before, _snapshot(d)) == {"created": [], "removed": [], "changed": []}, (command, args)
+        assert not (d / "--help").exists() and not (d / "-h").exists()
 
     def test_every_dispatched_command_is_classified(self):
         src = Path(cli.__file__).read_text(encoding="utf-8")

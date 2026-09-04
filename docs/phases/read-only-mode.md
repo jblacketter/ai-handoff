@@ -362,3 +362,14 @@ start, watch, setup — every one exit 2 with the tree byte-identical. Not
 pinned: cancel-turn with a *valid* live inflight (needs a real child + watcher
 identity; the guarded `write_cancel` precedes the signal, covered by
 `TestRuntimeMarkers`).
+
+## Implementation notes (impl r3 — help exception removed)
+
+The allowlist had a blanket exception: any `-h` / `--help` / `help` in the
+arguments dispatched the command. Not every subcommand consumes help —
+`setup --help` takes `--help` as its target directory — so a refused command
+could reach its mutator. Removed: only top-level `tagteam --help` is exempt;
+help for a refused command is refused (fail closed), help for an allowed read
+still works. Pinned through the real CLI for every `READ_ONLY_REFUSED`
+command × six argument shapes (none, `--help`, `-h`, `. --help`, `--help .`,
+`help`): exit 2, tree byte-identical, no `--help` directory.
