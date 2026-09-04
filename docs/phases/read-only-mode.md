@@ -1,7 +1,7 @@
 # Phase 50: Read-only mode — helper processes cannot write the cycle
 
 ## Status
-- [ ] Planning — round 1 submitted (2026-09-03)
+- [ ] Planning — round 1 submitted (2026-09-03); round 2: reviewer blocker on `db.connect` mutating (mkdir / create / WAL pragma / migrate) — design revised, marked *(r2)*
 - [ ] Implementation — branch `phase-50-read-only-mode`
 - [ ] Implementation Review
 - [ ] Complete
@@ -66,19 +66,61 @@ function on a connection from `db.connect`. So:
   is set — *before* `_ensure_tagteam_dir`, before the lock file is opened,
   before the thread lock is taken. Nothing is created or modified. Reads never
   take this lock (by design, see its docstring), so read paths are untouched.
-- **`db` writer functions** are guarded by a `@_writes` decorator that raises
-  `ReadOnlyError` when the switch is set. The set is every function in
-  `db.py` whose body executes `INSERT`, `UPDATE` or `DELETE`; a source-level
-  test enumerates those functions and asserts each is decorated, so a new
-  writer cannot be added without the guard.
+- **`db.connect` is the DB chokepoint — the writer decorators alone are not.**
+  *(r2 — reviewer blocker, correct.)* `connect()` today mkdirs `.tagteam/`,
+  creates `tagteam.db`, sets `journal_mode=WAL` and runs every pending
+  migration before any query — so under the switch a fresh project would
+  gain a directory, a DB and sidecars from a mere `usage` or `brief` show,
+  and an old-schema DB would be migrated. Round-1's decorator plan did not
+  touch this. Revised design:
 
-  *Alternative considered and not recommended:* open SQLite with
-  `?mode=ro` under the switch. It catches everything, but it changes read
-  behaviour when the DB file is absent (`connect` today creates and migrates
-  it; read paths rely on that), and the failure surfaces as SQLite's
-  "attempt to write a readonly database" instead of ours. The decorator is
-  explicit, testable, and a no-op when the switch is unset. The reviewer may
-  rule the other way; the rest of the plan does not change.
+  `db.read_only_connect(project_dir)` — and `db.connect` **delegates to it
+  whenever the switch is set**, so all ~70 call sites inherit the behaviour
+  without edits:
+  1. `tagteam.db` absent → raise `DatabaseMissing(ReadOnlyError)`. No mkdir,
+     no file, nothing.
+  2. Open with a SQLite URI chosen by what is on disk (**measured on this
+     machine, SQLite 3.51, 2026-09-03**):
+     - `-wal` or `-shm` sidecar present → `file:…?mode=ro`. Honours WAL
+       content, so committed-but-uncheckpointed rows from an open writer are
+       seen (measured: reads `[(7,), (8,)]` with a writer holding row 8 in
+       the WAL). `.db` and `-wal` bytes unchanged; the pre-existing `-shm`
+       (the WAL *index*, not data) is rewritten on open (measured).
+     - No sidecars → `file:…?mode=ro&immutable=1`. Plain `mode=ro` **cannot
+       open** a cleanly closed WAL database without sidecars ("unable to
+       open database file", measured — this is also a latent bug in the
+       existing `hub_api.read_only_connect`, which uses plain `mode=ro`; see
+       Scope). `immutable=1` opens it, reads correctly, and creates no
+       sidecar: the tree is byte-identical after (measured). `immutable=1`
+       is *only* safe when no `-wal` exists — it ignores WAL content
+       (measured: a table living entirely in an un-checkpointed WAL is
+       invisible) — which is exactly the case where we use it.
+     Both real states occur: this repo keeps `tagteam.db-shm`/`-wal` on
+     disk between commands; `~/projects/QA` has only `tagteam.db`.
+  3. `PRAGMA query_only=ON` on the connection (second net under `mode=ro`).
+  4. `PRAGMA user_version` **<** `SCHEMA_VERSION` → close and raise
+     `SchemaBehind(ReadOnlyError)`: read-only mode never migrates; the
+     message says any normal (writing) tagteam command migrates it. A
+     *newer* `user_version` is allowed (additive-only migration rule; an
+     older release reads a newer DB).
+
+  Callers: the cycle / state / gate-status / panel-status readers already
+  wrap `db.connect` in `try/except Exception` with a canonical-file
+  fallback, so `DatabaseMissing` and `SchemaBehind` make them fall back —
+  no edits. The three DB-only readers (`usage`, `brief` show/list,
+  `interject --list`) get explicit handling: `DatabaseMissing` → empty
+  results, exit 0 (an absent DB truthfully holds no usage/briefs/notes);
+  `SchemaBehind` → the CLI refusal line, exit 2.
+
+- **`db` writer functions** additionally carry a `@_writes` decorator that
+  raises `ReadOnlyError` — kept as the *clear refusal* for the DB writer API
+  (the reviewer's wording), not as the read-only guarantee. The set is every
+  function in `db.py` whose body executes `INSERT`, `UPDATE` or `DELETE`; a
+  source-level test enumerates those and asserts each is decorated.
+
+  *(r2)* The round-1 "alternative considered and not recommended" (`mode=ro`)
+  is withdrawn: the reviewer was right that connection semantics are the
+  substance, and the measurements above settle *how* to open read-only.
 
 - **No per-subcommand table in `cli.py`.** `cycle`, `state`, `interject`
   each mix read and write subcommands; a table would drift. Instead the CLI's
@@ -138,8 +180,18 @@ vendored-hash check from Phase 48 are the guard.
 **In:**
 - `tagteam/dualwrite.py`: `ReadOnlyError(RuntimeError)`, `read_only() -> bool`
   (the env parse, one place), and the `writer_lock` entry check.
-- `tagteam/db.py`: `_writes` decorator on every INSERT/UPDATE/DELETE function.
-- `tagteam/cli.py`: catch `ReadOnlyError` at the dispatcher; message + exit 2.
+- *(r2)* `tagteam/db.py`: `read_only_connect()` per §2 (absent → `DatabaseMissing`;
+  sidecar-aware URI; `query_only`; `SchemaBehind` on an old schema); `connect()`
+  delegates to it under the switch; `_writes` decorator on every
+  INSERT/UPDATE/DELETE function. `ReadOnlyError` and the two subclasses live in
+  `dualwrite.py` (imported by `db.py`; no new module).
+- *(r2)* `tagteam/hub_api.py`: `read_only_connect` delegates to the `db` one
+  (keeps its `None`-on-absent / `ProjectDataError`-on-corrupt contract) — fixes
+  the latent "unable to open" on a sidecar-less DB.
+- *(r2)* `tagteam/usage.py`, `tagteam/briefer.py` (show/list), `tagteam/controls.py`
+  (`interject --list`): `DatabaseMissing` → empty results, exit 0.
+- `tagteam/cli.py`: catch `ReadOnlyError` at the dispatcher; message + exit 2
+  (`SchemaBehind` appends one line naming the migration remedy).
 - `tagteam/panel.py`: set the switch for lens children.
 - `tagteam/briefer.py`: set the switch for the briefer child if its writes are
   parent-side (see §3); otherwise move them.
@@ -159,7 +211,8 @@ vendored-hash check from Phase 48 are the guard.
 ## Files
 
 - `tagteam/dualwrite.py`, `tagteam/db.py`, `tagteam/cli.py`,
-  `tagteam/panel.py`, `tagteam/briefer.py`
+  `tagteam/panel.py`, `tagteam/briefer.py`, *(r2)* `tagteam/hub_api.py`,
+  `tagteam/usage.py`, `tagteam/controls.py`
 - `plugin/skills/handoff/SKILL.md`, `tagteam/data/.claude/skills/handoff/SKILL.md`,
   `.claude/skills/handoff/SKILL.md`
 - `tests/test_readonly.py` (new), `tests/test_panel.py` (lens env),
@@ -171,6 +224,11 @@ vendored-hash check from Phase 48 are the guard.
 - With `TAGTEAM_READ_ONLY=1`, every cycle-writing CLI command is refused with
   the one-line message and exit 2, and `handoff-state.json`, the round logs,
   the status files and the DB are byte-identical before and after.
+- *(r2)* Under the switch, read-only commands **create or remove no file**
+  anywhere under the project (including `.tagteam/`), never migrate, and leave
+  every file byte-identical — with one measured, documented exception: a
+  pre-existing `tagteam.db-shm` may be rewritten by a `mode=ro` open (it is
+  the WAL index; `.db` and `-wal` bytes are asserted unchanged).
 - With the switch unset, behaviour is unchanged (the existing suite is the
   proof; no existing test is modified except to add the env cases).
 - A panel lens child receives the switch; a headless turn child does not.
@@ -191,6 +249,26 @@ Focused tests while working; the on-submit gate makes the one full-suite run.
     `pause`, `resume`, `gate run` under the switch → exit 2, the message, and
     unchanged project files (hash before/after).
   - CLI: the read-only commands listed in §2 under the switch → exit 0.
+  - *(r2)* **Tree-snapshot matrix** (reviewer's three fixtures × the read-only
+    command list; snapshot = every path under the project root + its bytes,
+    taken before and after each command):
+    1. fresh project — `tagteam.yaml` only, no `.tagteam/`, no DB: every
+       command exits 0 (file-derived or empty results); snapshot identical;
+       `.tagteam/` does not exist afterwards.
+    2. current-schema DB, **no** `-wal`/`-shm` on disk: every command exits 0;
+       snapshot identical (so `immutable=1` created no sidecar); plus the same
+       fixture *with* sidecars: `.db` and `-wal` identical, no file created or
+       removed, `-shm` allowed to differ.
+    3. old-schema DB (built by running `_SCHEMA_V1` + `user_version=1` into a
+       temp file): cycle/state readers fall back to files and exit 0; the
+       DB-only readers exit 2 with the refusal; `user_version` still 1 and
+       the file byte-identical afterwards.
+  - *(r2)* `db.read_only_connect`: absent → `DatabaseMissing`, nothing created;
+    sidecars present → sees a row committed by a still-open writer with
+    `wal_autocheckpoint=0` (the WAL-visibility property); no sidecars →
+    opens and reads; `query_only` refuses an INSERT through a raw connection.
+  - *(r2)* `hub_api.read_only_connect` on a sidecar-less current DB returns a
+    working connection (today: raises).
   - Env parse: `1`, `true`, `yes`, `anything` set; `0`, `false`, `no`, empty,
     unset → not set.
 - `tests/test_panel.py`: `run_lens` passes `TAGTEAM_READ_ONLY=1` to the child
