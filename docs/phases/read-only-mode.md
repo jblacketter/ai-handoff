@@ -3,8 +3,8 @@
 ## Status
 - [x] Planning — approved round 3 (2026-09-04, 4cb5f90). Round 1 submitted (2026-09-03); round 2: reviewer blocker on `db.connect` mutating (mkdir / create / WAL pragma / migrate) — design revised, marked *(r2)*; round 3: reviewer gap on the WAL-only sidecar state — fail-closed rule, all four combinations measured, marked *(r3)*
 - [x] Implementation — branch `phase-50-read-only-mode`; impl cycle opened 2026-09-04
-- [ ] Implementation Review
-- [ ] Complete
+- [x] Implementation Review — approved round 4 (2026-09-04, d164976; r1 gate bounce on the docs-story dispatch-table slice, r2 three write bypasses, r3 help-flag classifier bypass)
+- [ ] Complete — PR open; release 3.11.0 after merge
 
 ## Roles
 - Lead: Claude
