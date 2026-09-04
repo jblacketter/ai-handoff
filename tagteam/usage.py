@@ -150,11 +150,16 @@ def usage_command(args: list[str], project_root: str | Path | None = None,
         from tagteam.state import _resolve_project_root
         project_root = _resolve_project_root()
     from tagteam import db
-    conn = db.connect(project_dir=str(project_root))
+    from tagteam.dualwrite import DatabaseMissing
     try:
-        rows = db.get_usage(conn, phase=phase, cycle_type=ctype)
-    finally:
-        conn.close()
+        conn = db.connect(project_dir=str(project_root))
+    except DatabaseMissing:
+        rows = []          # Phase 50: read-only and no DB — there is no usage
+    else:
+        try:
+            rows = db.get_usage(conn, phase=phase, cycle_type=ctype)
+        finally:
+            conn.close()
     if role:
         rows = [r for r in rows if r.get("role") == role]
     if limit is not None:

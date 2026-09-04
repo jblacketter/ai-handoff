@@ -1,0 +1,25 @@
+{
+  "state": "approved",
+  "ready_for": null,
+  "round": 3,
+  "phase": "read-only-mode",
+  "type": "plan",
+  "lead": "Claude",
+  "reviewer": "Codex",
+  "date": "2026-09-04",
+  "baseline": {
+    "sha": "c1011fdd3b9a16de0d191c0ecfc4ec2cf3faec91",
+    "dirty_paths": [],
+    "captured_at": "2026-09-04T04:54:56.047635+00:00",
+    "source": "plan-init"
+  },
+  "impl_boundary": {
+    "sha": "4cb5f90b76e45e9ddb299c3f0f84055695b93670",
+    "dirty": {
+      "docs/handoffs/read-only-mode_plan_rounds.jsonl": "eb9b95cf8511bdd59fcfbbf3ab499fa6b3e11115e8b2de22ef5865ed996d3c77",
+      "docs/handoffs/read-only-mode_plan_status.json": "d49a12c54f76473a4ea7f79f368e2120a096bc9062d2f5ca3a2c52488c94f94e"
+    },
+    "captured_at": "2026-09-04T05:04:32.255511+00:00",
+    "source": "plan-approve"
+  }
+}

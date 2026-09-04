@@ -10,7 +10,7 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 ## Phases
 
 ### Phase 50: Read-only Mode
-- **Status:** Planning — plan cycle opened 2026-09-03. See `docs/phases/read-only-mode.md`
+- **Status:** Implementation review — plan approved round 3 (2026-09-04); impl cycle opened 2026-09-04 on `phase-50-read-only-mode`. See `docs/phases/read-only-mode.md`
 - **Description:** The one-cycle-writing-call rule is enforced by prose, not by the CLI: panel lenses get a `TAGTEAM_PANEL_LENS` env var nobody reads (the panel only *detects* a stray write after the fact), and the `codex-brief` / verifier agents have Bash and honor-system "never write" rules. Add `TAGTEAM_READ_ONLY=1`, enforced at the two write chokepoints (`dualwrite.writer_lock` and the `db` writer functions) before anything touches disk, surfaced by the CLI as one refusal line with exit 2. Panel lens children get it; headless turns do not. Contract gains a "read-only helpers" paragraph. Prerequisite for ever shipping reviewer agents in the plugin (deferred from Phase 48).
 - **Depends on:** Phase 39
 

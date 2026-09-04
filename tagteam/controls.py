@@ -283,7 +283,15 @@ def interject_command(args: list[str], project_root: str | Path | None = None,
         return 0
     root = _root(project_root)
     from tagteam import db
-    conn = db.connect(project_dir=str(root))
+    from tagteam.dualwrite import DatabaseMissing
+    try:
+        conn = db.connect(project_dir=str(root))
+    except DatabaseMissing:
+        if not opts.get("--list"):
+            raise
+        # Phase 50: read-only and no DB — there are no interjections.
+        print("[]" if opts.get("--json") else "No interjections for the current cycle.", file=out)
+        return 0
     try:
         if opts.get("--list"):
             st, ident = _owed_identity(root)

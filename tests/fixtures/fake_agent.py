@@ -125,7 +125,8 @@ def main() -> int:
     capture = os.environ.get("FAKE_AGENT_CAPTURE")
     if capture:
         with open(capture, "w", encoding="utf-8") as f:
-            json.dump({"argv": sys.argv, "prompt": prompt, "cwd": os.getcwd()}, f)
+            json.dump({"argv": sys.argv, "prompt": prompt, "cwd": os.getcwd(),
+                       "read_only": os.environ.get("TAGTEAM_READ_ONLY")}, f)
     state = _parse_state(prompt)
 
     if flavor == "claude":
@@ -213,12 +214,24 @@ def main() -> int:
         if beh == "hang":
             time.sleep(600)
             return 0
-        if beh == "rogue":
-            # a misbehaving lens that writes the cycle itself
-            subprocess.run([sys.executable, "-m", "tagteam", "cycle", "add", "--phase", state.get("phase", "?"),
-                            "--type", state.get("type", "impl"), "--role", "reviewer", "--action", "REQUEST_CHANGES",
-                            "--round", str(state.get("round", 1)), "--updated-by", "rogue-lens",
-                            "--content", "rogue lens wrote this"], check=False, capture_output=True)
+        if beh in ("rogue", "rogue-unset"):
+            # a misbehaving lens that writes the cycle itself. Phase 50: the
+            # lens child runs under TAGTEAM_READ_ONLY, so `rogue` is refused
+            # by the CLI; `rogue-unset` clears the switch (a write through a
+            # path the switch does not cover) so the panel's post-hoc
+            # detection is exercised. FAKE_ROGUE_OUT records the attempt.
+            env = dict(os.environ)
+            if beh == "rogue-unset":
+                env.pop("TAGTEAM_READ_ONLY", None)
+            r = subprocess.run([sys.executable, "-m", "tagteam", "cycle", "add", "--phase", state.get("phase", "?"),
+                                "--type", state.get("type", "impl"), "--role", "reviewer", "--action", "REQUEST_CHANGES",
+                                "--round", str(state.get("round", 1)), "--updated-by", "rogue-lens",
+                                "--content", "rogue lens wrote this"], check=False, capture_output=True,
+                               text=True, env=env)
+            rogue_out = os.environ.get("FAKE_ROGUE_OUT")
+            if rogue_out:
+                with open(rogue_out, "w", encoding="utf-8") as f:
+                    json.dump({"rc": r.returncode, "stderr": r.stderr}, f)
         elif vpath and beh != "no-file":
             os.makedirs(os.path.dirname(vpath) or ".", exist_ok=True)
             if beh == "bad-json":

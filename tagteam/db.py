@@ -459,6 +459,11 @@ def connect(project_dir: str | Path | None = None,
     the project root is auto-resolved. Idempotent — calling again on
     an existing DB only re-runs CREATE IF NOT EXISTS guards.
     """
+    from tagteam import dualwrite
+    if dualwrite.read_only():
+        # Phase 50: the DB chokepoint. A read-only process never creates,
+        # migrates or journals — every caller inherits this.
+        return read_only_connect(project_dir, db_path)
     if db_path is None:
         db_path = _resolve_db_path(project_dir)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -469,8 +474,82 @@ def connect(project_dir: str | Path | None = None,
     return conn
 
 
+def _sqlite_uri(db_path: Path, *params: str) -> str:
+    from urllib.parse import quote
+    return "file:" + quote(db_path.resolve().as_posix(), safe="/:") + "?" + "&".join(params)
+
+
+def read_only_connect(project_dir: str | Path | None = None,
+                      db_path: Path | None = None, *,
+                      require_current_schema: bool = True) -> sqlite3.Connection:
+    """Open an EXISTING project DB without creating, changing or migrating
+    anything (Phase 50). Raises a `dualwrite.ReadOnlyError` subclass when
+    that is not possible:
+
+      absent file                -> `DatabaseMissing`
+      `-wal` present, no `-shm`  -> `WalWithoutIndex` (fail closed: `mode=ro`
+                                    would create the `-shm`; `immutable=1`
+                                    would ignore committed WAL frames)
+      user_version < SCHEMA_VERSION and `require_current_schema`
+                                 -> `SchemaBehind` (never migrates)
+
+    URI by sidecar state (measured, docs/phases/read-only-mode.md §2):
+    `-wal` + `-shm` -> `mode=ro` (honours WAL content; may rewrite the
+    existing `-shm`, the WAL index); no `-wal` (with or without a stale
+    `-shm`) -> `mode=ro&immutable=1` (creates nothing; safe because there
+    is no WAL to miss). A newer `user_version` is tolerated (additive-only
+    migrations). Caller closes.
+    """
+    from tagteam.dualwrite import DatabaseMissing, SchemaBehind, WalWithoutIndex
+    if db_path is None:
+        db_path = _resolve_db_path(project_dir)
+    db_path = Path(db_path)
+    if not db_path.is_file():
+        raise DatabaseMissing(f"no database at {db_path}; read-only mode will not create one")
+    wal = db_path.with_name(db_path.name + "-wal")
+    shm = db_path.with_name(db_path.name + "-shm")
+    if wal.exists() and not shm.exists():
+        raise WalWithoutIndex(
+            f"{wal.name} exists without {shm.name}; reading it would create the index "
+            "or hide committed data — run any normal (writing) tagteam command to checkpoint it")
+    if wal.exists():
+        conn = sqlite3.connect(_sqlite_uri(db_path, "mode=ro"), uri=True)
+    else:
+        conn = sqlite3.connect(_sqlite_uri(db_path, "mode=ro", "immutable=1"), uri=True)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        if require_current_schema:
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < SCHEMA_VERSION:
+                raise SchemaBehind(
+                    f"database schema is at version {current}, this release expects "
+                    f"{SCHEMA_VERSION}; read-only mode never migrates — any normal (writing) "
+                    "tagteam command will")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _writes(fn):
+    """Mark a DB writer (Phase 50): refuses under `TAGTEAM_READ_ONLY` with the
+    read-only message. The connection is already `query_only` in that mode;
+    this is the clear refusal, not the guarantee."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from tagteam import dualwrite
+        if dualwrite.read_only():
+            raise dualwrite.ReadOnlyError(f"db.{fn.__name__} refused")
+        return fn(*args, **kwargs)
+    wrapper.__tagteam_writes__ = True
+    return wrapper
+
+
 # ---------- Cycle CRUD ----------
 
+@_writes
 def upsert_cycle(
     conn: sqlite3.Connection,
     phase: str,
@@ -549,6 +628,7 @@ def list_cycles(conn: sqlite3.Connection) -> list[dict]:
 
 # ---------- Round CRUD ----------
 
+@_writes
 def add_round(
     conn: sqlite3.Connection,
     cycle_id: int,
@@ -623,6 +703,7 @@ def get_rounds_since(
 
 # ---------- State CRUD ----------
 
+@_writes
 def set_state(conn: sqlite3.Connection, **fields) -> None:
     """Upsert the singleton state row. Unspecified columns are set to NULL."""
     cols = ["phase", "type", "round", "status", "command", "result",
@@ -654,6 +735,7 @@ def get_state(conn: sqlite3.Connection) -> dict | None:
     return out
 
 
+@_writes
 def add_history_entry(conn: sqlite3.Connection, entry: dict) -> None:
     conn.execute(
         """INSERT INTO state_history (ts, turn, status, phase, round, updated_by)
@@ -681,6 +763,7 @@ def get_history(conn: sqlite3.Connection, limit: int | None = None) -> list[dict
 
 # ---------- Diagnostics ----------
 
+@_writes
 def add_diagnostic(conn: sqlite3.Connection, kind: str,
                    payload: dict, ts: str) -> int:
     cur = conn.execute(
@@ -700,6 +783,7 @@ _USAGE_COLS = [
 ]
 
 
+@_writes
 def add_usage(conn: sqlite3.Connection, **fields) -> int:
     """Insert one per-turn usage row. `ts` and `status` are required;
     everything else is nullable. Unknown keys raise. Commits."""
@@ -753,6 +837,7 @@ _INTERJECTION_COLS = [
 ]
 
 
+@_writes
 def add_interjection(conn: sqlite3.Connection, *, ts: str, note: str,
                      by: str | None = None, target_role: str | None = None,
                      phase: str | None = None, cycle_type: str | None = None,
@@ -816,6 +901,7 @@ def pending_interjections_for(conn: sqlite3.Connection, role: str,
     return _rows(conn.execute(sql, (role, phase, cycle_type)))
 
 
+@_writes
 def mark_interjections_delivered(conn: sqlite3.Connection, ids: list[int], *,
                                  role: str, round_: int, stem: str, ts: str) -> int:
     """Stamp delivery on exactly `ids`. Commits. Returns rows updated."""
@@ -832,6 +918,7 @@ def mark_interjections_delivered(conn: sqlite3.Connection, ids: list[int], *,
     return cur.rowcount
 
 
+@_writes
 def retire_interjection(conn: sqlite3.Connection, id_: int, *, by: str | None,
                         ts: str) -> bool:
     """Close a note without delivery. Returns False if not found or already
@@ -855,6 +942,7 @@ _BRIEF_COLS = [
 ]
 
 
+@_writes
 def claim_brief(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str,
                 round_: int, cycle_state: str, event_key: str, kind: str,
                 runner_pid: int | None, runner_ident: str | None,
@@ -902,6 +990,7 @@ def claim_brief(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: st
         return None
 
 
+@_writes
 def finish_brief(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
                  stem: str | None = None, path: str | None = None,
                  content: str | None = None, model: str | None = None,
@@ -918,11 +1007,13 @@ def finish_brief(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
     conn.commit()
 
 
+@_writes
 def set_brief_stem(conn: sqlite3.Connection, id_: int, stem: str) -> None:
     conn.execute("UPDATE briefs SET stem=? WHERE id=?", (stem, id_))
     conn.commit()
 
 
+@_writes
 def mark_brief_abandoned(conn: sqlite3.Connection, id_: int, *, ts: str,
                          reason: str) -> bool:
     cur = conn.execute(
@@ -981,6 +1072,7 @@ def brief_history(conn: sqlite3.Connection, phase: str | None = None,
 _RATE_LIMIT_COLS = ["id", "provider", "kind", "status", "resets_at", "payload_json", "ts"]
 
 
+@_writes
 def upsert_rate_limit(conn: sqlite3.Connection, *, provider: str, kind: str,
                       status: str | None, resets_at: str | None,
                       payload: dict | None, ts: str) -> int:
@@ -1041,6 +1133,7 @@ def _rows(cur) -> list[dict]:
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
+@_writes
 def new_conversation(conn: sqlite3.Connection, *, id_: str, ts: str, provider: str | None,
                      title: str | None = None) -> dict:
     if not CONVERSATION_ID_RE.match(id_ or ""):
@@ -1063,6 +1156,7 @@ def list_conversations(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
         "FROM conversations c ORDER BY COALESCE(last_ts, created_at) DESC, id LIMIT ?", (int(limit),)))
 
 
+@_writes
 def update_conversation(conn: sqlite3.Connection, id_: str, **fields) -> None:
     allowed = {"session_id", "title", "last_ts", "continuity", "provider"}
     bad = set(fields) - allowed
@@ -1075,6 +1169,7 @@ def update_conversation(conn: sqlite3.Connection, id_: str, **fields) -> None:
     conn.commit()
 
 
+@_writes
 def add_conversation_turn(conn: sqlite3.Connection, *, conversation_id: str, ts: str,
                           user_text: str, owner_pid: int | None, owner_ident: str | None,
                           log_path: str | None = None, events_path: str | None = None) -> dict:
@@ -1100,6 +1195,7 @@ def list_conversation_turns(conn: sqlite3.Connection, conversation_id: str) -> l
                               (conversation_id,)))
 
 
+@_writes
 def finish_conversation_turn(conn: sqlite3.Connection, conversation_id: str, n: int, *,
                              status: str, ts: str, session_id: str | None = None,
                              usage_row_id: int | None = None, error: str | None = None,
@@ -1121,6 +1217,7 @@ def running_conversation_turns(conn: sqlite3.Connection) -> list[dict]:
     return _rows(conn.execute("SELECT * FROM conversation_turns WHERE status='running' ORDER BY id"))
 
 
+@_writes
 def claim_launch(conn: sqlite3.Connection, *, key: str, ts: str, intent_json: str,
                  owner_pid: int, owner_ident: str | None) -> tuple[dict, bool]:
     """Insert the launch claim for `key` if none exists. Returns (row,
@@ -1137,6 +1234,7 @@ def get_launch(conn: sqlite3.Connection, key: str) -> dict | None:
     return _row(conn.execute("SELECT * FROM launches WHERE key=?", (key,)))
 
 
+@_writes
 def update_launch(conn: sqlite3.Connection, key: str, *, ts: str, **fields) -> None:
     allowed = {"status", "watcher_pid", "watcher_ident", "conversation_id", "turn_n",
                "finished_at", "error", "partial_json", "owner_pid", "owner_ident"}
@@ -1151,6 +1249,7 @@ def update_launch(conn: sqlite3.Connection, key: str, *, ts: str, **fields) -> N
     conn.commit()
 
 
+@_writes
 def retry_launch(conn: sqlite3.Connection, key: str, *, ts: str, owner_pid: int,
                  owner_ident: str | None) -> bool:
     """Atomic failed → pending transition with attempt+1 and a new owner
@@ -1181,6 +1280,7 @@ _SATELLITE_TABLES = {
 }
 
 
+@_writes
 def _claim_satellite(conn: sqlite3.Connection, table: str, *, ts: str, phase: str, cycle_type: str,
                      round_: int, submission_seq: int, event_key: str, kind: str,
                      runner_pid: int | None, runner_ident: str | None,
@@ -1241,6 +1341,7 @@ def claim_gate(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: str
                             runner_pid=runner_pid, runner_ident=runner_ident, max_attempts=max_attempts)
 
 
+@_writes
 def finish_gate(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
                 duration_s: float | None = None, result_json: str | None = None,
                 stem: str | None = None, reason: str | None = None,
@@ -1255,6 +1356,7 @@ def finish_gate(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
     conn.commit()
 
 
+@_writes
 def update_gate(conn: sqlite3.Connection, id_: int, *, ts: str, **fields) -> None:
     allowed = {"stem", "result_json", "reason", "applied_seq", "runner_pid", "runner_ident"}
     bad = set(fields) - allowed
@@ -1319,6 +1421,7 @@ def claim_panel(conn: sqlite3.Connection, *, ts: str, phase: str, cycle_type: st
                             extra={"interjection_ids": json.dumps(list(interjection_ids or []))})
 
 
+@_writes
 def finish_panel(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
                  duration_s: float | None = None, lenses_json: str | None = None,
                  decision: str | None = None, stem: str | None = None, reason: str | None = None,
@@ -1333,6 +1436,7 @@ def finish_panel(conn: sqlite3.Connection, id_: int, *, status: str, ts: str,
     conn.commit()
 
 
+@_writes
 def update_panel(conn: sqlite3.Connection, id_: int, *, ts: str, **fields) -> None:
     allowed = {"stem", "lenses_json", "decision", "reason", "applied_seq", "runner_pid", "runner_ident",
                "interjection_ids"}
@@ -1387,6 +1491,7 @@ def snapshot_non_file_backed(conn: sqlite3.Connection) -> dict[str, list[tuple]]
     return out
 
 
+@_writes
 def restore_non_file_backed(conn: sqlite3.Connection, snapshot: dict[str, list[tuple]]) -> dict[str, int]:
     """Re-insert snapshotted rows unchanged (ids preserved). Commits."""
     counts: dict[str, int] = {}
@@ -1417,6 +1522,7 @@ _ROUNDS_RE = re.compile(r"^(.+)_(plan|impl)_rounds\.jsonl$")
 _STATUS_RE = re.compile(r"^(.+)_(plan|impl)_status\.json$")
 
 
+@_writes
 def import_from_files(project_dir: Path, conn: sqlite3.Connection) -> dict:
     """Read tagteam project files, populate the database. Read-only on
     source. Idempotent in spirit but not safe to re-run on a DB that

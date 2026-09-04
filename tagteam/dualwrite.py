@@ -120,6 +120,59 @@ def _db_invalid_flag_path(project_dir: str | Path) -> Path:
     return _tagteam_dir(project_dir) / DB_INVALID_FLAG_FILENAME
 
 
+# ---------- Read-only mode (Phase 50) ----------
+#
+# A helper process the lead delegates to (a panel lens, a brief drafter, a
+# verifier) must be able to READ the cycle and must never WRITE it — the
+# turn's one cycle-writing call belongs to the caller. `TAGTEAM_READ_ONLY`
+# is the process-scoped switch: the parent sets it for the children it
+# spawns; every state write refuses *before* anything touches disk.
+
+READ_ONLY_ENV = "TAGTEAM_READ_ONLY"
+_READ_ONLY_OFF = {"", "0", "false", "no"}
+
+READ_ONLY_MESSAGE = (
+    "tagteam: refused — this process is read-only (TAGTEAM_READ_ONLY is set).\n"
+    "A helper (panel lens, brief drafter, verifier) returns text; "
+    "the caller makes the cycle-writing call."
+)
+
+
+def read_only() -> bool:
+    """True when `TAGTEAM_READ_ONLY` is set to anything but an off value
+    (`0`, `false`, `no`, empty — case-insensitive)."""
+    v = os.environ.get(READ_ONLY_ENV)
+    if v is None:
+        return False
+    return v.strip().lower() not in _READ_ONLY_OFF
+
+
+class ReadOnlyError(RuntimeError):
+    """A write was refused because this process runs in read-only mode.
+
+    `detail` is an optional second line naming the specific refusal and
+    its remedy; `str(exc)` is what the CLI prints (exit code 2)."""
+
+    def __init__(self, detail: str = ""):
+        self.detail = detail
+        super().__init__(READ_ONLY_MESSAGE + (f"\n{detail}" if detail else ""))
+
+
+class DatabaseMissing(ReadOnlyError):
+    """`tagteam.db` does not exist and read-only mode will not create it."""
+
+
+class SchemaBehind(ReadOnlyError):
+    """The DB schema is older than this release expects; read-only mode
+    never migrates."""
+
+
+class WalWithoutIndex(ReadOnlyError):
+    """`tagteam.db-wal` exists without `tagteam.db-shm`: SQLite could only
+    read it by creating the index file, or (immutable) by ignoring the
+    WAL's committed frames. Neither is acceptable read-only; fail closed."""
+
+
 # ---------- Writer lock ----------
 
 @contextmanager
@@ -146,6 +199,11 @@ def writer_lock(project_dir: str | Path) -> Iterator[None]:
     fcntl.flock is per-process on POSIX; the design explicitly does not
     support multi-host concurrency on a network drive.
     """
+    if read_only():
+        # Before the directory, the lock file, the thread lock: a read-only
+        # process leaves no trace of having tried.
+        raise ReadOnlyError("writer lock refused: every state write goes through it")
+
     project_key = str(Path(project_dir).resolve())
     thread_lock = _get_thread_lock(project_key)
 

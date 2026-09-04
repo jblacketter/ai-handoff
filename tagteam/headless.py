@@ -922,7 +922,17 @@ def read_pause(project_root: str | Path) -> dict | None:
         return {"reason": "unreadable pause marker", "path": str(p)}
 
 
+def _refuse_if_read_only() -> None:
+    """Phase 50: runtime markers (pause / cancel / turn slots) are state a
+    read-only helper must never touch — they are written outside the writer
+    lock, so they carry their own check."""
+    from tagteam import dualwrite
+    if dualwrite.read_only():
+        raise dualwrite.ReadOnlyError("runtime marker write refused")
+
+
 def write_pause(project_root: str | Path, payload: dict) -> Path:
+    _refuse_if_read_only()
     p = pause_path(project_root)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(payload)
@@ -988,6 +998,7 @@ def handoff_pause_notice(project_root: str | Path, next_agent: str | None = None
 
 
 def clear_pause(project_root: str | Path) -> bool:
+    _refuse_if_read_only()
     p = pause_path(project_root)
     if p.exists():
         p.unlink()
@@ -1010,6 +1021,7 @@ def read_cancel(project_root: str | Path) -> dict | None:
 
 
 def write_cancel(project_root: str | Path, payload: dict) -> Path:
+    _refuse_if_read_only()
     p = cancel_path(project_root)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(payload)
@@ -1019,6 +1031,7 @@ def write_cancel(project_root: str | Path, payload: dict) -> Path:
 
 
 def clear_cancel(project_root: str | Path) -> bool:
+    _refuse_if_read_only()
     p = cancel_path(project_root)
     if p.exists():
         p.unlink()
@@ -1121,6 +1134,7 @@ def claim_turn_slot(project_root: str | Path, *, kind: str, role: str,
     marker fields (existing contract: stem, phase, type, round, agent,
     provider, log_path, events_path, started_at, pid, child_ident,
     watcher_pid, watcher_ident, …). Adds kind + owner_token."""
+    _refuse_if_read_only()
     import secrets
     from tagteam.dualwrite import writer_lock
     root = Path(project_root)
@@ -1146,6 +1160,7 @@ def claim_turn_slot(project_root: str | Path, *, kind: str, role: str,
 def update_turn_slot(claim: SlotClaim, **fields) -> bool:
     """Rewrite our marker with new fields (e.g. pid/child_ident after spawn).
     Returns False (and writes nothing) if the marker is no longer ours."""
+    _refuse_if_read_only()
     from tagteam.dualwrite import writer_lock
     root = claim.root
     with writer_lock(root):
@@ -1162,6 +1177,7 @@ def update_turn_slot(claim: SlotClaim, **fields) -> bool:
 
 def release_turn_slot(claim: SlotClaim) -> bool:
     """Unlink the marker only if it still carries our owner token."""
+    _refuse_if_read_only()
     from tagteam.dualwrite import writer_lock
     root = claim.root
     with writer_lock(root):

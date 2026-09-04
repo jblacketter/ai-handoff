@@ -39,6 +39,7 @@ from pathlib import Path
 from tagteam import cycle as _cycle
 from tagteam.contract import handoff_command
 from tagteam import db as _db
+from tagteam import dualwrite
 from tagteam import headless as h
 from tagteam import procs
 from tagteam.config import (get_panel_spec, validate_panel_config, get_headless_spec,
@@ -554,6 +555,7 @@ def run_lens(spec: PanelSpec, lens: Lens, index: int, sub: Submission, *, root: 
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
         env.pop(k, None)
     env["TAGTEAM_PANEL_LENS"] = lens.name
+    env[dualwrite.READ_ONLY_ENV] = "1"   # Phase 50: a lens reads the cycle, never writes it
 
     def _on_spawn(pid: int) -> None:
         h.update_turn_slot(slot, pid=pid, child_ident=procs.identity(pid), lens=lens.name)

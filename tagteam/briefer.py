@@ -607,6 +607,10 @@ def run_briefer(project_root: str | Path, *, kind: str, spec: BriefSpec,
     env = dict(os.environ)
     for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
         env.pop(k, None)
+    # Phase 50: the child writes only its brief file; claim/finish bookkeeping
+    # is parent-side, so the child runs read-only.
+    from tagteam.dualwrite import READ_ONLY_ENV
+    env[READ_ONLY_ENV] = "1"
     log(f"   briefer: spawning {spec.provider} for event {ev.event_key} (attempt {attempt}, "
         f"{kind}) — log: {log_path}")
     spawn_error = None
@@ -799,7 +803,16 @@ def brief_command(args: list[str], project_root: str | Path | None = None, out=N
         print(f"{res.status}: {res.reason}" + (f" → {res.path}" if res.path else ""), file=out)
         return 0 if res.status in ("ok", "partial") else 1
 
-    conn = db.connect(project_dir=root)
+    from tagteam.dualwrite import DatabaseMissing
+    try:
+        conn = db.connect(project_dir=root)
+    except DatabaseMissing:
+        # Phase 50: read-only and no DB — no briefs exist.
+        if as_json:
+            print("[]" if do_list else "null", file=out); return 0
+        print(f"No briefs for {phase}/{ctype}." if do_list else "No brief for the current event.",
+              file=out)
+        return 1
     try:
         if do_list:
             rows = db.brief_history(conn, phase, ctype)
