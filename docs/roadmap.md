@@ -9,6 +9,11 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ## Phases
 
+### Phase 50: Read-only Mode
+- **Status:** Planning — plan cycle opened 2026-09-03. See `docs/phases/read-only-mode.md`
+- **Description:** The one-cycle-writing-call rule is enforced by prose, not by the CLI: panel lenses get a `TAGTEAM_PANEL_LENS` env var nobody reads (the panel only *detects* a stray write after the fact), and the `codex-brief` / verifier agents have Bash and honor-system "never write" rules. Add `TAGTEAM_READ_ONLY=1`, enforced at the two write chokepoints (`dualwrite.writer_lock` and the `db` writer functions) before anything touches disk, surfaced by the CLI as one refusal line with exit 2. Panel lens children get it; headless turns do not. Contract gains a "read-only helpers" paragraph. Prerequisite for ever shipping reviewer agents in the plugin (deferred from Phase 48).
+- **Depends on:** Phase 39
+
 ### Phase 49: Legacy Skill Drift
 - **Status:** ✅ Complete — plan approved round 3, impl approved round 3 (2026-08-29); PR #29 merged; released as **3.10.1** (tag `v3.10.1`, PyPI 2026-08-29). See `docs/phases/legacy-skill-drift.md`
 - **Description:** After Phase 48, superseded pre-plugin artifacts still describe the old contract: ten user-level `~/.claude/skills/handoff-*` skills competed with `tagteam:handoff` in every project (removed by hand on the arbiter's machine), the shipped `data/workflows.md` documents the dead `/handoff-*` command family into every project, and `server.py` still emits `/handoff-cycle`. Retire the dead family from what tagteam ships; **detect and report** superseded user-level skills from `setup`/`upgrade` rather than delete them (a project tool never writes to `~/.claude/` — provenance rule from Phase 48). Ruled: detect-and-report only; name matches are *candidates* (no provenance), reported by resolved path with no shell command; `upgrade` reports once per run.
@@ -447,6 +452,9 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 
 ### Reviewer wake delivery (possible one-off, unscheduled)
 - **Status:** Observed once on 2026-08-30 (Codex not woken when the turn flipped to reviewer; the human had to nudge it). Arbiter ruling 2026-09-03: not reproduced, treat as a possible one-off, no fix scheduled. Evidence and suggested diagnostics in `docs/tagteam-issue-reviewer-wake-delivery-2026-08-30.md` — if it recurs, promote to a phase from that note.
+
+### Reviewer agents in the plugin (deferred from Phase 48)
+- **Status:** Deferred 2026-09-03 by arbiter ruling; depends on Phase 50 (read-only mode). Ship `codex-brief` (the submission drafter) in the plugin only after Phase 50 gives the CLI an enforced read-only mode, and extend Phase 49's user-level conflict report to agents. `doc-drift` is generic, not tagteam-specific — leave it out of the plugin. Before scheduling: check whether the user-level `codex-brief` briefs are actually what gets submitted or get rewritten; if rewritten, the agent is not earning its keep.
 
 ### Licensing & attribution decision
 - **Status:** Done 2026-08-16 — **relicensed MIT → Apache-2.0** (`LICENSE` replaced, `NOTICE` added, `pyproject.toml` license + classifier, `CITATION.cff`, README License section). First Apache-2.0 release is **3.1.1** (2026-08-16; docs/license/CI only, no behavior change from 3.1.0); 3.1.0 and earlier stay MIT on PyPI (nothing published can be retracted). Not run through a handoff cycle — mechanical, no code paths touched.
