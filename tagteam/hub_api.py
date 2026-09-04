@@ -97,13 +97,20 @@ def classify_registry(paths: list[str], *,
 # ---------------------------------------------------------------------------
 
 def read_only_connect(project_dir: str | Path) -> sqlite3.Connection | None:
-    """`mode=ro` connection to an EXISTING project DB, or None. Never creates
-    `.tagteam/` or the file, never migrates. Caller closes."""
+    """Read-only connection to an EXISTING project DB, or None. Never creates
+    `.tagteam/`, the file or a sidecar, never migrates. Caller closes."""
+    from tagteam import db as _db
+    from tagteam.dualwrite import DatabaseMissing, ReadOnlyError
     db_path = Path(project_dir) / ".tagteam" / "tagteam.db"
-    if not db_path.is_file():
+    try:
+        # Phase 50: the sidecar-aware opener (plain `mode=ro` cannot open a
+        # cleanly closed WAL DB that has no sidecars). Older schemas stay
+        # readable here — the hub queries only the tables it knows.
+        conn = _db.read_only_connect(db_path=db_path, require_current_schema=False)
+    except DatabaseMissing:
         return None
-    uri = "file:" + db_path.resolve().as_posix() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+    except ReadOnlyError as e:
+        raise ProjectDataError(f"db: {e.detail}")
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()

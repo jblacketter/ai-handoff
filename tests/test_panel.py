@@ -349,8 +349,25 @@ class TestRunPanel:
         res = _run(paneled)
         assert res.status == "fallback" and res.dispatch and "every lens failed" in res.reason
 
-    def test_rogue_lens_superseded(self, paneled, monkeypatch):
+    def test_rogue_lens_write_is_refused(self, paneled, monkeypatch, tmp_path):
+        """Phase 50: the lens child runs read-only, so a rogue `cycle add` is
+        refused by the CLI (exit 2) before it touches the cycle. The lens then
+        has no verdict, so the panel falls back to the ordinary reviewer turn."""
         _verdicts(monkeypatch, {"correctness": "rogue", "scope": "approve", "verification": "approve"})
+        rogue_out = tmp_path / "rogue.json"
+        monkeypatch.setenv("FAKE_ROGUE_OUT", str(rogue_out))
+        before = cycle_mod.read_rounds_file("feat-x", "impl", str(paneled))
+        res = _run(paneled)
+        attempt = json.loads(rogue_out.read_text(encoding="utf-8"))
+        assert attempt["rc"] == 2 and "tagteam: refused" in attempt["stderr"]
+        assert res.status == "fallback"
+        assert cycle_mod.read_rounds_file("feat-x", "impl", str(paneled)) == before
+        assert _state(paneled)["turn"] == "reviewer"
+
+    def test_rogue_lens_superseded(self, paneled, monkeypatch):
+        """The post-hoc net: a write through a path the switch does not cover
+        (simulated by a lens that clears it) is still detected and supersedes."""
+        _verdicts(monkeypatch, {"correctness": "rogue-unset", "scope": "approve", "verification": "approve"})
         res = _run(paneled)
         assert res.status == "superseded" and res.dispatch is False
         rows = _rows(paneled)
@@ -503,7 +520,7 @@ class TestInterjections:
         # superseded (rogue) → nothing stamped either
         cycle_mod.add_round("feat-x", "impl", "reviewer", "REQUEST_CHANGES", 1, "no", str(paneled), updated_by="Codex")
         cycle_mod.add_round("feat-x", "impl", "lead", "SUBMIT_FOR_REVIEW", 2, "again", str(paneled), updated_by="Claude")
-        _verdicts(monkeypatch, {"correctness": "rogue", "scope": "approve", "verification": "approve"})
+        _verdicts(monkeypatch, {"correctness": "rogue-unset", "scope": "approve", "verification": "approve"})
         assert _run(paneled).status == "superseded"
         assert _delivered(paneled)[n1] is None
 

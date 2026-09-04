@@ -407,8 +407,8 @@ Reviewer panel (opt-in: `panel: {enabled: true}`; 2–3 lens reviews merged into
 """
 
 
-def main() -> int:
-    """Main CLI entry point."""
+def _dispatch() -> int:
+    """Dispatch `sys.argv` to the subcommand (see `main`)."""
     if len(sys.argv) < 2:
         print(HELP_TEXT)
         return 1
@@ -530,6 +530,20 @@ def main() -> int:
     print(f"Unknown command: {command}")
     print("Run 'tagteam --help' for usage.")
     return 1
+
+
+def main() -> int:
+    """Main CLI entry point.
+
+    Phase 50: a write refused under `TAGTEAM_READ_ONLY` surfaces here as one
+    message (exit 2) wherever in the package it was refused.
+    """
+    from tagteam.dualwrite import ReadOnlyError
+    try:
+        return _dispatch()
+    except ReadOnlyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

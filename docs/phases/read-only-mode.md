@@ -1,8 +1,8 @@
 # Phase 50: Read-only mode — helper processes cannot write the cycle
 
 ## Status
-- [ ] Planning — round 1 submitted (2026-09-03); round 2: reviewer blocker on `db.connect` mutating (mkdir / create / WAL pragma / migrate) — design revised, marked *(r2)*; round 3: reviewer gap on the WAL-only sidecar state — fail-closed rule, all four combinations measured, marked *(r3)*
-- [ ] Implementation — branch `phase-50-read-only-mode`
+- [x] Planning — approved round 3 (2026-09-04, 4cb5f90). Round 1 submitted (2026-09-03); round 2: reviewer blocker on `db.connect` mutating (mkdir / create / WAL pragma / migrate) — design revised, marked *(r2)*; round 3: reviewer gap on the WAL-only sidecar state — fail-closed rule, all four combinations measured, marked *(r3)*
+- [x] Implementation — branch `phase-50-read-only-mode`; impl cycle opened 2026-09-04
 - [ ] Implementation Review
 - [ ] Complete
 
@@ -298,3 +298,31 @@ Focused tests while working; the on-submit gate makes the one full-suite run.
 - `tests/test_briefer.py`: whichever of §3's two outcomes applies, pinned.
 - Contract: the existing three-copies byte-identity test and the vendored-hash
   test pass with the new paragraph.
+
+## Implementation notes (impl r1)
+
+Deviations from the approved plan, each found while implementing:
+
+- **Runtime markers were not under the writer lock.** The plan listed "pause
+  markers" among the writes `writer_lock` covers; `headless.write_pause`,
+  `clear_pause`, `write_cancel`, `clear_cancel` and the turn-slot
+  claim/update/release write their files directly. They now carry their own
+  `_refuse_if_read_only()` check (`tagteam pause` from a helper → exit 2;
+  tested in `TestRuntimeMarkers` and the CLI write matrix).
+- **`brief` on an absent DB** follows the command's existing empty semantics
+  ("No briefs …", exit 1; `[]`/`null` with `--json`, exit 0) rather than the
+  plan's blanket "exit 0", so an absent DB and an empty one answer alike.
+- **`cycle rounds` reads the canonical files**, not the DB, so the
+  WAL-visibility-through-the-CLI assertion in the matrix uses the DB-backed
+  reader `usage --json` (a WAL-held usage row). The property itself is pinned
+  at the `read_only_connect` level.
+- **Hub reader** opts out of the schema check (`require_current_schema=False`):
+  the hub reads older DBs by design and its existing test pins v3/v4/v5.
+- **Tests** for the child environments and the hub fix live in
+  `tests/test_readonly.py` (they reuse the panel / headless / briefer
+  harnesses) rather than spread across those files. `tests/test_panel.py`'s
+  rogue-lens test split in two: `rogue` is now *refused* (exit 2, no round,
+  panel falls back) and `rogue-unset` — a lens that clears the switch, i.e. a
+  write through a path the switch does not cover — still trips the post-hoc
+  detection and supersedes. The fake agent records the attempt
+  (`FAKE_ROGUE_OUT`) and the switch it saw (`read_only` in the capture).

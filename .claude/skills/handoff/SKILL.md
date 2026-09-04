@@ -80,6 +80,8 @@ Never run the suite *and* let the gate run it on the same tree (`gate check` wit
 
 When `TAGTEAM_STEP_B=1`, `docs/handoffs/<phase>_<type>.md` is auto-rendered on every cycle write. Do not hand-edit that file; update the cycle with `tagteam cycle add` instead. If a write produces no markdown update, check `handoff-diagnostics.jsonl` for an auto-export diagnostic.
 
+**Read-only helpers.** Any process you delegate to while it is your turn — a brief drafter, a verifier subagent, a panel lens — must run with `TAGTEAM_READ_ONLY=1` in its environment. With it set, the CLI refuses every cycle-writing command (`cycle add`/`init`, `state set`, `rule`, `interject`, `pause`/`resume`, `gate run`, …) before anything touches disk, and never creates or migrates the project database; read commands (`cycle rounds`/`status`, `gate status`, `panel status`, `state`, `contract`, …) work as usual. The helper returns text; the turn's one cycle-writing call stays with you. Tagteam sets the variable itself for the children it spawns (panel lenses, the escalation briefer); headless lead/reviewer turns never get it.
+
 **Mid-review amendment.** If new info arrives (e.g., the human arbiter answers an open question) while the reviewer is still on your submission and you haven't been handed back the turn, run:
 
 ```
