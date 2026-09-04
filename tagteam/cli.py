@@ -407,14 +407,79 @@ Reviewer panel (opt-in: `panel: {enabled: true}`; 2–3 lens reviews merged into
 """
 
 
+# Phase 50: what a read-only helper may run. Under `TAGTEAM_READ_ONLY` every
+# other invocation is refused BEFORE dispatch — so a command that mutates the
+# tree through a path the low-level guards do not cover is still stopped.
+# The table lists READS (the small, safe set): a new command is refused by
+# default until it is classified here; `tests/test_readonly.py` pins that
+# every dispatched command is classified.
+_HELP = {"-h", "--help", "help"}
+
+
+def _no_flag(*flags: str):
+    return lambda rest: not (set(rest) & set(flags))
+
+
+def _sub_in(*subs: str):
+    return lambda rest: bool(rest) and rest[0] in subs
+
+
+READ_ONLY_COMMANDS: dict[str, "callable"] = {
+    "cycle": _sub_in("status", "rounds"),
+    "state": lambda rest: not rest or (rest[0] == "diagnose" and "--clean" not in rest),
+    "gate": _sub_in("status", "list"),
+    "panel": _sub_in("status", "lenses", "list"),
+    "roadmap": _sub_in("queue", "phases", "check", "graph", "ready"),
+    "interject": lambda rest: "--list" in rest,
+    "brief": _no_flag("--generate"),
+    "hub": _sub_in("list"),
+    "registry": _sub_in("list"),
+    "usage": lambda rest: True,
+    "contract": lambda rest: True,
+    "tail": lambda rest: True,
+    "hook": lambda rest: True,
+}
+# Never a helper's business: parents, humans and installers only.
+READ_ONLY_REFUSED = ("quickstart", "init", "setup", "migrate", "watch", "pause", "resume", "cancel-turn",
+                     "rollback", "rule", "session", "serve", "lead", "tui", "upgrade")
+
+
+def read_only_refusal(argv: list[str]) -> str | None:
+    """Detail line when `argv` (command + rest) is not a read invocation."""
+    if not argv or argv[0].lower() in _HELP:
+        return None
+    command, rest = argv[0].lower(), argv[1:]
+    if set(rest) & _HELP:
+        return None
+    allowed = READ_ONLY_COMMANDS.get(command)
+    if allowed is not None and allowed(rest):
+        return None
+    shown = " ".join([command] + rest[:1])
+    return (f"`tagteam {shown}` is not a read command; a read-only helper may run: "
+            + ", ".join(f"{c} {'/'.join(v)}" if isinstance(v, tuple) else c
+                        for c, v in _read_only_summary()))
+
+
+def _read_only_summary() -> list[tuple[str, tuple[str, ...] | None]]:
+    return [("cycle", ("status", "rounds")), ("state", ("diagnose",)), ("gate", ("status", "list")),
+            ("panel", ("status", "lenses", "list")), ("roadmap", ("queue", "phases", "check", "graph", "ready")),
+            ("interject --list", None), ("brief", None), ("hub list", None),
+            ("registry list", None), ("usage", None), ("contract", None), ("tail", None), ("hook", None)]
+
+
 def main() -> int:
     """Main CLI entry point.
 
-    Phase 50: a write refused under `TAGTEAM_READ_ONLY` surfaces here as one
-    message (exit 2) wherever in the package it was refused.
+    Phase 50: under `TAGTEAM_READ_ONLY` only the invocations in
+    `READ_ONLY_COMMANDS` are dispatched; anything else — and any write refused
+    deeper in the package — surfaces here as one message, exit 2.
     """
-    from tagteam.dualwrite import ReadOnlyError
+    from tagteam.dualwrite import ReadOnlyError, read_only
     try:
+        if read_only():
+            detail = read_only_refusal(sys.argv[1:])
+            if detail is not None:
+                raise ReadOnlyError(detail)
         return _dispatch()
     except ReadOnlyError as exc:
         print(str(exc), file=sys.stderr)

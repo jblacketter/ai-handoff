@@ -326,3 +326,39 @@ Deviations from the approved plan, each found while implementing:
   write through a path the switch does not cover — still trips the post-hoc
   detection and supersedes. The fake agent records the attempt
   (`FAKE_ROGUE_OUT`) and the switch it saw (`read_only` in the capture).
+
+## Implementation notes (impl r2 — reviewer's three bypasses)
+
+The reviewer found three mutators outside the guards: `migrate --to-sqlite
+--force` deleted the DB files before its guarded import; `state repair-db
+--force-clear` reached `clear_db_invalid()` outside the lock; `cancel-turn`
+unlinked stale `inflight.json` directly. Two changes:
+
+1. **Low-level guards** via a public `dualwrite.refuse_if_read_only(detail)`:
+   `mark_db_invalid` / `clear_db_invalid`, `migrate._remove_sqlite_db_files`,
+   and the stale-inflight cleanup in `controls.cancel_turn_command`. The
+   headless marker helper now delegates to it. Each is tested *below* the CLI
+   (direct calls) with the artefact's bytes asserted unchanged.
+2. **A CLI read allowlist — reversing the plan's "no per-subcommand table".**
+   The plan rejected a table of *writes* because it would drift. A table of
+   *reads* drifts the safe way: under the switch `main()` dispatches only
+   `READ_ONLY_COMMANDS` (cycle status/rounds; state, state diagnose; gate
+   status/list; panel status/lenses/list; roadmap queue/phases/check/graph/
+   ready; interject --list; brief without --generate; hub list; registry
+   list; usage; contract; tail; hook) and refuses everything else *before*
+   dispatch — so a mutator through a filesystem path no guard covers is still
+   stopped. A new command is refused by default until classified;
+   `test_every_dispatched_command_is_classified` pins that every `command ==`
+   in the dispatcher is in the read table or the explicit refused tuple.
+   `migrate --dry-run` is refused too (its dry run goes through the decorated
+   importer, and a helper has no business migrating).
+
+The CLI write matrix now runs on an *armed* project (pause marker, db_invalid
+sentinel, stale inflight metadata, populated DB) over: cycle add/init, state
+set/reset/diagnose --clean/sync/repair-db [--force-clear], interject add/
+--retire, pause, resume, cancel-turn, gate run, panel run, migrate --force and
+--dry-run, roadmap resume, brief --generate, registry/hub unregister, session
+start, watch, setup — every one exit 2 with the tree byte-identical. Not
+pinned: cancel-turn with a *valid* live inflight (needs a real child + watcher
+identity; the guarded `write_cancel` precedes the signal, covered by
+`TestRuntimeMarkers`).

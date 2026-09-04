@@ -439,5 +439,7 @@ def _arg_value(args: list[str], flag: str) -> str | None:
 
 def _remove_sqlite_db_files(db_path: Path) -> None:
     """Remove a SQLite DB and its WAL sidecars if present."""
+    from tagteam.dualwrite import refuse_if_read_only
+    refuse_if_read_only("migrate --force would delete the project database")   # Phase 50
     for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
         path.unlink(missing_ok=True)

@@ -132,6 +132,13 @@ READ_COMMANDS = [
     ("roadmap", "check"),
     ("usage", "--json"),
     ("brief", "--list", "--phase", PHASE, "--type", "plan"),
+    ("state", "diagnose"),
+    ("gate", "list"),
+    ("panel", "lenses"),
+    ("roadmap", "phases"),
+    ("roadmap", "graph"),
+    ("registry", "list"),
+    ("hook", "session-start"),
 ]
 DB_ONLY_READERS = {("usage", "--json"), ("interject", "--list"),
                    ("brief", "--list", "--phase", PHASE, "--type", "plan")}
@@ -145,6 +152,25 @@ WRITE_COMMANDS = [
      "--round", "1", "--updated-by", "Codex"),
     ("interject", "a note from the arbiter"),
     ("pause", "--reason", "hold"),
+    ("resume",),
+    ("cancel-turn",),
+    ("gate", "run"),
+    ("panel", "run"),
+    ("state", "reset"),
+    ("state", "diagnose", "--clean"),
+    ("state", "sync"),
+    ("state", "repair-db"),
+    ("state", "repair-db", "--force-clear"),
+    ("migrate", "--to-sqlite", "--force"),
+    ("migrate", "--to-sqlite", "--dry-run"),
+    ("roadmap", "resume"),
+    ("interject", "--retire", "1"),
+    ("brief", "--generate", "--phase", PHASE, "--type", "plan"),
+    ("registry", "unregister", "/nowhere"),
+    ("hub", "unregister", "/nowhere"),
+    ("session", "start"),
+    ("watch",),
+    ("setup", "."),
 ]
 
 
@@ -568,3 +594,115 @@ class TestHubReader:
         _dbp(d).write_bytes(b"not a database at all" * 10)
         with pytest.raises(hub_api.ProjectDataError):
             hub_api.read_only_connect(d)
+
+
+# ---------------------------------------------------------------------------
+# impl r2: the three bypasses + the CLI allowlist
+# ---------------------------------------------------------------------------
+
+def _armed(tmp_path: Path) -> Path:
+    """A populated project with every runtime artefact a write path could
+    touch: pause marker, db_invalid sentinel, stale inflight metadata."""
+    d = _with_cycle(_proj(tmp_path))
+    h.write_pause(d, {"reason": "held", "by": "arbiter"})
+    dualwrite.mark_db_invalid(d, reason="test sentinel")
+    ip = h.inflight_path(d)
+    ip.parent.mkdir(parents=True, exist_ok=True)
+    ip.write_text(json.dumps({"stem": "stale", "pid": None}), encoding="utf-8")
+    _checkpoint(_dbp(d)); _drop_sidecars(_dbp(d))
+    return d
+
+
+class TestBypassesClosed:
+    def test_every_write_command_refused_on_an_armed_project(self, tmp_path, monkeypatch, capsys):
+        d = _armed(tmp_path)
+        monkeypatch.setenv(RO, "1")
+        before = _snapshot(d)
+        for argv in WRITE_COMMANDS:
+            rc, out, err = _cli(monkeypatch, capsys, d, *argv)
+            assert rc == 2 and "tagteam: refused" in err, (argv, rc, out, err)
+            assert _diff(before, _snapshot(d)) == {"created": [], "removed": [], "changed": []}, argv
+
+    def test_migrate_force_cannot_delete_the_db(self, tmp_path, monkeypatch, capsys):
+        """Bypass 1 — the allowlist stops the CLI; the destructive helper is
+        guarded on its own (called directly, below the allowlist)."""
+        from tagteam import migrate
+        d = _armed(tmp_path)
+        monkeypatch.setenv(RO, "1")
+        before = _snapshot(d)
+        monkeypatch.chdir(d)
+        with pytest.raises(ReadOnlyError):
+            migrate.migrate_to_sqlite_command(["--to-sqlite", "--force"])
+        with pytest.raises(ReadOnlyError):
+            migrate._remove_sqlite_db_files(_dbp(d))
+        assert _dbp(d).is_file()
+        assert _diff(before, _snapshot(d)) == {"created": [], "removed": [], "changed": []}
+
+    def test_db_invalid_sentinel_untouchable(self, tmp_path, monkeypatch):
+        """Bypass 2 — `state repair-db --force-clear` reached clear_db_invalid()
+        outside the lock; the sentinel mutators now refuse themselves."""
+        d = _armed(tmp_path)
+        flag = d / ".tagteam" / "DB_INVALID"
+        before = flag.read_bytes()
+        monkeypatch.setenv(RO, "1")
+        with pytest.raises(ReadOnlyError):
+            dualwrite.clear_db_invalid(d)
+        with pytest.raises(ReadOnlyError):
+            dualwrite.mark_db_invalid(d, reason="again")
+        assert flag.read_bytes() == before and dualwrite.is_db_invalid(d)
+
+    def test_stale_inflight_cleanup_refused(self, tmp_path, monkeypatch, capsys):
+        """Bypass 3 — cancel-turn's stale-metadata unlink bypassed write_cancel."""
+        from tagteam import controls
+        d = _armed(tmp_path)
+        ip = h.inflight_path(d)
+        before = ip.read_bytes()
+        monkeypatch.setenv(RO, "1")
+        with pytest.raises(ReadOnlyError):
+            controls.cancel_turn_command([], project_root=d)
+        assert ip.read_bytes() == before
+        capsys.readouterr()
+
+    def test_off_switch_bypass_paths_still_work(self, tmp_path, monkeypatch, capsys):
+        from tagteam import controls
+        monkeypatch.setenv(RO, "0")
+        d = _armed(tmp_path)
+        assert controls.cancel_turn_command([], project_root=d) == 1     # stale → cleaned
+        assert not h.inflight_path(d).exists()
+        dualwrite.clear_db_invalid(d)
+        assert not dualwrite.is_db_invalid(d)
+        capsys.readouterr()
+
+
+class TestAllowlist:
+    @pytest.mark.parametrize("argv", [
+        ["cycle", "rounds", "--phase", "p", "--type", "plan"], ["cycle", "status"], ["state"],
+        ["state", "diagnose"], ["gate", "status"], ["gate", "list"], ["panel", "status"], ["panel", "lenses"],
+        ["roadmap", "queue"], ["roadmap", "ready"], ["roadmap", "check"], ["roadmap", "graph"],
+        ["interject", "--list"], ["brief", "--list"], ["usage"], ["contract"], ["hook", "session-start"],
+        ["registry", "list"], ["hub", "list"], ["tail"], ["help"], ["--help"], ["cycle", "add", "--help"],
+    ])
+    def test_reads_allowed(self, argv):
+        assert cli.read_only_refusal(argv) is None, argv
+
+    @pytest.mark.parametrize("argv", [
+        ["cycle", "add"], ["cycle", "init"], ["cycle", "render"], ["state", "set"], ["state", "reset"],
+        ["state", "diagnose", "--clean"], ["state", "sync"], ["state", "repair-db"], ["gate", "run"],
+        ["gate", "check"], ["panel", "run"], ["roadmap", "resume"], ["roadmap", "worktree", "x"],
+        ["interject", "a note"], ["interject", "--retire", "1"], ["brief", "--generate"], ["migrate"],
+        ["migrate", "--to-sqlite", "--dry-run"], ["pause"], ["resume"], ["cancel-turn"], ["rule", "approve"],
+        ["hub", "unregister", "x"], ["registry", "unregister", "x"], ["session", "start"], ["serve"],
+        ["watch"], ["setup", "."], ["init"], ["quickstart"], ["upgrade"], ["lead"], ["tui"], ["rollback", "1.0"],
+        ["no-such-command"],
+    ])
+    def test_writes_refused(self, argv):
+        detail = cli.read_only_refusal(argv)
+        assert detail is not None and "is not a read command" in detail, argv
+
+    def test_every_dispatched_command_is_classified(self):
+        src = Path(cli.__file__).read_text(encoding="utf-8")
+        dispatched = set(re.findall(r'command == "([\w-]+)"', src[src.index("def _dispatch("):]))
+        assert len(dispatched) >= 20
+        unclassified = dispatched - set(cli.READ_ONLY_COMMANDS) - set(cli.READ_ONLY_REFUSED)
+        assert unclassified == set(), unclassified
+        assert set(cli.READ_ONLY_COMMANDS) & set(cli.READ_ONLY_REFUSED) == set()
