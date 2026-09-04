@@ -445,6 +445,9 @@ Tagteam - A collaboration framework enabling structured, multi-phase AI-to-AI co
 - ~~Roadmap as DAG (`depends_on`, parallel phases in worktrees)~~ → promoted to Phase 40 (2026-08-16)
 - Thin MCP server (revisit if the headless path proves insufficient for non-Claude agents)
 
+### Reviewer wake delivery (possible one-off, unscheduled)
+- **Status:** Observed once on 2026-08-30 (Codex not woken when the turn flipped to reviewer; the human had to nudge it). Arbiter ruling 2026-09-03: not reproduced, treat as a possible one-off, no fix scheduled. Evidence and suggested diagnostics in `docs/tagteam-issue-reviewer-wake-delivery-2026-08-30.md` — if it recurs, promote to a phase from that note.
+
 ### Licensing & attribution decision
 - **Status:** Done 2026-08-16 — **relicensed MIT → Apache-2.0** (`LICENSE` replaced, `NOTICE` added, `pyproject.toml` license + classifier, `CITATION.cff`, README License section). First Apache-2.0 release is **3.1.1** (2026-08-16; docs/license/CI only, no behavior change from 3.1.0); 3.1.0 and earlier stay MIT on PyPI (nothing published can be retracted). Not run through a handoff cycle — mechanical, no code paths touched.
 - **History:** 2026-08-15 interim decision was "stay open, keep MIT" with `CITATION.cff` + README link-back; that was explicitly a placeholder pending a stronger-attribution license. Apache-2.0 chosen for the express patent grant, the "state your changes" clause on modified files, the NOTICE-file attribution that must travel with redistributions, and the trademark clause — all while staying permissive so internal adoption (the reputation path) isn't deterred.
