@@ -927,8 +927,7 @@ def _refuse_if_read_only() -> None:
     read-only helper must never touch — they are written outside the writer
     lock, so they carry their own check."""
     from tagteam import dualwrite
-    if dualwrite.read_only():
-        raise dualwrite.ReadOnlyError("runtime marker write refused")
+    dualwrite.refuse_if_read_only("runtime marker write refused")
 
 
 def write_pause(project_root: str | Path, payload: dict) -> Path:

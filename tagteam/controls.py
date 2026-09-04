@@ -235,6 +235,8 @@ def cancel_turn_command(args: list[str], project_root: str | Path | None = None,
     stem = inflight.get("stem")
     if not ok:
         print(f"Refusing to signal: {why}", file=out)
+        from tagteam.dualwrite import refuse_if_read_only
+        refuse_if_read_only("stale inflight.json cleanup refused")   # Phase 50
         try:
             h.inflight_path(root).unlink()
             print("  Removed stale inflight.json (metadata only; nothing was killed).", file=out)

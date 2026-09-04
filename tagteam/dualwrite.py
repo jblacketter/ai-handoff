@@ -147,6 +147,14 @@ def read_only() -> bool:
     return v.strip().lower() not in _READ_ONLY_OFF
 
 
+def refuse_if_read_only(detail: str) -> None:
+    """Raise `ReadOnlyError(detail)` when the switch is set. For mutators that
+    do not go through `writer_lock` or a `db` writer (runtime markers, the
+    db_invalid sentinel, destructive helpers)."""
+    if read_only():
+        raise ReadOnlyError(detail)
+
+
 class ReadOnlyError(RuntimeError):
     """A write was refused because this process runs in read-only mode.
 
@@ -307,6 +315,7 @@ def mark_db_invalid(
     and store `since`/`reason` there if/when DB-side observability
     becomes load-bearing.
     """
+    refuse_if_read_only("db_invalid sentinel write refused (mark_db_invalid)")
     flag_path = _db_invalid_flag_path(project_dir)
     _ensure_tagteam_dir(project_dir)
 
@@ -335,6 +344,7 @@ def clear_db_invalid(project_dir: str | Path) -> None:
     as last-resort; it should call this directly with appropriate
     logging at the call site, not via this helper.
     """
+    refuse_if_read_only("db_invalid sentinel write refused (clear_db_invalid)")
     flag_path = _db_invalid_flag_path(project_dir)
     try:
         flag_path.unlink()
